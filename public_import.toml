@@ -148,6 +148,16 @@ path = "docs/onboarding"
 kind = "directory"
 overwrite = true
 
+# The agent-facing manual. It travels for the same reason the onboarding lane
+# does: this system has a hard requirement that an AI agent with local disk
+# access is the primary way a person uses it, and a public clone whose agent has
+# no document explaining what the system is for ships the requirement without
+# the means to meet it. `skills/operate-agent-os/SKILL.md` points at it by path.
+[[allow]]
+path = "docs/AGENT_MANUAL.md"
+kind = "file"
+overwrite = true
+
 # Two files out of docs/diagrams/, not the directory. The rest of that folder is
 # working engineering diagrams (the DBOS boundary, the refinery map) which are
 # part of the log this manifest deliberately withholds. These two are the
