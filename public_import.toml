@@ -148,32 +148,27 @@ path = "docs/onboarding"
 kind = "directory"
 overwrite = true
 
-# The four documents the travelling test suite reads.
+# The two operator runbooks the travelling test suite reads.
 #
 # tests/ travels whole and docs/ does not, and that asymmetry shipped a suite
-# which had never passed in the snapshot since its first commit: sixteen tests
-# asserted properties of documents that were not there. Each of these is the
-# subject of a test that already travels, so they are not narrative - they are
-# fixtures with prose around them.
+# which had never passed in the snapshot. The fix is not to ship whatever a test
+# names: a document travels only when a public clone has its own reason to want
+# it, and tests whose subject is private-repo-owned skip instead.
 #
-# tests/test_deep_think_gawd_doc.py compiles the first one and drives it to
-# SUCCEEDED. tests/test_operator_command_surface.py scans the fenced bash in the
-# next three and asserts every command in them actually resolves.
-# tests/test_staffing.py reads the shooting script and fails when its named
-# seating disagrees with configs/staffing.toml.
+# These two earn it on their own. They are the instructions for driving a system
+# this repository ships, so a public clone that can run the software and cannot
+# read how to operate it is missing the half that matters.
+# tests/test_operator_command_surface.py scans their fenced bash and asserts
+# every command resolves, which is what keeps them true.
 #
-# All four were scanned against docs/public_release_checklist.md's denylist on
+# Deliberately NOT here: docs/demo_shooting_script.md, a recording plan that
+# names what not to show on camera and which shots are pre-recorded, and
+# docs/deep_think_buys_a_second_pass_gawd.md, an unrun plan of this repository's
+# whose test is a pre-flight check with no public meaning. Both scanned clean
+# against the release denylist; neither has a reason to be read by a stranger.
+#
+# Both were scanned against docs/public_release_checklist.md's denylist on
 # 2026-08-15 with zero hits.
-[[allow]]
-path = "docs/deep_think_buys_a_second_pass_gawd.md"
-kind = "file"
-overwrite = true
-
-[[allow]]
-path = "docs/demo_shooting_script.md"
-kind = "file"
-overwrite = true
-
 [[allow]]
 path = "docs/cockpit_e2e_runbook.md"
 kind = "file"

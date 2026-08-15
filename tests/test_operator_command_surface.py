@@ -42,10 +42,19 @@ _COMPAT_SHELL = _REPOSITORY_ROOT / "agent_coordination_mcp.py"
 # are dated records of what was run on a particular day, and a test that forced
 # them to keep parsing against today's grammar would be asking history to stay
 # current.
-_OPERATOR_DOCS = (
+# Only the ones present in this checkout. The public snapshot carries this suite
+# and only some of these documents, and a document is not dragged into the
+# snapshot to keep a test green: the guard runs on whatever is here.
+_CANDIDATE_OPERATOR_DOCS = (
     "docs/demo_shooting_script.md",
     "docs/cockpit_e2e_runbook.md",
     "docs/work_unit_operator_walkthrough.md",
+)
+
+_OPERATOR_DOCS = tuple(
+    relative
+    for relative in _CANDIDATE_OPERATOR_DOCS
+    if (_REPOSITORY_ROOT / relative).exists()
 )
 
 # Only fenced bash blocks. Prose that names the command in backticks is

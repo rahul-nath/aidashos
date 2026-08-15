@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from work_unit_support import install_simulated_engine, settle_operator_decisions, start_inline
 
 from local_first_agent_os.work_units import repository as repo
@@ -32,6 +33,24 @@ from local_first_agent_os.work_units.lifecycle import (
 )
 
 DOC_PATH = Path(__file__).resolve().parents[1] / "docs" / "deep_think_buys_a_second_pass_gawd.md"
+
+# This file is a pre-flight check on one plan, not a fixture test.
+#
+# The distinction decides whether the document travels. `docs/examples/` is the
+# fixture convention, it is allowlisted into the public snapshot, and
+# `work_unit_support.ACCEPTANCE_DESIGN_DOC` is how a test that needs *a*
+# document gets one. This test needs *this* document, because its whole purpose
+# is to catch a compile regression in a plan somebody intends to dispatch, and a
+# regression caught here costs a recompile where one caught at dispatch time
+# costs an agent hour.
+#
+# That value is entirely private-repo-side. A public clone has no reason to
+# carry an unrun plan of this repository's, so the check skips there rather than
+# dragging the document along behind it.
+pytestmark = pytest.mark.skipif(
+    not DOC_PATH.exists(),
+    reason="deep_think_buys_a_second_pass_gawd.md is private-repo-owned; nothing to pre-flight",
+)
 MILESTONE_KEYS = ("0", "1", "2", "3", "4", "5")
 REVIEW_MILESTONE = "4"
 

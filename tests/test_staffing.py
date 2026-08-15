@@ -263,11 +263,17 @@ def test_prose_that_names_the_seating_matches_the_config() -> None:
     spoken = {Harness.CLAUDE: "Claude", Harness.CODEX: "Codex"}
     written = {Harness.CLAUDE: "Claude Code", Harness.CODEX: "Codex"}
 
-    demo = (repo_root / "docs" / "demo_shooting_script.md").read_text(encoding="utf-8")
-    assert f"implementation was {spoken[senior]}, review is {spoken[staff]}" in demo, (
-        "the demo's 3:30 narration names the wrong vendor for the seat; "
-        "update docs/demo_shooting_script.md to match configs/staffing.toml"
-    )
+    # The shooting script is private-repo-owned: it is a recording plan, it names
+    # what not to show on camera, and publishing it would tell a viewer which
+    # parts of the video were pre-recorded. So it is checked when present rather
+    # than shipped to keep this assertion reachable.
+    demo_path = repo_root / "docs" / "demo_shooting_script.md"
+    if demo_path.exists():
+        demo = demo_path.read_text(encoding="utf-8")
+        assert f"implementation was {spoken[senior]}, review is {spoken[staff]}" in demo, (
+            "the demo's 3:30 narration names the wrong vendor for the seat; "
+            "update docs/demo_shooting_script.md to match configs/staffing.toml"
+        )
 
     readme = (repo_root / "README.md").read_text(encoding="utf-8")
     assert f"that is {written[senior]} implementing and {written[staff]} reviewing" in readme, (
