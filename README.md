@@ -14,7 +14,7 @@ There is no hosted service, no cloud backend, and nothing reports home.
 
 One engineer who runs coding agents and wants the work to keep moving, accountably, when nobody is watching a screen.
 
-You drive it from a terminal, with a read-only web console alongside.
+You drive it from a terminal, with a web console alongside for reading state and resolving approval gates.
 You should be comfortable with git, Docker, and editing a TOML file.
 It is a working personal system rather than a product, and if you do not write code it is not aimed at you yet.
 
@@ -42,11 +42,12 @@ Then:
 ```bash
 pi /start /new-project --target-project-id my_project   # author the document
 pi /approve-most-recent                                 # review the plan, permissions, and gates
-pi /dispatch-once                                       # claim one milestone and run it
+pi /dispatch                                            # claim one milestone and run it
 pi /ledger                                              # inspect sagas, tasks, approvals
 ```
 
-`pi /dispatch-once` claims at most one pending dispatch intent.
+`pi /dispatch` claims at most one pending dispatch intent, the oldest, with `LIMIT 1 FOR UPDATE SKIP LOCKED` so several dispatchers cannot double-run one piece of work.
+`/dispatch-once` still works as a legacy alias.
 For that one milestone it builds the typed task graph, collects a local-model context turn, runs the senior agent in an isolated worktree, runs verification, checkpoints the exact branch, base, and commit, and starts staff review.
 A staff BLOCK triggers a bounded revision and re-review loop.
 Staff approval stops at a pending `CODE_MERGE` request.
@@ -69,7 +70,8 @@ The junior tier and the entire control plane run with the network unplugged.
 
 The system is instrumented, and all of it points at your own machine.
 The API serves Prometheus metrics at `/metrics`, and `observability/` brings up Loki, Tempo, Prometheus, Pyroscope, and Grafana as local compose services.
-OpenTelemetry traces (`LOCAL_AGENT_OTEL_TRACES_ENABLED`) and continuous profiling (`LOCAL_AGENT_PYROSCOPE_ENABLED`) are both off by default and both default to a `127.0.0.1` endpoint when you turn them on.
+OpenTelemetry traces (`LOCAL_AGENT_OTEL_TRACES_ENABLED`) and continuous profiling (`LOCAL_AGENT_PYROSCOPE_ENABLED`) are both off by default on the host, and both default to a `127.0.0.1` endpoint when you turn them on.
+The containerized `app` compose profile turns both on and points them at the Alloy and Pyroscope services inside the same stack.
 Nothing is collected by the author or by any vendor.
 If you want traces on a remote collector, `LOCAL_AGENT_OTEL_TRACES_ENDPOINT` and `LOCAL_AGENT_OTEL_TRACES_HEADERS` are how you send them there, and that is your decision to make rather than a default to discover.
 
@@ -79,7 +81,11 @@ Both, and the terminal is primary.
 `pi` drives the workflows and `agent-ledger` reads the ledger.
 
 A React cockpit at `http://127.0.0.1:8000` shows work units, milestones, events, artifacts, and pending approvals.
-It is deliberately read-only for anything irreversible: it shows you the authoritative next command instead of doing it behind a button.
+
+It writes exactly one thing: an approval decision.
+`web/src/workunits/WorkUnitCockpit.tsx` renders Approve and Deny buttons that POST to `/work-units/{work_unit_id}/decisions`, and the result is recorded as a ledger approval like any other, attributed to `cockpit`.
+That is the only write the client makes.
+It never merges, deploys, or skips a gate, and for anything past resolving a gate it prints the authoritative next command instead of running it.
 
 ## Is it durable? Can I shut the laptop and come back?
 
@@ -97,8 +103,12 @@ Closing the laptop mid-run costs that attempt's uncommitted progress, never the 
 Postgres, running locally in Docker.
 The coordination ledger, the durable workflow engine (DBOS), and the retrieval vectors (pgvector) all live there.
 
-SQLite exists only as a test adapter.
-Nothing at runtime writes to it, and it is not an operator ledger.
+SQLite is not an operator ledger, and it cannot become one by configuration.
+The coordination ledger's connection pool is Postgres-only (`coordination/store.py`), so no environment variable points it at a file.
+
+The SQLAlchemy layer is the softer half: `db.py` still builds a SQLite engine if `LOCAL_AGENT_DATABASE_URL` names one, and the vector columns degrade from `halfvec` to plain JSON when it does.
+That path exists for the test suite.
+Nothing shipped is pointed at it, and no config, compose file, or `.env.example` line names a SQLite URL.
 
 ## Quick start
 
@@ -135,8 +145,11 @@ Configuration is documented in [docs/configuration.md](docs/configuration.md), w
 
 This is the one dependency the project will not run without, and that is the point of it rather than a limitation.
 
-The junior tier scans the permission envelope during finalization, proposes a lifecycle phase for a milestone whose document declared none, classifies whether a review round is still making progress, and judges whether a stalled frontier process should continue, checkpoint, split, or ask a person.
-Those are the decisions the system makes *about* the frontier agents.
+The junior tier proposes a lifecycle phase for a milestone whose document declared none, and `work_units/phase_classifier.py` is careful about it: the proposal carries confidence and reasoning, is stamped `inferred=True` so it cannot be mistaken for a declaration, and blocks the compile below the confidence threshold rather than guessing.
+It assesses whether a stalled frontier process is still making progress, after the deterministic supervisor detects the stall rather than in place of it.
+It returns the checkpoint verdict, which `_checkpoint_review_json` fails closed on when the output is not valid JSON.
+
+Those are decisions the system makes *about* the frontier agents.
 A build that made them by calling somebody's API would be an agent OS that cannot think without the network.
 
 One model is enough.
