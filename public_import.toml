@@ -38,13 +38,25 @@ path = "Dockerfile"
 kind = "file"
 overwrite = true
 
-[[allow]]
-path = "LICENSE"
-kind = "file"
-overwrite = true
+# LICENSE is not here, and its absence is load-bearing rather than an
+# oversight. The private tree deleted its copy on 2026-08-15 so the two trees
+# can be told apart at a glance, which makes this repository the only place the
+# AGPL text lives. The importer never deletes, so the file already here
+# survives every sync; if it is ever lost, restore it from
+# https://www.gnu.org/licenses/agpl-3.0.txt rather than from the source tree.
+# `pyproject.toml` still declares `license = "AGPL-3.0-or-later"` and every
+# source file still carries its SPDX header, so nothing about the license
+# changed except which tree keeps the text.
 
 [[allow]]
 path = "Makefile"
+kind = "file"
+overwrite = true
+
+# The MCP client config a fresh clone needs. Claude Code reads it from the repo
+# root, which is what makes "attach your own AI tool" a zero-step claim.
+[[allow]]
+path = ".mcp.json"
 kind = "file"
 overwrite = true
 
@@ -94,12 +106,12 @@ path = "uv.lock"
 kind = "file"
 overwrite = true
 
-# README.md, CLAUDE.md, and AGENTS.md are deliberately absent from this list.
-# The private copies are written for an operator who has the handoff log, the
-# design docs, and the private target-project registry in front of them, and
-# they link to all three. This repository owns its own README instead, and the
-# importer never touches a destination file it was not asked to write, so the
-# public README survives every import.
+# README.md, CLAUDE.md, AGENTS.md, and LICENSE are deliberately absent from this
+# list. The private copies of the first three are written for an operator who
+# has the handoff log, the design docs, and the private target-project registry
+# in front of them, and they link to all three; LICENSE has no private copy at
+# all any more. This repository owns all four, and the importer never touches a
+# destination file it was not asked to write, so each survives every import.
 
 # The documentation tree does not travel. The private repository's docs/ is a
 # working engineering log - dated handoffs, session postmortems, design
@@ -123,6 +135,31 @@ overwrite = true
 [[allow]]
 path = "docs/examples"
 kind = "directory"
+overwrite = true
+
+# The onboarding lane, which is the exception the paragraph above anticipates:
+# these are not a narrative about how the system was built, they are the
+# instructions for standing it up. docs/onboarding/prompts.json is the single
+# source for the prompt sequence - the landing page imports it at build time and
+# tests/test_onboarding_prompts.py pins it to the scripts it names - so a public
+# clone missing it would ship a walkthrough and a website that disagree.
+[[allow]]
+path = "docs/onboarding"
+kind = "directory"
+overwrite = true
+
+# Two files out of docs/diagrams/, not the directory. The rest of that folder is
+# working engineering diagrams (the DBOS boundary, the refinery map) which are
+# part of the log this manifest deliberately withholds. These two are the
+# onboarding DAG, linked from the public README and from ONBOARDING.md.
+[[allow]]
+path = "docs/diagrams/aidashos-onboarding-dag.excalidraw"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "docs/diagrams/aidashos-onboarding-dag.png"
+kind = "file"
 overwrite = true
 
 # Directories.
@@ -176,5 +213,16 @@ overwrite = true
 
 [[allow]]
 path = "web"
+kind = "directory"
+overwrite = true
+
+# aidashos.com. `web/` above is the operator's cockpit, served from the running
+# system; this is the public landing page, a separate static site. It travels
+# because it is the top of this repository's own funnel and because it imports
+# docs/onboarding/prompts.json at build time, so the two cannot drift. Its
+# node_modules/ and dist/ are gitignored, and the importer skips whatever
+# git ignores.
+[[allow]]
+path = "website"
 kind = "directory"
 overwrite = true

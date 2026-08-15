@@ -1,6 +1,29 @@
-# Local-First Agent OS
+# aidashos
 
 Durable orchestration of coding agents on your own machine.
+The site is [aidashos.com](https://www.aidashos.com); this repository is the whole product.
+
+## Start here
+
+Two commands, in this order:
+
+```bash
+git clone https://github.com/rahul-nath/aidashos.git && cd aidashos && make
+./scripts/boot/boot.sh
+```
+
+`make` is the base install: uv, Python 3.13, Node, Docker, Postgres, and the schemas.
+`./scripts/boot/boot.sh` is the boot sequence: llama.cpp, the model weights, both subscription sign-ins, the default stack config, and a final readiness check that prints the fixing command for anything missing.
+Windows runs `.\scripts\boot\boot.ps1` for the model stack and the runtime under WSL2.
+
+Prefer to have an agent do it?
+Paste [docs/onboarding/BOOT_PROMPT.md](docs/onboarding/BOOT_PROMPT.md) into Claude Code, Codex, or any AI tool with shell access, opened at the repo root.
+It drives the same scripts, stage by stage, and leaves the sign-ins and the large downloads to you.
+
+The whole path, start to finish, is [docs/onboarding/ONBOARDING.md](docs/onboarding/ONBOARDING.md), drawn as a DAG in [docs/diagrams/aidashos-onboarding-dag.png](docs/diagrams/aidashos-onboarding-dag.png).
+Stuck at any point, `./scripts/first-run-check.sh` says what is missing and what fixes it.
+
+The rest of this README is what the system actually does.
 
 You write a design document.
 The system compiles it into a fixed plan, runs coding agents against that plan in isolated git worktrees, verifies their output with your project's own test commands, has a different vendor's model review the diff, and stops at an approval gate before anything merges.
@@ -82,8 +105,13 @@ If you want traces on a remote collector, `LOCAL_AGENT_OTEL_TRACES_ENDPOINT` and
 
 ## Is there a UI, or is it terminal only?
 
-Both, and the terminal is primary.
+Three ways in, and the terminal is primary.
 `pi` drives the workflows and `agent-ledger` reads the ledger.
+
+The third is your own AI tool.
+The coordination ledger is an MCP server (`uv run agent-ledger serve`), so Claude Code, Codex, or any stdio MCP client can operate the system from the tool you already work in.
+Claude Code picks up the repo's `.mcp.json` with no setup; [skills/operate-agent-os/SKILL.md](skills/operate-agent-os/SKILL.md) carries the Codex config block and the operating ritual, including which boundaries an assistant does not cross.
+A dispatched agent inside the system gets a different, read-only surface: three tools and no way to file evidence about its own run.
 
 A React cockpit at `http://127.0.0.1:8000` shows work units, milestones, events, artifacts, and pending approvals.
 
@@ -117,23 +145,21 @@ Nothing shipped is pointed at it, and no config, compose file, or `.env.example`
 
 ## Quick start
 
-Requirements are macOS or Linux, Git, Python 3.13, Node 22.19+, Docker, and a local model you can serve.
-
-The fastest way to find out what a machine still needs:
-
-```bash
-./scripts/first-run-check.sh
-```
-
-It reports the toolchain, the ledger, the junior model, each frontier subscription, every registered target project, and who owns the resident loops, and prints the exact command that fixes anything missing.
-It changes nothing and exits non-zero when something would stop a governed run, so it also works as a preflight in a script.
+Requirements are macOS or Linux (Windows via WSL2), Git, Python 3.13, Node 22.19+, Docker, and a local model you can serve.
+The two commands at the top of this file are the whole install; the steps below are what they run, for when you would rather drive each one yourself.
 
 ```bash
-./scripts/bootstrap.sh --install-system --with-model-runtimes
-./scripts/download-models.sh --list      # inspect sources; nothing downloads automatically
+./scripts/first-run-check.sh             # what is missing, and the command that fixes each miss
+./scripts/bootstrap.sh --install-system  # what `make` runs
+./scripts/boot/boot.sh --skip-models     # llama.cpp, logins, stack config, verification
+./scripts/download-models.sh --list      # inspect model sources; nothing downloads automatically
 ./scripts/download-models.sh gemma4
 ./scripts/start-agent-runtime.sh         # Postgres, llama.cpp, ASR, and the resident pi daemon
 ```
+
+`first-run-check.sh` reports the toolchain, the ledger, the junior model, each frontier subscription, every registered target project, and who owns the resident loops.
+It changes nothing and exits non-zero when something would stop a governed run, so it also works as a preflight in a script.
+Each boot stage is documented in [scripts/boot/README.md](scripts/boot/README.md) and is idempotent, so any one of them can be re-run alone.
 
 For the cockpit:
 
