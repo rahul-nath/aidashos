@@ -36,7 +36,6 @@ from .dispatch_adoption import (
     adopt_recovered_dispatch,
     adopt_settled_dispatch,
 )
-from .reconciliation import reconcile_all, reconcile_saga
 from .root_workflow import EnqueueDelivery, EnqueueFailed, drain_enqueue_outbox
 
 logger = logging.getLogger(__name__)
@@ -455,32 +454,6 @@ def run_crash_reconciler(
         return ok(repaired=repaired, polls=max_polls)
 
 
-def reconcile_legacy_saga(
-    saga_id: str,
-    apply: bool = False,
-    confirm_classification: bool = False,
-) -> dict[str, Any]:
-    """Adopt one legacy saga. Dry run by default, because adoption is one-way."""
-
-    try:
-        plan = reconcile_saga(
-            saga_id,
-            dry_run=not apply,
-            confirm_classification=confirm_classification,
-        )
-    except repo.WorkUnitError as exc:
-        return err("reconcile_failed", message=str(exc))
-    return ok(plan=plan.to_payload())
-
-
-def reconcile_legacy_sagas(
-    apply: bool = False,
-    confirm_classification: bool = False,
-) -> dict[str, Any]:
-    plans = reconcile_all(dry_run=not apply, confirm_classification=confirm_classification)
-    return ok(plans=[plan.to_payload() for plan in plans])
-
-
 __all__ = [
     "adopt_recovered_work_unit_dispatch",
     "adopt_integrated_work_unit_milestone",
@@ -492,8 +465,6 @@ __all__ = [
     "list_work_unit_artifacts",
     "list_work_unit_events",
     "list_work_units",
-    "reconcile_legacy_saga",
-    "reconcile_legacy_sagas",
     "resume_work_unit",
     "start_work_unit",
     "submit_work_unit_decision",

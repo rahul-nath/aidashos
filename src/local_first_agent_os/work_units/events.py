@@ -68,7 +68,6 @@ class WorkUnitEventType(StrEnum):
     APPROVAL_RECEIVED = "APPROVAL_RECEIVED"
     DISPATCH_INTENT_CREATED = "DISPATCH_INTENT_CREATED"
     AUTOMATIC_CRASH_RECOVERY = "AUTOMATIC_CRASH_RECOVERY"
-    LEGACY_SAGA_RECONCILED = "LEGACY_SAGA_RECONCILED"
 
 
 _WORK_UNIT_EVENT_BY_STATUS: Final[dict[WorkUnitStatus, WorkUnitEventType]] = {
@@ -805,44 +804,6 @@ class AutomaticCrashRecovery:
         }
 
 
-@dataclass(frozen=True)
-class LegacySagaReconciled:
-    """A legacy saga was adopted into a WorkUnit by the reconciliation command."""
-
-    saga_id: str
-    milestone_count: int
-    derived_phase: LifecyclePhase
-    payload: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def event_type(self) -> WorkUnitEventType:
-        return WorkUnitEventType.LEGACY_SAGA_RECONCILED
-
-    @property
-    def transition_name(self) -> str:
-        return f"{self.event_type.value}:{self.saga_id}"
-
-    @property
-    def phase(self) -> LifecyclePhase:
-        return self.derived_phase
-
-    @property
-    def milestone_key(self) -> str | None:
-        return None
-
-    @property
-    def attempt(self) -> int:
-        return 0
-
-    def event_payload(self) -> dict[str, Any]:
-        return {
-            "saga_id": self.saga_id,
-            "milestone_count": self.milestone_count,
-            "derived_phase": self.derived_phase.value,
-            **self.payload,
-        }
-
-
 LifecycleFact = (
     WorkUnitTransition
     | PhaseTransition
@@ -852,7 +813,6 @@ LifecycleFact = (
     | ArtifactRecorded
     | DispatchIntentCreated
     | AutomaticCrashRecovery
-    | LegacySagaReconciled
 )
 
 
@@ -892,7 +852,6 @@ __all__ = [
     "DecisionRequestKind",
     "DecisionRequestStatus",
     "DispatchIntentCreated",
-    "LegacySagaReconciled",
     "LifecycleFact",
     "MilestoneTransition",
     "OperatorDecision",

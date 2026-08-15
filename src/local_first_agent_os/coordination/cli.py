@@ -256,7 +256,6 @@ def build_mcp_server():
     )
     mcp.tool(name="run_enqueue_drainer")(work_unit_commands.run_enqueue_drainer)
     mcp.tool(name="run_crash_reconciler")(work_unit_commands.run_crash_reconciler)
-    mcp.tool(name="reconcile_legacy_saga")(work_unit_commands.reconcile_legacy_saga)
 
     # Layer 2 — durable execution history
     mcp.tool(name="read_execution_ledger")(read_execution_ledger)
@@ -576,15 +575,6 @@ def build_parser() -> argparse.ArgumentParser:
     rld.add_argument("--dispatcher-name", default="dispatcher")
 
     sub.add_parser("describe_resident_loops")
-
-    rls = sub.add_parser("reconcile_legacy_saga")
-    rls.add_argument("saga_id")
-    rls.add_argument("--apply", action="store_true")
-    rls.add_argument("--confirm-classification", action="store_true")
-
-    rlss = sub.add_parser("reconcile_legacy_sagas")
-    rlss.add_argument("--apply", action="store_true")
-    rlss.add_argument("--confirm-classification", action="store_true")
 
     # ---- layer 2: saga milestones ----
     csm = sub.add_parser("create_saga_milestone")
@@ -1069,17 +1059,6 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
     elif cmd == "describe_resident_loops":
         out = describe_resident_loops()
-    elif cmd == "reconcile_legacy_saga":
-        out = work_unit_commands.reconcile_legacy_saga(
-            args.saga_id,
-            apply=args.apply,
-            confirm_classification=args.confirm_classification,
-        )
-    elif cmd == "reconcile_legacy_sagas":
-        out = work_unit_commands.reconcile_legacy_sagas(
-            apply=args.apply,
-            confirm_classification=args.confirm_classification,
-        )
 
     # layer 2 — saga milestones
     elif cmd == "create_saga_milestone":

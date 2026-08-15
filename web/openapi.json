@@ -3522,8 +3522,7 @@
           "APPROVAL_REQUESTED",
           "APPROVAL_RECEIVED",
           "DISPATCH_INTENT_CREATED",
-          "AUTOMATIC_CRASH_RECOVERY",
-          "LEGACY_SAGA_RECONCILED"
+          "AUTOMATIC_CRASH_RECOVERY"
         ],
         "title": "WorkUnitEventType",
         "type": "string"

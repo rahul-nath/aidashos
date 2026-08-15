@@ -40,7 +40,6 @@ from .events import (
     DecisionRequestKind,
     DecisionRequestStatus,
     DispatchIntentCreated,
-    LegacySagaReconciled,
     LifecycleFact,
     MilestoneTransition,
     OperatorDecision,
@@ -1096,8 +1095,6 @@ def record_fact(
                 # unattended reconciler was the one who asked for them, so the
                 # automatic budget has something of its own to count.
                 pass
-            case LegacySagaReconciled():
-                new_phase = fact.derived_phase.value
 
         artifacts: tuple[ArtifactRecord, ...] = ()
         if isinstance(fact, MilestoneTransition):

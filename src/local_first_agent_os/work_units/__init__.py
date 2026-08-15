@@ -21,7 +21,6 @@ Module map:
 - ``root_workflow``: the root workflow, phase workflows, and milestone workflows.
 - ``projection``: the cockpit read model, rebuildable from events.
 - ``service``: the public operations.
-- ``reconciliation``: adopting legacy sagas into WorkUnits.
 """
 
 from .lifecycle import (
