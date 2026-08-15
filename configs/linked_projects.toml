@@ -1,0 +1,95 @@
+# The allowlisted map of sibling repositories this control plane may inspect or
+# modify. Target projects are workspaces, not dependencies of the OS itself: a
+# fresh clone runs local queries without any of them, and a dispatch aimed at one
+# fails closed until its configured path exists.
+#
+# This file is operator state. The entries below are examples that describe no
+# real machine, and `scripts/import_public_snapshot.py` withholds the private
+# copy rather than overwriting them. Replace them with your own projects; the
+# three `[center]` pointers must each name an id defined in this file.
+
+[center]
+id = "local_first_agent_os"
+description = "Structured center for a local agent control plane and the workspaces it is allowed to touch."
+control_plane_project = "local_first_agent_os"
+default_saga_project = "example_web_app"
+default_memory_project = "example_notes"
+
+[[projects]]
+id = "local_first_agent_os"
+kind = "control_plane"
+path = "~/ai_projects/local_first_agent_os"
+status = "active_center"
+read_only = false
+description = "Pi, ASR, policies, /saga, /pow-wow, agent dispatch, durable artifacts, and coordination ledger."
+primary_interfaces = ["pi", "local-agent", "/saga", "/pow-wow", "FastAPI"]
+owns = [
+  "voice and terminal command interface",
+  "agent orchestration policy",
+  "coordination ledger",
+  "durable local workflow boundaries",
+]
+avoid = [
+  "business-product implementation details",
+  "raw personal-memory exports",
+]
+verification_commands = [
+  "uv run pytest",
+  "uv run ruff check",
+  "uv run pyright",
+]
+
+[[projects]]
+id = "example_notes"
+kind = "memory_store"
+path = "~/ai_projects/example_notes"
+status = "example"
+read_only = true
+description = "Example read-only workspace standing in for a personal notes or retrieval corpus."
+primary_interfaces = ["local-agent workflowy-import-chunks"]
+owns = [
+  "note exports",
+  "retrieval corpus for this operator",
+]
+avoid = [
+  "orchestration policy",
+  "writes of any kind, since this entry is read_only",
+]
+verification_commands = []
+
+[[projects]]
+id = "example_web_app"
+kind = "product_repo"
+path = "~/ai_projects/example_web_app"
+status = "example"
+read_only = false
+description = "Example writable target repository, showing the shape a dispatchable project takes."
+primary_interfaces = ["npm run dev", "npm run build"]
+owns = [
+  "its own application code",
+  "its own build and test commands",
+]
+avoid = [
+  "coordination ledger internals",
+  "production deploys without approval",
+]
+verification_commands = [
+  "npm install --no-audit --no-fund",
+  "npm run build",
+]
+
+# Optional. Present only on projects a browser-acceptance milestone can drive.
+[projects.browser_acceptance]
+preview_command = "npm run start -- --hostname 127.0.0.1 --port {port}"
+target_url_template = "http://127.0.0.1:{port}"
+readiness_path = "/"
+required_paths = ["/"]
+allowed_hosts = ["127.0.0.1", "localhost"]
+viewports = [
+  { name = "mobile", width = 375, height = 812 },
+  { name = "desktop", width = 1440, height = 1000 },
+]
+required_selectors = ["header", "main", "footer"]
+bounded_selectors = ["header [data-site-brand]"]
+startup_timeout_seconds = 60
+capture_timeout_seconds = 60

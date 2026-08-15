@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rahul.local-first-agent.pi-daemon</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__UV_BIN__</string>
+    <string>run</string>
+    <string>pi-daemon</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LOCAL_AGENT_USE_DBOS</key>
+    <string>true</string>
+    <key>LOCAL_AGENT_DATABASE_URL</key>
+    <string>postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent</string>
+    <key>LOCAL_AGENT_COORDINATION_BACKEND</key>
+    <string>postgres</string>
+    <key>LOCAL_AGENT_COORDINATION_DATABASE_URL</key>
+    <string>postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent</string>
+    <key>LOCAL_AGENT_DBOS_SYSTEM_DATABASE_URL</key>
+    <string>postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent_dbos</string>
+    <key>DBOS_SYSTEM_DATABASE_URL</key>
+    <string>postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent_dbos</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>KeepAlive</key>
+  <false/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local-agent/logs/pi-daemon.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local-agent/logs/pi-daemon.err.log</string>
+</dict>
+</plist>

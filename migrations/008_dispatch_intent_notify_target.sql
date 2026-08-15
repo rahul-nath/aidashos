@@ -1,0 +1,21 @@
+-- SPDX-FileCopyrightText: 2026 Rahul Nath <https://github.com/rahul-nath>
+-- SPDX-License-Identifier: AGPL-3.0-or-later
+--
+-- Where to send a settlement.
+--
+-- A milestone now waits on `DBOS.recv` in its workflow body instead of polling
+-- the ledger inside a step. Something has to wake it, and the only process that
+-- knows an intent reached a terminal status is whoever completed it. That sender
+-- needs the waiting workflow's id, and derivation is not available to it: the
+-- id is built from the WorkUnit's root workflow, the milestone key, and the
+-- attempt, none of which a dispatch intent carried.
+--
+-- So the submitter records it. Nullable, because most producers are not a
+-- milestone waiting on an answer -- an ASR trigger or an operator typing
+-- `pi /saga` has nobody to notify -- and for those a settle sends nothing.
+--
+-- This is also the link from an intent to the execution that requested it,
+-- which the 2026-07-30 handoff recorded as the missing prerequisite for tying
+-- an intent to its evidence.
+
+ALTER TABLE dispatch_intents ADD COLUMN IF NOT EXISTS notify_workflow_id TEXT;

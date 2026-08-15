@@ -1,0 +1,77 @@
+[[workspaces]]
+workspace_id = "general"
+root_path = "~"
+allowed_tools = ["workflowy_fetch_nodes", "workflowy_insert_node"]
+forbidden_tools = ["bash", "raw_http", "workflowy_delete_node", "unrestricted_file_read"]
+approved_workflowy_parent_ids = []
+write_enabled = false
+embed_medical_outputs = false
+decision_confidence_threshold = 0.85
+
+[[workspaces]]
+workspace_id = "whiteboard_ocr"
+root_path = "~/AgentIngress/whiteboards"
+allowed_tools = ["workflowy_fetch_nodes", "workflowy_insert_node", "workflowy_day_bullet_insert"]
+forbidden_tools = ["bash", "raw_http", "workflowy_delete_node", "unrestricted_file_read"]
+approved_workflowy_parent_ids = []
+write_enabled = false
+decision_confidence_threshold = 0.85
+
+[[workspaces]]
+workspace_id = "paper_notes"
+root_path = "~/AgentIngress/paper_notes"
+allowed_tools = ["workflowy_fetch_nodes", "workflowy_insert_node", "workflowy_day_bullet_insert"]
+forbidden_tools = ["bash", "raw_http", "workflowy_delete_node", "unrestricted_file_read"]
+approved_workflowy_parent_ids = []
+write_enabled = false
+decision_confidence_threshold = 0.9
+
+[[workspaces]]
+workspace_id = "workflowy"
+root_path = "~"
+allowed_tools = ["workflowy_fetch_nodes", "workflowy_insert_node", "workflowy_day_bullet_insert"]
+forbidden_tools = ["bash", "raw_http", "workflowy_delete_node", "unrestricted_file_read"]
+approved_workflowy_parent_ids = []
+write_enabled = false
+decision_confidence_threshold = 0.85
+
+[[workspaces]]
+workspace_id = "apple_notes"
+root_path = "~"
+allowed_tools = ["apple_notes_fetch", "workflowy_fetch_nodes", "workflowy_insert_node"]
+forbidden_tools = ["bash", "raw_http", "apple_notes_delete"]
+approved_workflowy_parent_ids = []
+write_enabled = false
+
+[[workspaces]]
+workspace_id = "chrome"
+root_path = "~"
+allowed_tools = ["chrome_devtools"]
+forbidden_tools = ["bash", "raw_http"]
+approved_workflowy_parent_ids = []
+write_enabled = true
+
+[[workspaces]]
+workspace_id = "medical"
+root_path = "~/AgentIngress/medical"
+allowed_tools = []
+forbidden_tools = ["bash", "raw_http", "workflowy_insert_node"]
+approved_workflowy_parent_ids = []
+write_enabled = false
+embed_medical_outputs = false
+
+[[workspaces]]
+workspace_id = "audio"
+root_path = "~/AgentIngress/audio"
+allowed_tools = ["workflowy_fetch_nodes", "workflowy_insert_node"]
+forbidden_tools = ["bash", "raw_http"]
+approved_workflowy_parent_ids = []
+write_enabled = false
+
+[[workspaces]]
+workspace_id = "training"
+root_path = "~/.local-agent/training_exports"
+allowed_tools = []
+forbidden_tools = ["bash", "raw_http"]
+approved_workflowy_parent_ids = []
+write_enabled = false

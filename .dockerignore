@@ -1,0 +1,15 @@
+.git
+.venv
+.pytest_cache
+.ruff_cache
+.local_agent
+__pycache__
+*.pyc
+web/node_modules
+web/dist
+web/test-results
+web/playwright-report
+output
+*.zip
+*.log
+.DS_Store

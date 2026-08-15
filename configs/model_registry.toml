@@ -1,0 +1,211 @@
+# gemma4 is the primary general model (fast junior tier + default terminal
+# queries); qwen3.8 is the on-demand junior fallback, chosen for output speed and
+# intuitive classification rather than for deliberation - `staffing.toml` lists it
+# under `[bench.junior].backup_models`, which is what settles the question. Keep the
+# gemma entry first: role_for_server_name("gemma4") resolves by file order and
+# must hit this role, not the compactor that shares the same GGUF.
+[models.general_gemma4]
+role = "general"
+model_id = "gemma-4-e4b-q4-k-m"
+server_model_name = "gemma4"
+runtime = "llama.cpp"
+backend = "metal"
+gguf_path = "~/models/gemma4/model.gguf"
+warm_ttl_seconds = 900
+priority = 10
+context_window = 65536
+# The junior tier answers bounded questions - classify this, route that, pick one
+# of these - and deliberation costs about twenty times the tokens without buying
+# a better answer. Measured on one milestone into a seven-value enum: 938 tokens
+# in 87.6s thinking, 46 tokens in 4.9s not, and the fast answer was the right one,
+# because thinking gave the model room to talk itself out of the obvious call.
+reasoning = "off"
+
+[models.general_gemma4.default_params]
+temperature = 1.0
+top_k = 64
+top_p = 0.95
+
+[models.qwen38_fallback]
+role = "general_fallback"
+model_id = "qwen3.8-27b-mtp-q4-k-m"
+server_model_name = "qwen3.8-27b-mtp"
+runtime = "llama.cpp"
+backend = "metal"
+gguf_path = "~/models/qwen3.8-27b-mtp/model.gguf"
+warm_ttl_seconds = 900
+priority = 15
+# Unchanged from the qwen3.6 entry this replaced, and deliberately not raised to
+# the 32768 the model's own README suggests. At q8_0 K/V a 27B's cache runs on
+# the order of half a gigabyte per 4k of context, so 32768 would cost several
+# gigabytes on top of 19GB of weights on a 36GB machine, and the junior fallback
+# has never been the tier that needs a long window. Raise it when a task is
+# actually observed truncating, not on the strength of a generated README.
+context_window = 8192
+# Off for the same reason as gemma4 above: this is the junior tier's backup, not
+# a deliberation tier, so it is picked for output speed and intuitive calls. A
+# role that genuinely needs step-by-step reasoning should say so by leaving this
+# unset rather than by inheriting it from a fallback nobody chose for thinking.
+reasoning = "off"
+# llama.cpp splits the context across slots, so one slot keeps the full
+# 8192-token window per request. The qwen3.6 entry also cited the Unsloth MTP
+# build refusing -np > 1; that reason retired with the weights, since this build
+# is ggml-org's, and the run command it ships still passes -np 1.
+parallel = 1
+
+[models.qwen38_fallback.default_params]
+temperature = 0.6
+top_k = 20
+top_p = 0.95
+
+# MTP speculation, but from a separate draft file rather than a head inside the
+# main GGUF: ggml-org ships mtp-Qwen3.8-27B-Q4_0.gguf alongside the weights, and
+# llama.cpp needs `-md` pointed at it. Without draft_gguf_path the server accepts
+# `--spec-type draft-mtp` and speculates nothing, so the loss would be silent
+# throughput rather than a startup error.
+#
+# draft_n_max = 2 is inherited, not measured. The qwen3.6 numbers behind it
+# (+33%, 6.1 -> 8.1 tok/s at 72-76% acceptance, with n_max 3 slower than 2 on
+# this 18-core GPU) were taken against a different model, a different quant, and
+# an in-GGUF draft head, so none of them transfer. 2 is a reasonable starting
+# point on the same hardware argument - deep drafts are verification-bound here -
+# and the acceptance rate on these weights is currently unknown.
+[models.qwen38_fallback.speculative]
+type = "draft-mtp"
+draft_n_max = 2
+draft_gguf_path = "~/models/qwen3.8-27b-mtp/draft.gguf"
+
+# The heavyweight local seat, and the first entry in this file whose model is
+# chosen for judgment rather than for speed. Roughly 20GB resident, which is why
+# it gets its own role instead of displacing gemma4 on `general`: the fast path
+# must not inherit a 20GB load.
+[models.glimmer_deliberator]
+role = "deliberator"
+model_id = "muse-glimmer-30b-kquant-dynamic"
+server_model_name = "glimmer"
+runtime = "llama.cpp"
+backend = "metal"
+gguf_path = "~/models/glimmer/model.gguf"
+warm_ttl_seconds = 900
+priority = 14
+context_window = 32768
+parallel = 1
+# Thinking off by default, for the same measured reason gemma4 has it off, and
+# with a much larger bill. On one bounded classification on 2026-08-14 this model
+# answered correctly at every setting and spent 158 completion tokens in 23.1s
+# thinking against 66 tokens in 9.5s not: a 2.3x latency tax for an answer that
+# did not change. Tasks that deserve deliberation ask for it per call rather than
+# every caller paying for it by default.
+reasoning = "off"
+# Muse-Glimmer's chat template has no `enable_thinking`; it reads
+# `reasoning_strength` and defaults it to `high`. Declaring the dialect is what
+# makes `reasoning` above take effect, since a request carrying the wrong key is
+# accepted and silently ignored.
+reasoning_dialect = "reasoning_strength"
+
+[models.glimmer_deliberator.default_params]
+temperature = 0.6
+top_k = 20
+top_p = 0.95
+
+# dflash, not mtp, and not the server default. `--spec-type` defaults to `none`,
+# so passing `-md` alone (as the model's generated README does) loads the draft
+# weights and speculates with none of them, paying ~1.5GB of RAM for nothing.
+# The draft file ships as `dflash-kquant.gguf`, which is what names the type.
+# Unmeasured on these weights: acceptance rate and whether 2 is the right depth.
+[models.glimmer_deliberator.speculative]
+type = "draft-dflash"
+draft_n_max = 2
+draft_gguf_path = "~/models/glimmer/draft.gguf"
+
+# This can point at the same local GGUF as the general model until a smaller
+# compaction-specific model is installed. It is intentionally a separate role.
+[models.context_compactor]
+role = "compactor"
+model_id = "gemma-4-e4b-q4-k-m"
+server_model_name = "gemma4"
+runtime = "llama.cpp"
+backend = "metal"
+gguf_path = "~/models/gemma4/model.gguf"
+warm_ttl_seconds = 0
+priority = 16
+context_window = 65536
+
+[models.context_compactor.default_params]
+temperature = 1.0
+top_k = 64
+top_p = 0.95
+
+[models.surya_ocr_2]
+role = "ocr"
+model_id = "surya-ocr-2"
+server_model_name = "surya-ocr-2"
+runtime = "llama.cpp"
+backend = "metal"
+gguf_path = "~/models/surya-ocr-2/model.gguf"
+mmproj_path = "~/models/surya-ocr-2/mmproj.gguf"
+warm_ttl_seconds = 300
+priority = 20
+context_window = 32768
+parallel = 1
+image_first = true
+# Surya's vision tower stops adding detail at roughly 4.1 megapixels; a 3:4
+# frame at 2048 px stays just under that ceiling.
+ocr_max_dimension = 2048
+
+[models.chandra_ocr_2_q8]
+role = "hard_ocr"
+model_id = "chandra-ocr-2"
+server_model_name = "chandra-ocr-2-q8"
+runtime = "llama.cpp"
+backend = "metal"
+gguf_path = "~/models/chandra-ocr-2-q8/model.gguf"
+mmproj_path = "~/models/chandra-ocr-2-q8/mmproj.gguf"
+warm_ttl_seconds = 300
+priority = 21
+context_window = 32768
+parallel = 1
+# chandra-ocr-2 opens a `<think>` tag and then writes its transcription inside
+# it. Under llama.cpp's default deepseek parsing the whole body lands in
+# `reasoning_content` and `content` comes back empty.
+reasoning_format = "none"
+ocr_max_dimension = 2048
+
+[models.whisper_large_v3_turbo]
+role = "asr"
+model_id = "whisper-large-v3-turbo"
+server_model_name = "whisper-large-v3-turbo"
+runtime = "whisper.cpp"
+backend = "coreml+metal"
+ggml_path = "~/ai_projects/whisper.cpp/models/ggml-large-v3-turbo.bin"
+coreml_path = "~/ai_projects/whisper.cpp/models/ggml-large-v3-turbo-encoder.mlmodelc"
+warm_ttl_seconds = 300
+priority = 30
+server_url = "http://127.0.0.1:8090"
+port = 8090
+language = "auto"
+translate = false
+threads = 8
+
+[models.qwen_embed_8b]
+role = "embedder"
+model_id = "qwen-embed-8b"
+server_model_name = "qwen-embed-8b"
+runtime = "llama.cpp"
+backend = "metal"
+gguf_path = "~/models/qwen-embed-8b/model.gguf"
+warm_ttl_seconds = 600
+priority = 50
+context_window = 32768
+
+[models.medgemma_4b]
+role = "medical"
+model_id = "medgemma-4b"
+server_model_name = "medgemma-4b"
+runtime = "llama.cpp"
+backend = "metal"
+gguf_path = "~/models/medgemma-4b/model.gguf"
+mmproj_path = "~/models/medgemma-4b/mmproj.gguf"
+warm_ttl_seconds = 120
+priority = 40
+context_window = 8192

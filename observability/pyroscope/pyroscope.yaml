@@ -1,0 +1,18 @@
+server:
+  http_listen_port: 4040
+
+storage:
+  backend: s3
+  s3:
+    bucket_name: local-agent-pyroscope
+    endpoint: minio:9000
+    insecure: true
+    bucket_lookup_type: path-style
+    access_key_id: localagent
+    secret_access_key: localagent-secret
+
+self_profiling:
+  disable_push: true
+
+analytics:
+  reporting_enabled: false

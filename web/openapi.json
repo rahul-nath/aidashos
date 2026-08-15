@@ -1,0 +1,5282 @@
+{
+  "components": {
+    "schemas": {
+      "AcceptWalkthru": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "accept",
+            "title": "Action",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "operation_id"
+        ],
+        "title": "AcceptWalkthru",
+        "type": "object"
+      },
+      "ActivityCursor": {
+        "additionalProperties": false,
+        "description": "A position in one lease's event stream.\n\nA sequence is meaningless without the lease it counts within, so the two\ntravel together and \"no position yet\" is the absence of a cursor rather\nthan a sequence of zero paired with a missing lease.",
+        "properties": {
+          "after_sequence": {
+            "minimum": 0.0,
+            "title": "After Sequence",
+            "type": "integer"
+          },
+          "lease_id": {
+            "title": "Lease Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "lease_id",
+          "after_sequence"
+        ],
+        "title": "ActivityCursor",
+        "type": "object"
+      },
+      "AnswerWalkthru": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "answer",
+            "title": "Action",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "verbatim": {
+            "minLength": 1,
+            "title": "Verbatim",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "operation_id",
+          "verbatim"
+        ],
+        "title": "AnswerWalkthru",
+        "type": "object"
+      },
+      "ApprovalFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Id"
+          },
+          "request_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Type"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "approval_id",
+          "request_type",
+          "status"
+        ],
+        "title": "ApprovalFacts",
+        "type": "object"
+      },
+      "ArtifactView": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "artifact_type": {
+            "title": "Artifact Type",
+            "type": "string"
+          },
+          "content_hash": {
+            "title": "Content Hash",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "milestone_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Milestone Execution Id"
+          },
+          "producer_step_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Producer Step Name"
+          },
+          "producer_workflow_id": {
+            "title": "Producer Workflow Id",
+            "type": "string"
+          },
+          "uri": {
+            "title": "Uri",
+            "type": "string"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "artifact_type",
+          "uri",
+          "content_hash",
+          "milestone_execution_id",
+          "producer_workflow_id",
+          "producer_step_name",
+          "created_at"
+        ],
+        "title": "ArtifactView",
+        "type": "object"
+      },
+      "BlockingCondition": {
+        "description": "Why the WorkUnit is not moving, in the terms an operator can act on.",
+        "properties": {
+          "detail": {
+            "title": "Detail",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "NONE",
+              "OPERATOR_DECISION",
+              "BLOCKED_MILESTONE",
+              "FAILED_MILESTONE"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "milestone_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Milestone Keys",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "detail",
+          "milestone_keys"
+        ],
+        "title": "BlockingCondition",
+        "type": "object"
+      },
+      "BrowserAcceptanceView": {
+        "additionalProperties": false,
+        "description": "The browser-acceptance profile as the project row publishes it.",
+        "properties": {
+          "preview_command": {
+            "title": "Preview Command",
+            "type": "string"
+          },
+          "required_paths": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Paths",
+            "type": "array"
+          },
+          "viewports": {
+            "items": {
+              "$ref": "#/components/schemas/BrowserViewport"
+            },
+            "title": "Viewports",
+            "type": "array"
+          }
+        },
+        "required": [
+          "preview_command",
+          "required_paths",
+          "viewports"
+        ],
+        "title": "BrowserAcceptanceView",
+        "type": "object"
+      },
+      "BrowserViewport": {
+        "properties": {
+          "device_scale_factor": {
+            "default": 1.0,
+            "maximum": 3.0,
+            "minimum": 1.0,
+            "title": "Device Scale Factor",
+            "type": "number"
+          },
+          "height": {
+            "maximum": 2160.0,
+            "minimum": 480.0,
+            "title": "Height",
+            "type": "integer"
+          },
+          "name": {
+            "maxLength": 40,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "width": {
+            "maximum": 3840.0,
+            "minimum": 320.0,
+            "title": "Width",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "width",
+          "height"
+        ],
+        "title": "BrowserViewport",
+        "type": "object"
+      },
+      "CheckpointFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "base_head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Head Sha"
+          },
+          "checkpoint_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Checkpoint Id"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "worktree_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worktree Path"
+          }
+        },
+        "required": [
+          "checkpoint_id",
+          "status",
+          "reason",
+          "error",
+          "worktree_path",
+          "base_head_sha"
+        ],
+        "title": "CheckpointFacts",
+        "type": "object"
+      },
+      "CompileDesignDocRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "design_doc_id": {
+            "minLength": 1,
+            "title": "Design Doc Id",
+            "type": "string"
+          },
+          "raw_content": {
+            "minLength": 1,
+            "title": "Raw Content",
+            "type": "string"
+          },
+          "source_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Path"
+          }
+        },
+        "required": [
+          "design_doc_id",
+          "raw_content"
+        ],
+        "title": "CompileDesignDocRequest",
+        "type": "object"
+      },
+      "CompileDesignDocResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "compiled_plan_revision_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Compiled Plan Revision Id"
+          },
+          "delivery_contract": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DeliveryContractView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "design_doc_revision_id": {
+            "title": "Design Doc Revision Id",
+            "type": "string"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticView"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "execution_blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Execution Blockers",
+            "type": "array"
+          },
+          "permission_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PermissionPolicyView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Hash"
+          },
+          "runnable": {
+            "title": "Runnable",
+            "type": "boolean"
+          },
+          "validation_status": {
+            "$ref": "#/components/schemas/ValidationStatus"
+          }
+        },
+        "required": [
+          "design_doc_revision_id",
+          "compiled_plan_revision_id",
+          "plan_hash",
+          "validation_status",
+          "diagnostics",
+          "execution_blockers",
+          "runnable",
+          "permission_policy",
+          "delivery_contract"
+        ],
+        "title": "CompileDesignDocResponse",
+        "type": "object"
+      },
+      "DeliveryContractView": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_types": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Artifact Types",
+            "type": "array"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "kind",
+          "artifact_types",
+          "reason"
+        ],
+        "title": "DeliveryContractView",
+        "type": "object"
+      },
+      "DiagnosticView": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "severity": {
+            "title": "Severity",
+            "type": "string"
+          },
+          "span": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceSpanView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "severity",
+          "code",
+          "message",
+          "span"
+        ],
+        "title": "DiagnosticView",
+        "type": "object"
+      },
+      "DispatchIntentStatus": {
+        "description": "Every state a dispatch intent can occupy.\n\nDispatchTerminalStatus names only the two an executor reports back. This is\nthe full column vocabulary, which is what a reader or a comparison needs.",
+        "enum": [
+          "PENDING",
+          "CLAIMED",
+          "IN_PROGRESS",
+          "CHECKPOINT_REVIEW",
+          "PAUSED",
+          "DONE",
+          "FAILED",
+          "CANCELED",
+          "SUPERSEDED"
+        ],
+        "title": "DispatchIntentStatus",
+        "type": "string"
+      },
+      "EditWalkthru": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted_summary": {
+            "minLength": 1,
+            "title": "Accepted Summary",
+            "type": "string"
+          },
+          "action": {
+            "const": "edit",
+            "title": "Action",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "section_id": {
+            "minLength": 1,
+            "title": "Section Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "operation_id",
+          "section_id",
+          "accepted_summary"
+        ],
+        "title": "EditWalkthru",
+        "type": "object"
+      },
+      "EventView": {
+        "additionalProperties": false,
+        "description": "One domain event, in the shape both the view and the events route return.\n\n``extra=\"forbid\"`` is the point of this model existing rather than a dict: a\nfield added to ``repository.event_to_payload`` and not added here fails\nvalidation loudly instead of vanishing from the HTTP contract.",
+        "properties": {
+          "child_workflow_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Child Workflow Id"
+          },
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "event_type": {
+            "$ref": "#/components/schemas/WorkUnitEventType"
+          },
+          "milestone_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Milestone Execution Id"
+          },
+          "occurred_at": {
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "phase": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LifecyclePhase"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "root_workflow_id": {
+            "title": "Root Workflow Id",
+            "type": "string"
+          },
+          "sequence_number": {
+            "title": "Sequence Number",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "event_id",
+          "sequence_number",
+          "event_type",
+          "phase",
+          "milestone_execution_id",
+          "root_workflow_id",
+          "child_workflow_id",
+          "occurred_at",
+          "payload"
+        ],
+        "title": "EventView",
+        "type": "object"
+      },
+      "ExecutionEventEntry": {
+        "additionalProperties": false,
+        "description": "One durable lifecycle event, as the cockpit renders it.\n\nA ledger row carries more than a timeline row shows, and it will carry more\nagain. `from_ledger_row` names every column this view depends on, so the\ndependency is visible and a new ledger column cannot reach the cockpit by\naccident or break it on arrival.",
+        "properties": {
+          "event_id": {
+            "title": "Event Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "sequence",
+          "occurred_at",
+          "source",
+          "kind",
+          "payload"
+        ],
+        "title": "ExecutionEventEntry",
+        "type": "object"
+      },
+      "ExecutionLiveness": {
+        "description": "Whether a durable execution is still being carried by anything.",
+        "enum": [
+          "LIVE",
+          "DEAD",
+          "ABSENT",
+          "NO_RUNTIME",
+          "INDETERMINATE"
+        ],
+        "title": "ExecutionLiveness",
+        "type": "string"
+      },
+      "ExecutionRecoveryView": {
+        "additionalProperties": false,
+        "description": "What a resume had to repair before it could continue anything.\n\nAn operator otherwise cannot tell \"this continued a run that parked for me\"\nfrom \"this recovered a run that crashed\", because both return the same\naccepted resume. ``halted_epoch`` is the epoch whose death had gone\nunrecorded, and ``null`` whenever nothing needed repairing.",
+        "properties": {
+          "abandoned_milestones": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Abandoned Milestones",
+            "type": "array"
+          },
+          "execution_workflow_id": {
+            "title": "Execution Workflow Id",
+            "type": "string"
+          },
+          "halted_epoch": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Halted Epoch"
+          },
+          "liveness": {
+            "$ref": "#/components/schemas/ExecutionLiveness"
+          },
+          "schema_version": {
+            "default": "work_unit_execution_recovery.v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "liveness",
+          "execution_workflow_id",
+          "halted_epoch",
+          "abandoned_milestones"
+        ],
+        "title": "ExecutionRecoveryView",
+        "type": "object"
+      },
+      "ExhaustedMilestoneView": {
+        "additionalProperties": false,
+        "description": "A milestone the resume refused to try again, and the arithmetic behind it.\n\nAn operator asking \"why is this still blocked after I resumed it\" needs the\nnumbers, not a sentence. ``override_request_id`` names the decision they can\nanswer to lift it, so the refusal carries its own remedy.",
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "milestone_key": {
+            "title": "Milestone Key",
+            "type": "string"
+          },
+          "override_request_id": {
+            "title": "Override Request Id",
+            "type": "string"
+          },
+          "permitted": {
+            "title": "Permitted",
+            "type": "integer"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/LifecyclePhase"
+          }
+        },
+        "required": [
+          "milestone_key",
+          "phase",
+          "attempt",
+          "permitted",
+          "override_request_id"
+        ],
+        "title": "ExhaustedMilestoneView",
+        "type": "object"
+      },
+      "FileIngressRequest": {
+        "properties": {
+          "event_type": {
+            "default": "created",
+            "title": "Event Type",
+            "type": "string"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "stable": {
+            "default": false,
+            "title": "Stable",
+            "type": "boolean"
+          },
+          "use_dbos": {
+            "default": false,
+            "title": "Use Dbos",
+            "type": "boolean"
+          },
+          "workflow_type": {
+            "$ref": "#/components/schemas/WorkflowType"
+          },
+          "workspace_id": {
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "workspace_id",
+          "workflow_type"
+        ],
+        "title": "FileIngressRequest",
+        "type": "object"
+      },
+      "FinishWalkthru": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "finish",
+            "title": "Action",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "operation_id"
+        ],
+        "title": "FinishWalkthru",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IntentFacts": {
+        "additionalProperties": false,
+        "description": "One dispatch intent, for the window before any lease exists.\n\nDeliberately smaller than ``LeaseFacts``. An intent has no agent, no\nsupervisor, and no persistence lane, and the previous flattened shape made the\ncockpit render four empty rows claiming otherwise.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "execution_kind": {
+            "const": "intent",
+            "default": "intent",
+            "title": "Execution Kind",
+            "type": "string"
+          },
+          "intent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent Id"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "tier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tier"
+          }
+        },
+        "required": [
+          "execution_kind",
+          "intent_id",
+          "status",
+          "outcome",
+          "tier",
+          "kind",
+          "error"
+        ],
+        "title": "IntentFacts",
+        "type": "object"
+      },
+      "LeaseFacts": {
+        "additionalProperties": false,
+        "description": "One agent execution lease, as the cockpit renders it.",
+        "properties": {
+          "activity_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activity Status"
+          },
+          "agent_failure": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Failure"
+          },
+          "agent_failure_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Failure Category"
+          },
+          "agent_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Name"
+          },
+          "agent_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Status"
+          },
+          "agent_tier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Agent Tier"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "execution_kind": {
+            "const": "lease",
+            "default": "lease",
+            "title": "Execution Kind",
+            "type": "string"
+          },
+          "intent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent Id"
+          },
+          "lease_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lease Id"
+          },
+          "next_action": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Action"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "persistence_failure": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persistence Failure"
+          },
+          "persistence_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Persistence Status"
+          },
+          "progress_assessment_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress Assessment Error"
+          },
+          "progress_assessment_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress Assessment Status"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "supervisor_failure": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supervisor Failure"
+          },
+          "supervisor_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supervisor Status"
+          },
+          "worktree_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Worktree Path"
+          }
+        },
+        "required": [
+          "execution_kind",
+          "lease_id",
+          "intent_id",
+          "status",
+          "outcome",
+          "activity_status",
+          "agent_status",
+          "agent_failure",
+          "agent_failure_category",
+          "supervisor_status",
+          "supervisor_failure",
+          "persistence_status",
+          "persistence_failure",
+          "progress_assessment_status",
+          "progress_assessment_error",
+          "next_action",
+          "agent_tier",
+          "agent_name",
+          "worktree_path",
+          "error"
+        ],
+        "title": "LeaseFacts",
+        "type": "object"
+      },
+      "LifecyclePhase": {
+        "description": "The fixed, ordered lifecycle phases.\n\nDeclaration order is the execution order. ``ORDERED_PHASES`` derives from it\nso a reordered member cannot leave a second list saying otherwise.",
+        "enum": [
+          "CLARIFY",
+          "VALIDATE",
+          "PLAN",
+          "IMPLEMENT",
+          "VERIFY",
+          "REVIEW",
+          "DELIVER"
+        ],
+        "title": "LifecyclePhase",
+        "type": "string"
+      },
+      "MilestoneExecutionStatus": {
+        "enum": [
+          "PENDING",
+          "READY",
+          "RUNNING",
+          "WAITING_FOR_OPERATOR",
+          "BLOCKED",
+          "SUCCEEDED",
+          "FAILED",
+          "SKIPPED",
+          "CANCELLED"
+        ],
+        "title": "MilestoneExecutionStatus",
+        "type": "string"
+      },
+      "MilestoneFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "milestone_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Milestone Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "sequence": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sequence"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "milestone_id",
+          "name",
+          "status",
+          "sequence"
+        ],
+        "title": "MilestoneFacts",
+        "type": "object"
+      },
+      "MilestoneView": {
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "child_workflow_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Child Workflow Id"
+          },
+          "dependencies": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "dispatch_intent_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatch Intent Id"
+          },
+          "dispatch_status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DispatchIntentStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "executor_kind": {
+            "title": "Executor Kind",
+            "type": "string"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "failure_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Summary"
+          },
+          "milestone_execution_id": {
+            "title": "Milestone Execution Id",
+            "type": "string"
+          },
+          "ordinal": {
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/LifecyclePhase"
+          },
+          "produced_artifacts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Produced Artifacts",
+            "type": "array"
+          },
+          "required_artifacts": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Required Artifacts",
+            "type": "array"
+          },
+          "requires_operator_approval": {
+            "title": "Requires Operator Approval",
+            "type": "boolean"
+          },
+          "result_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Result Summary"
+          },
+          "stable_key": {
+            "title": "Stable Key",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MilestoneExecutionStatus"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "stable_key",
+          "title",
+          "phase",
+          "ordinal",
+          "executor_kind",
+          "status",
+          "attempt",
+          "requires_operator_approval",
+          "milestone_execution_id",
+          "dependencies",
+          "required_artifacts",
+          "produced_artifacts",
+          "child_workflow_id",
+          "dispatch_intent_id",
+          "dispatch_status",
+          "failure_code",
+          "failure_summary",
+          "result_summary"
+        ],
+        "title": "MilestoneView",
+        "type": "object"
+      },
+      "OperatorDecision": {
+        "description": "The wire spelling of an operator's answer.\n\nKept because it is what HTTP carries and what the decision row stores. It is\ndeliberately *not* what the lifecycle reasons about: on its own it cannot say\nwhich kind of request it belongs to, so an `ANSWERED` and an `APPROVED` are\ninterchangeable to any code holding one. `decision_outcome` turns this into\nthe typed pairing below at the one boundary where the two are both known.",
+        "enum": [
+          "APPROVED",
+          "DENIED",
+          "ANSWERED"
+        ],
+        "title": "OperatorDecision",
+        "type": "string"
+      },
+      "PendingDecisionView": {
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "milestone_execution_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Milestone Execution Id"
+          },
+          "prompt": {
+            "title": "Prompt",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "request_kind": {
+            "title": "Request Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "request_kind",
+          "prompt",
+          "milestone_execution_id",
+          "created_at"
+        ],
+        "title": "PendingDecisionView",
+        "type": "object"
+      },
+      "PermissionPolicyView": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_required_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Approval Required Capabilities",
+            "type": "array"
+          },
+          "autonomous_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Autonomous Capabilities",
+            "type": "array"
+          },
+          "capability_ceiling": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Capability Ceiling",
+            "type": "array"
+          },
+          "denied_capabilities": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Denied Capabilities",
+            "type": "array"
+          },
+          "requires_start_approval": {
+            "title": "Requires Start Approval",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "autonomous_capabilities",
+          "approval_required_capabilities",
+          "denied_capabilities",
+          "capability_ceiling",
+          "requires_start_approval"
+        ],
+        "title": "PermissionPolicyView",
+        "type": "object"
+      },
+      "PhaseStatus": {
+        "enum": [
+          "PENDING",
+          "RUNNING",
+          "SUCCEEDED",
+          "SKIPPED",
+          "BLOCKED",
+          "FAILED",
+          "CANCELLED"
+        ],
+        "title": "PhaseStatus",
+        "type": "string"
+      },
+      "PhaseView": {
+        "properties": {
+          "milestone_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Milestone Keys",
+            "type": "array"
+          },
+          "phase": {
+            "$ref": "#/components/schemas/LifecyclePhase"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PhaseStatus"
+          }
+        },
+        "required": [
+          "phase",
+          "status",
+          "milestone_keys"
+        ],
+        "title": "PhaseView",
+        "type": "object"
+      },
+      "PiDirectiveRequest": {
+        "properties": {
+          "context": {
+            "anyOf": [
+              {
+                "maxLength": 512000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          },
+          "max_window_tokens": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Window Tokens"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "text": {
+            "maxLength": 64000,
+            "title": "Text",
+            "type": "string"
+          },
+          "workspace_id": {
+            "default": "general",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "PiDirectiveRequest",
+        "type": "object"
+      },
+      "ProjectActionKind": {
+        "description": "Mutually exclusive operator actions projected by the project cockpit.",
+        "enum": [
+          "WORKING",
+          "WAITING_FOR_MODEL",
+          "RECOVERABLE_FAILURE",
+          "HUMAN_DECISION_REQUIRED",
+          "MERGE_APPROVAL_REQUIRED",
+          "MERGE_INTEGRATION_REQUIRED",
+          "DEPLOY_APPROVAL_REQUIRED",
+          "BLOCKED",
+          "COMPLETE"
+        ],
+        "title": "ProjectActionKind",
+        "type": "string"
+      },
+      "ProjectActionSnapshot": {
+        "additionalProperties": false,
+        "description": "One deterministic, versioned answer to: what should the operator do next?",
+        "properties": {
+          "action": {
+            "$ref": "#/components/schemas/ProjectActionKind"
+          },
+          "approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalFacts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "checkpoint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CheckpointFacts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "execution": {
+            "anyOf": [
+              {
+                "discriminator": {
+                  "mapping": {
+                    "intent": "#/components/schemas/IntentFacts",
+                    "lease": "#/components/schemas/LeaseFacts"
+                  },
+                  "propertyName": "execution_kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/LeaseFacts"
+                  },
+                  {
+                    "$ref": "#/components/schemas/IntentFacts"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution"
+          },
+          "freshness_seconds": {
+            "minimum": 0.0,
+            "title": "Freshness Seconds",
+            "type": "integer"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "milestone": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MilestoneFacts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next_command": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Command"
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProjectFacts"
+          },
+          "review": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Review"
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/RuntimeFacts"
+          },
+          "saga": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SagaFacts"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "schema_version": {
+            "default": "project_action_snapshot.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "source_ids": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Source Ids",
+            "type": "object"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "verification": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verification"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "generated_at",
+          "freshness_seconds",
+          "action",
+          "summary",
+          "next_command",
+          "runtime",
+          "project",
+          "saga",
+          "milestone",
+          "execution",
+          "checkpoint",
+          "verification",
+          "review",
+          "approval",
+          "warnings",
+          "source_ids"
+        ],
+        "title": "ProjectActionSnapshot",
+        "type": "object"
+      },
+      "ProjectActivityPage": {
+        "additionalProperties": false,
+        "description": "One bounded step through the current lease's lifecycle events.",
+        "properties": {
+          "cursor_reset": {
+            "title": "Cursor Reset",
+            "type": "boolean"
+          },
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/ExecutionEventEntry"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "generated_at": {
+            "format": "date-time",
+            "title": "Generated At",
+            "type": "string"
+          },
+          "has_more": {
+            "title": "Has More",
+            "type": "boolean"
+          },
+          "lease_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lease Id"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActivityCursor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "project_activity_page.v1",
+            "default": "project_activity_page.v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "generated_at",
+          "project_id",
+          "lease_id",
+          "cursor_reset",
+          "events",
+          "has_more",
+          "next_cursor"
+        ],
+        "title": "ProjectActivityPage",
+        "type": "object"
+      },
+      "ProjectCenterView": {
+        "additionalProperties": false,
+        "description": "The project registry, as the cockpit's project picker reads it.",
+        "properties": {
+          "control_plane_project": {
+            "title": "Control Plane Project",
+            "type": "string"
+          },
+          "default_memory_project": {
+            "title": "Default Memory Project",
+            "type": "string"
+          },
+          "default_saga_project": {
+            "title": "Default Saga Project",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectStatusRow"
+            },
+            "title": "Projects",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "description",
+          "control_plane_project",
+          "default_saga_project",
+          "default_memory_project",
+          "projects"
+        ],
+        "title": "ProjectCenterView",
+        "type": "object"
+      },
+      "ProjectFacts": {
+        "additionalProperties": false,
+        "description": "The registered project, including the two facts the action logic gates on.",
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "exists": {
+            "default": false,
+            "title": "Exists",
+            "type": "boolean"
+          },
+          "git_repo": {
+            "default": false,
+            "title": "Git Repo",
+            "type": "boolean"
+          },
+          "head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Sha"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Path"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "status",
+          "branch",
+          "head_sha",
+          "exists",
+          "git_repo"
+        ],
+        "title": "ProjectFacts",
+        "type": "object"
+      },
+      "ProjectStatusRow": {
+        "additionalProperties": false,
+        "description": "One registered project, with its git state when the path is a repository.\n\nThe git fields are absent from the underlying row when git was not consulted,\nthe path does not exist, or reading it failed. They are modelled as nullable\nrather than optional so the published contract is \"always present, sometimes\nnull\", which is what a client actually receives once the model serializes.",
+        "properties": {
+          "avoid": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Avoid",
+            "type": "array"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Branch"
+          },
+          "browser_acceptance": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BrowserAcceptanceView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "exists": {
+            "title": "Exists",
+            "type": "boolean"
+          },
+          "git_dirty": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Dirty"
+          },
+          "git_dirty_entries": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Dirty Entries"
+          },
+          "git_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Git Error"
+          },
+          "git_repo": {
+            "title": "Git Repo",
+            "type": "boolean"
+          },
+          "head_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head Sha"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "integrated_branch": {
+            "title": "Integrated Branch",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "owns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Owns",
+            "type": "array"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "primary_interfaces": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Primary Interfaces",
+            "type": "array"
+          },
+          "read_only": {
+            "title": "Read Only",
+            "type": "boolean"
+          },
+          "reference_packs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reference Packs",
+            "type": "array"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "verification_commands": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Verification Commands",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "path",
+          "exists",
+          "status",
+          "read_only",
+          "description",
+          "primary_interfaces",
+          "owns",
+          "avoid",
+          "verification_commands",
+          "integrated_branch",
+          "reference_packs",
+          "browser_acceptance",
+          "git_repo",
+          "git_error",
+          "git_dirty",
+          "git_dirty_entries",
+          "branch",
+          "head_sha"
+        ],
+        "title": "ProjectStatusRow",
+        "type": "object"
+      },
+      "QuestionRequest": {
+        "properties": {
+          "prompt": {
+            "maxLength": 256000,
+            "title": "Prompt",
+            "type": "string"
+          },
+          "use_dbos": {
+            "default": false,
+            "title": "Use Dbos",
+            "type": "boolean"
+          },
+          "workspace_id": {
+            "default": "general",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "title": "QuestionRequest",
+        "type": "object"
+      },
+      "ReviseWalkthru": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted_summary": {
+            "minLength": 1,
+            "title": "Accepted Summary",
+            "type": "string"
+          },
+          "action": {
+            "const": "revise",
+            "title": "Action",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "operation_id",
+          "accepted_summary"
+        ],
+        "title": "ReviseWalkthru",
+        "type": "object"
+      },
+      "RuntimeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "application_version": {
+            "title": "Application Version",
+            "type": "string"
+          },
+          "coordination_backend": {
+            "title": "Coordination Backend",
+            "type": "string"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revision"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "application_version",
+          "coordination_backend",
+          "revision"
+        ],
+        "title": "RuntimeFacts",
+        "type": "object"
+      },
+      "SagaFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "current_stage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Current Stage"
+          },
+          "saga_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Saga Id"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          }
+        },
+        "required": [
+          "saga_id",
+          "status",
+          "current_stage"
+        ],
+        "title": "SagaFacts",
+        "type": "object"
+      },
+      "SkipWalkthru": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "const": "skip",
+            "title": "Action",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "operation_id"
+        ],
+        "title": "SkipWalkthru",
+        "type": "object"
+      },
+      "SourceSpanView": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "title": "End",
+            "type": "integer"
+          },
+          "start": {
+            "title": "Start",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start",
+          "end"
+        ],
+        "title": "SourceSpanView",
+        "type": "object"
+      },
+      "StartWalkthruRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "create_target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Create Target Id"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "target_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Project Id"
+          }
+        },
+        "required": [
+          "operation_id"
+        ],
+        "title": "StartWalkthruRequest",
+        "type": "object"
+      },
+      "StartWorkUnitRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "approved_plan_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approved Plan Hash"
+          },
+          "compiled_plan_revision_id": {
+            "minLength": 1,
+            "title": "Compiled Plan Revision Id",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "compiled_plan_revision_id"
+        ],
+        "title": "StartWorkUnitRequest",
+        "type": "object"
+      },
+      "StartWorkUnitResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "created": {
+            "title": "Created",
+            "type": "boolean"
+          },
+          "dispatch": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Dispatch",
+            "type": "array"
+          },
+          "dispatch_failed": {
+            "default": [],
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Dispatch Failed",
+            "type": "array"
+          },
+          "root_workflow_id": {
+            "title": "Root Workflow Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "work_unit_id": {
+            "title": "Work Unit Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_unit_id",
+          "root_workflow_id",
+          "status",
+          "created",
+          "dispatch",
+          "dispatch_failed"
+        ],
+        "title": "StartWorkUnitResponse",
+        "type": "object"
+      },
+      "StatusLegendEntry": {
+        "description": "One status: the token, what it means, and whose move it is.",
+        "properties": {
+          "meaning": {
+            "title": "Meaning",
+            "type": "string"
+          },
+          "operator_action": {
+            "title": "Operator Action",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "terminal": {
+            "title": "Terminal",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "status",
+          "meaning",
+          "operator_action",
+          "terminal"
+        ],
+        "title": "StatusLegendEntry",
+        "type": "object"
+      },
+      "StatusLegendView": {
+        "description": "The whole legend, one section per status vocabulary the cockpit renders.",
+        "properties": {
+          "dispatch": {
+            "items": {
+              "$ref": "#/components/schemas/StatusLegendEntry"
+            },
+            "title": "Dispatch",
+            "type": "array"
+          },
+          "milestone": {
+            "items": {
+              "$ref": "#/components/schemas/StatusLegendEntry"
+            },
+            "title": "Milestone",
+            "type": "array"
+          },
+          "phase": {
+            "items": {
+              "$ref": "#/components/schemas/StatusLegendEntry"
+            },
+            "title": "Phase",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "status_legend.v1",
+            "default": "status_legend.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "work_unit": {
+            "items": {
+              "$ref": "#/components/schemas/StatusLegendEntry"
+            },
+            "title": "Work Unit",
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "work_unit",
+          "phase",
+          "milestone",
+          "dispatch"
+        ],
+        "title": "StatusLegendView",
+        "type": "object"
+      },
+      "StopAttemptView": {
+        "additionalProperties": false,
+        "description": "One thing cancellation tried to stop, as the cockpit sees it.",
+        "properties": {
+          "detail": {
+            "default": "",
+            "title": "Detail",
+            "type": "string"
+          },
+          "identifier": {
+            "title": "Identifier",
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/StopTargetKind"
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/StopVerdict"
+          }
+        },
+        "required": [
+          "kind",
+          "identifier",
+          "verdict",
+          "detail"
+        ],
+        "title": "StopAttemptView",
+        "type": "object"
+      },
+      "StopTargetKind": {
+        "description": "What sort of thing the cascade tried to stop.\n\nA sum rather than a boolean pair because these fail for unrelated reasons and\nan operator's next move differs: a refused intent may mean an agent is still\nrunning, while a refused workflow means recovery could restart something.",
+        "enum": [
+          "DISPATCH_INTENT",
+          "DBOS_WORKFLOW",
+          "EXECUTION_LEASE"
+        ],
+        "title": "StopTargetKind",
+        "type": "string"
+      },
+      "StopVerdict": {
+        "description": "What became of one attempt to stop something.\n\nThree states rather than a boolean, because stopping an agent is not\nsynchronous and a boolean would have to lie in one direction or the other.\nA lease that has been asked to cancel is neither stopped nor refused: a\nsupervisor will terminate its process group at the next heartbeat. Calling\nthat `True` claims the process is dead; calling it `False` reads as a failure\nthe operator must act on. It is a third thing, and it maps to a third\noperator response, which is to wait a moment and re-check.",
+        "enum": [
+          "STOPPED",
+          "CANCELLATION_REQUESTED",
+          "REFUSED"
+        ],
+        "title": "StopVerdict",
+        "type": "string"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "ValidationStatus": {
+        "description": "The three outcomes of compiling, which are genuinely different.\n\n``VALID`` may execute. ``BLOCKED`` compiled cleanly but names an unresolved\ncondition that must be answered first. ``INVALID`` never becomes executable\nwithout editing the document.",
+        "enum": [
+          "VALID",
+          "BLOCKED",
+          "INVALID"
+        ],
+        "title": "ValidationStatus",
+        "type": "string"
+      },
+      "WalkthruAwaitingAnswerView": {
+        "properties": {
+          "completed_sections": {
+            "title": "Completed Sections",
+            "type": "integer"
+          },
+          "create_target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Create Target Id"
+          },
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "draft_path": {
+            "title": "Draft Path",
+            "type": "string"
+          },
+          "execution_started": {
+            "const": false,
+            "default": false,
+            "title": "Execution Started",
+            "type": "boolean"
+          },
+          "schema_version": {
+            "const": "gawd_walkthru.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "section": {
+            "$ref": "#/components/schemas/WalkthruSectionView"
+          },
+          "state": {
+            "const": "awaiting_answer",
+            "title": "State",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Project Id"
+          },
+          "total_sections": {
+            "title": "Total Sections",
+            "type": "integer"
+          },
+          "walkthru_id": {
+            "title": "Walkthru Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "walkthru_id",
+          "draft_id",
+          "draft_path",
+          "target_project_id",
+          "create_target_id",
+          "completed_sections",
+          "total_sections",
+          "execution_started",
+          "state",
+          "section"
+        ],
+        "title": "WalkthruAwaitingAnswerView",
+        "type": "object"
+      },
+      "WalkthruAwaitingReviewView": {
+        "properties": {
+          "completed_sections": {
+            "title": "Completed Sections",
+            "type": "integer"
+          },
+          "create_target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Create Target Id"
+          },
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "draft_path": {
+            "title": "Draft Path",
+            "type": "string"
+          },
+          "execution_started": {
+            "const": false,
+            "default": false,
+            "title": "Execution Started",
+            "type": "boolean"
+          },
+          "proposal": {
+            "$ref": "#/components/schemas/WalkthruProposalView"
+          },
+          "schema_version": {
+            "const": "gawd_walkthru.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "state": {
+            "const": "awaiting_review",
+            "title": "State",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Project Id"
+          },
+          "total_sections": {
+            "title": "Total Sections",
+            "type": "integer"
+          },
+          "walkthru_id": {
+            "title": "Walkthru Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "walkthru_id",
+          "draft_id",
+          "draft_path",
+          "target_project_id",
+          "create_target_id",
+          "completed_sections",
+          "total_sections",
+          "execution_started",
+          "state",
+          "proposal"
+        ],
+        "title": "WalkthruAwaitingReviewView",
+        "type": "object"
+      },
+      "WalkthruAwaitingSummaryView": {
+        "properties": {
+          "completed_sections": {
+            "title": "Completed Sections",
+            "type": "integer"
+          },
+          "create_target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Create Target Id"
+          },
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "draft_path": {
+            "title": "Draft Path",
+            "type": "string"
+          },
+          "execution_started": {
+            "const": false,
+            "default": false,
+            "title": "Execution Started",
+            "type": "boolean"
+          },
+          "pending_answer": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Pending Answer",
+            "type": "object"
+          },
+          "schema_version": {
+            "const": "gawd_walkthru.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "state": {
+            "const": "awaiting_summary",
+            "title": "State",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Project Id"
+          },
+          "total_sections": {
+            "title": "Total Sections",
+            "type": "integer"
+          },
+          "walkthru_id": {
+            "title": "Walkthru Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "walkthru_id",
+          "draft_id",
+          "draft_path",
+          "target_project_id",
+          "create_target_id",
+          "completed_sections",
+          "total_sections",
+          "execution_started",
+          "state",
+          "pending_answer"
+        ],
+        "title": "WalkthruAwaitingSummaryView",
+        "type": "object"
+      },
+      "WalkthruFinishedView": {
+        "properties": {
+          "completed_sections": {
+            "title": "Completed Sections",
+            "type": "integer"
+          },
+          "create_target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Create Target Id"
+          },
+          "draft_content": {
+            "title": "Draft Content",
+            "type": "string"
+          },
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "draft_path": {
+            "title": "Draft Path",
+            "type": "string"
+          },
+          "execution_started": {
+            "const": false,
+            "default": false,
+            "title": "Execution Started",
+            "type": "boolean"
+          },
+          "responses": {
+            "items": {
+              "$ref": "#/components/schemas/WalkthruResponseView"
+            },
+            "title": "Responses",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "gawd_walkthru.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "state": {
+            "const": "finished",
+            "title": "State",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Project Id"
+          },
+          "total_sections": {
+            "title": "Total Sections",
+            "type": "integer"
+          },
+          "walkthru_id": {
+            "title": "Walkthru Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "walkthru_id",
+          "draft_id",
+          "draft_path",
+          "target_project_id",
+          "create_target_id",
+          "completed_sections",
+          "total_sections",
+          "execution_started",
+          "state",
+          "responses",
+          "draft_content"
+        ],
+        "title": "WalkthruFinishedView",
+        "type": "object"
+      },
+      "WalkthruProposalView": {
+        "additionalProperties": false,
+        "properties": {
+          "section_id": {
+            "title": "Section Id",
+            "type": "string"
+          },
+          "suggestions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Suggestions",
+            "type": "array"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "summary_method": {
+            "title": "Summary Method",
+            "type": "string"
+          },
+          "verbatim": {
+            "title": "Verbatim",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section_id",
+          "verbatim",
+          "summary",
+          "suggestions",
+          "summary_method"
+        ],
+        "title": "WalkthruProposalView",
+        "type": "object"
+      },
+      "WalkthruReadyToFinishView": {
+        "properties": {
+          "completed_sections": {
+            "title": "Completed Sections",
+            "type": "integer"
+          },
+          "create_target_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Create Target Id"
+          },
+          "draft_id": {
+            "title": "Draft Id",
+            "type": "string"
+          },
+          "draft_path": {
+            "title": "Draft Path",
+            "type": "string"
+          },
+          "execution_started": {
+            "const": false,
+            "default": false,
+            "title": "Execution Started",
+            "type": "boolean"
+          },
+          "review": {
+            "items": {
+              "$ref": "#/components/schemas/WalkthruResponseView"
+            },
+            "title": "Review",
+            "type": "array"
+          },
+          "schema_version": {
+            "const": "gawd_walkthru.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "state": {
+            "const": "ready_to_finish",
+            "title": "State",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Project Id"
+          },
+          "total_sections": {
+            "title": "Total Sections",
+            "type": "integer"
+          },
+          "walkthru_id": {
+            "title": "Walkthru Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "status",
+          "walkthru_id",
+          "draft_id",
+          "draft_path",
+          "target_project_id",
+          "create_target_id",
+          "completed_sections",
+          "total_sections",
+          "execution_started",
+          "state",
+          "review"
+        ],
+        "title": "WalkthruReadyToFinishView",
+        "type": "object"
+      },
+      "WalkthruResponseView": {
+        "additionalProperties": false,
+        "properties": {
+          "accepted_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted Summary"
+          },
+          "heading": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heading"
+          },
+          "model_suggestions": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Model Suggestions",
+            "type": "array"
+          },
+          "model_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Summary"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "section_id": {
+            "title": "Section Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "summary_method": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary Method"
+          },
+          "verbatim": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verbatim"
+          }
+        },
+        "required": [
+          "section_id",
+          "heading",
+          "question",
+          "verbatim",
+          "model_summary",
+          "model_suggestions",
+          "summary_method",
+          "accepted_summary",
+          "status"
+        ],
+        "title": "WalkthruResponseView",
+        "type": "object"
+      },
+      "WalkthruSectionView": {
+        "additionalProperties": false,
+        "properties": {
+          "guidance": {
+            "title": "Guidance",
+            "type": "string"
+          },
+          "heading": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Heading"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "section_id": {
+            "title": "Section Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "section_id",
+          "heading",
+          "label",
+          "question",
+          "guidance"
+        ],
+        "title": "WalkthruSectionView",
+        "type": "object"
+      },
+      "WorkUnitArtifactList": {
+        "additionalProperties": false,
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactView"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "work_unit_id": {
+            "title": "Work Unit Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_unit_id",
+          "artifacts"
+        ],
+        "title": "WorkUnitArtifactList",
+        "type": "object"
+      },
+      "WorkUnitCancelResult": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/StopAttemptView"
+            },
+            "title": "Attempts",
+            "type": "array"
+          },
+          "awaiting_stop": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/StopAttemptView"
+            },
+            "title": "Awaiting Stop",
+            "type": "array"
+          },
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "boolean"
+          },
+          "cancelled_milestones": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Cancelled Milestones",
+            "type": "array"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "refused": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/StopAttemptView"
+            },
+            "title": "Refused",
+            "type": "array"
+          },
+          "schema_version": {
+            "default": "work_unit_cancellation.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkUnitStatus"
+          },
+          "work_unit_id": {
+            "title": "Work Unit Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_unit_id",
+          "status",
+          "cancelled",
+          "cancelled_milestones",
+          "reason",
+          "schema_version",
+          "attempts",
+          "refused",
+          "awaiting_stop"
+        ],
+        "title": "WorkUnitCancelResult",
+        "type": "object"
+      },
+      "WorkUnitDecisionRequest": {
+        "description": "One operator decision, naming exactly the request it resolves.\n\n``request_id`` is required. A decision that does not name a persisted request\ncannot unblock anything, which is what keeps an approving-sounding message from\nacting as an approval. ``idempotency_key`` makes a re-delivered submission\nharmless.",
+        "properties": {
+          "decided_by": {
+            "default": "operator",
+            "title": "Decided By",
+            "type": "string"
+          },
+          "decision": {
+            "$ref": "#/components/schemas/OperatorDecision"
+          },
+          "idempotency_key": {
+            "minLength": 1,
+            "title": "Idempotency Key",
+            "type": "string"
+          },
+          "payload": {
+            "additionalProperties": true,
+            "title": "Payload",
+            "type": "object"
+          },
+          "request_id": {
+            "minLength": 1,
+            "title": "Request Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request_id",
+          "decision",
+          "idempotency_key"
+        ],
+        "title": "WorkUnitDecisionRequest",
+        "type": "object"
+      },
+      "WorkUnitDecisionResult": {
+        "additionalProperties": false,
+        "description": "What submitting one operator decision did.\n\n``applied`` false with a ``reason`` is the idempotent case: the request was\nalready resolved, and saying so is not an error.",
+        "properties": {
+          "applied": {
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decision"
+          },
+          "milestone_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Milestone Key"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "sequence_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sequence Number"
+          },
+          "work_unit_id": {
+            "title": "Work Unit Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_unit_id",
+          "request_id",
+          "decision",
+          "applied",
+          "milestone_key",
+          "sequence_number",
+          "reason"
+        ],
+        "title": "WorkUnitDecisionResult",
+        "type": "object"
+      },
+      "WorkUnitEventPage": {
+        "additionalProperties": false,
+        "description": "A forward-only window into the append-only history.\n\nThe cursor is the caller's own ``after_sequence``; there is no server cursor,\nbecause WorkUnit sequence numbers are dense and monotonic within one WorkUnit.",
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/EventView"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "work_unit_id": {
+            "title": "Work Unit Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_unit_id",
+          "events"
+        ],
+        "title": "WorkUnitEventPage",
+        "type": "object"
+      },
+      "WorkUnitEventType": {
+        "enum": [
+          "WORK_UNIT_CREATED",
+          "PLAN_BOUND",
+          "ROOT_WORKFLOW_ENQUEUED",
+          "WORK_UNIT_STARTED",
+          "WORK_UNIT_WAITING_FOR_OPERATOR",
+          "WORK_UNIT_BLOCKED",
+          "WORK_UNIT_SUCCEEDED",
+          "WORK_UNIT_FAILED",
+          "WORK_UNIT_CANCELLING",
+          "WORK_UNIT_CANCELLED",
+          "WORK_UNIT_SUPERSEDED",
+          "WORK_UNIT_COMPILED",
+          "WORK_UNIT_QUEUED",
+          "PHASE_STARTED",
+          "PHASE_SKIPPED",
+          "PHASE_COMPLETED",
+          "PHASE_BLOCKED",
+          "PHASE_FAILED",
+          "PHASE_CANCELLED",
+          "PHASE_PENDING",
+          "MILESTONE_PENDING",
+          "MILESTONE_READY",
+          "MILESTONE_STARTED",
+          "MILESTONE_WAITING_FOR_OPERATOR",
+          "MILESTONE_BLOCKED",
+          "MILESTONE_SUCCEEDED",
+          "MILESTONE_FAILED",
+          "MILESTONE_SKIPPED",
+          "MILESTONE_CANCELLED",
+          "ARTIFACT_RECORDED",
+          "APPROVAL_REQUESTED",
+          "APPROVAL_RECEIVED",
+          "DISPATCH_INTENT_CREATED",
+          "AUTOMATIC_CRASH_RECOVERY",
+          "LEGACY_SAGA_RECONCILED"
+        ],
+        "title": "WorkUnitEventType",
+        "type": "string"
+      },
+      "WorkUnitExecutionResult": {
+        "additionalProperties": false,
+        "description": "The root workflow's own report, returned only when it ran in-process.",
+        "properties": {
+          "compiled_plan_hash": {
+            "title": "Compiled Plan Hash",
+            "type": "string"
+          },
+          "current_phase": {
+            "title": "Current Phase",
+            "type": "string"
+          },
+          "milestone_statuses": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/MilestoneExecutionStatus"
+            },
+            "title": "Milestone Statuses",
+            "type": "object"
+          },
+          "phase_statuses": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PhaseStatus"
+            },
+            "propertyNames": {
+              "$ref": "#/components/schemas/LifecyclePhase"
+            },
+            "title": "Phase Statuses",
+            "type": "object"
+          },
+          "root_workflow_id": {
+            "title": "Root Workflow Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkUnitStatus"
+          },
+          "work_unit_id": {
+            "title": "Work Unit Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "work_unit_id",
+          "root_workflow_id",
+          "compiled_plan_hash",
+          "status",
+          "current_phase",
+          "phase_statuses",
+          "milestone_statuses"
+        ],
+        "title": "WorkUnitExecutionResult",
+        "type": "object"
+      },
+      "WorkUnitIndex": {
+        "additionalProperties": false,
+        "properties": {
+          "work_units": {
+            "items": {
+              "$ref": "#/components/schemas/WorkUnitSummary"
+            },
+            "title": "Work Units",
+            "type": "array"
+          }
+        },
+        "required": [
+          "work_units"
+        ],
+        "title": "WorkUnitIndex",
+        "type": "object"
+      },
+      "WorkUnitResumeResult": {
+        "additionalProperties": false,
+        "description": "Whether a resume was accepted, and by what.\n\n``delivered`` false is a real answer rather than a failure: no durable runtime\nwas available to take the continuation, so nothing was started.",
+        "properties": {
+          "continuation_of": {
+            "title": "Continuation Of",
+            "type": "string"
+          },
+          "delivered": {
+            "title": "Delivered",
+            "type": "boolean"
+          },
+          "durable": {
+            "title": "Durable",
+            "type": "boolean"
+          },
+          "exhausted": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ExhaustedMilestoneView"
+            },
+            "title": "Exhausted",
+            "type": "array"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "recovered": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ExecutionRecoveryView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WorkUnitExecutionResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "work_unit_id": {
+            "title": "Work Unit Id",
+            "type": "string"
+          },
+          "workflow_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workflow Id"
+          }
+        },
+        "required": [
+          "work_unit_id",
+          "continuation_of",
+          "delivered",
+          "durable",
+          "workflow_id",
+          "reason",
+          "result",
+          "recovered",
+          "exhausted"
+        ],
+        "title": "WorkUnitResumeResult",
+        "type": "object"
+      },
+      "WorkUnitStatus": {
+        "enum": [
+          "DRAFT",
+          "COMPILED",
+          "QUEUED",
+          "RUNNING",
+          "WAITING_FOR_OPERATOR",
+          "BLOCKED",
+          "CANCELLING",
+          "SUCCEEDED",
+          "FAILED",
+          "CANCELLED",
+          "SUPERSEDED"
+        ],
+        "title": "WorkUnitStatus",
+        "type": "string"
+      },
+      "WorkUnitSummary": {
+        "additionalProperties": false,
+        "description": "One row of the WorkUnit list: enough to choose one, not enough to work it.",
+        "properties": {
+          "compiled_plan_hash": {
+            "title": "Compiled Plan Hash",
+            "type": "string"
+          },
+          "current_phase": {
+            "title": "Current Phase",
+            "type": "string"
+          },
+          "root_workflow_id": {
+            "title": "Root Workflow Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkUnitStatus"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "work_unit_id": {
+            "title": "Work Unit Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "work_unit_id",
+          "title",
+          "status",
+          "current_phase",
+          "root_workflow_id",
+          "compiled_plan_hash"
+        ],
+        "title": "WorkUnitSummary",
+        "type": "object"
+      },
+      "WorkUnitView": {
+        "properties": {
+          "artifacts": {
+            "items": {
+              "$ref": "#/components/schemas/ArtifactView"
+            },
+            "title": "Artifacts",
+            "type": "array"
+          },
+          "blocking": {
+            "$ref": "#/components/schemas/BlockingCondition"
+          },
+          "compiled_plan_hash": {
+            "title": "Compiled Plan Hash",
+            "type": "string"
+          },
+          "compiled_plan_revision_id": {
+            "title": "Compiled Plan Revision Id",
+            "type": "string"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "current_phase": {
+            "title": "Current Phase",
+            "type": "string"
+          },
+          "dbos_workflow_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Dbos Workflow Ids",
+            "type": "array"
+          },
+          "design_doc_revision_id": {
+            "title": "Design Doc Revision Id",
+            "type": "string"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "failure_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Summary"
+          },
+          "legacy_saga_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Legacy Saga Id"
+          },
+          "lifecycle_profile": {
+            "title": "Lifecycle Profile",
+            "type": "string"
+          },
+          "lifecycle_profile_version": {
+            "title": "Lifecycle Profile Version",
+            "type": "integer"
+          },
+          "milestones": {
+            "items": {
+              "$ref": "#/components/schemas/MilestoneView"
+            },
+            "title": "Milestones",
+            "type": "array"
+          },
+          "pending_decisions": {
+            "items": {
+              "$ref": "#/components/schemas/PendingDecisionView"
+            },
+            "title": "Pending Decisions",
+            "type": "array"
+          },
+          "phases": {
+            "items": {
+              "$ref": "#/components/schemas/PhaseView"
+            },
+            "title": "Phases",
+            "type": "array"
+          },
+          "recent_events": {
+            "items": {
+              "$ref": "#/components/schemas/EventView"
+            },
+            "title": "Recent Events",
+            "type": "array"
+          },
+          "root_workflow_id": {
+            "title": "Root Workflow Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "work_unit_view.v1",
+            "default": "work_unit_view.v1",
+            "title": "Schema Version",
+            "type": "string"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "status": {
+            "$ref": "#/components/schemas/WorkUnitStatus"
+          },
+          "supersedes_work_unit_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes Work Unit Id"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "work_unit_id": {
+            "title": "Work Unit Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "work_unit_id",
+          "title",
+          "status",
+          "current_phase",
+          "design_doc_revision_id",
+          "compiled_plan_revision_id",
+          "compiled_plan_hash",
+          "lifecycle_profile",
+          "lifecycle_profile_version",
+          "root_workflow_id",
+          "supersedes_work_unit_id",
+          "legacy_saga_id",
+          "created_at",
+          "started_at",
+          "completed_at",
+          "failure_code",
+          "failure_summary",
+          "phases",
+          "milestones",
+          "blocking",
+          "pending_decisions",
+          "artifacts",
+          "recent_events",
+          "dbos_workflow_ids"
+        ],
+        "title": "WorkUnitView",
+        "type": "object"
+      },
+      "WorkflowType": {
+        "enum": [
+          "general_questions",
+          "whiteboard_ocr",
+          "paper_notes_ocr",
+          "apple_notes_sync",
+          "workflowy_sync",
+          "workflowy_write",
+          "audio_transcription",
+          "embedder",
+          "medical_image_analyzer",
+          "training_export_stub",
+          "model_directive",
+          "agent_query",
+          "ocr_capture",
+          "directory_embedding",
+          "context_compaction",
+          "send_to_workflowy",
+          "done_recall",
+          "chrome_control",
+          "whiteboard_intent",
+          "create_tomorrow",
+          "graph_extraction",
+          "graph_analytics",
+          "resident_local_delegate"
+        ],
+        "title": "WorkflowType",
+        "type": "string"
+      },
+      "WorkflowyWriteRequest": {
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "parent_node_id": {
+            "title": "Parent Node Id",
+            "type": "string"
+          },
+          "use_dbos": {
+            "default": false,
+            "title": "Use Dbos",
+            "type": "boolean"
+          },
+          "workspace_id": {
+            "default": "workflowy",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "parent_node_id",
+          "content"
+        ],
+        "title": "WorkflowyWriteRequest",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Local-First Agent OS",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/apple-notes/sync": {
+      "post": {
+        "operationId": "apple_notes_sync_apple_notes_sync_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Apple Notes Sync Apple Notes Sync Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Apple Notes Sync"
+      }
+    },
+    "/authoring/design-docs/compile": {
+      "post": {
+        "operationId": "compile_design_doc_authoring_design_docs_compile_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompileDesignDocRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompileDesignDocResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Compile Design Doc"
+      }
+    },
+    "/authoring/walkthroughs": {
+      "post": {
+        "operationId": "start_walkthru_authoring_walkthroughs_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartWalkthruRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "discriminator": {
+                    "mapping": {
+                      "awaiting_answer": "#/components/schemas/WalkthruAwaitingAnswerView",
+                      "awaiting_review": "#/components/schemas/WalkthruAwaitingReviewView",
+                      "awaiting_summary": "#/components/schemas/WalkthruAwaitingSummaryView",
+                      "finished": "#/components/schemas/WalkthruFinishedView",
+                      "ready_to_finish": "#/components/schemas/WalkthruReadyToFinishView"
+                    },
+                    "propertyName": "state"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/WalkthruAwaitingAnswerView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruAwaitingSummaryView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruAwaitingReviewView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruReadyToFinishView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruFinishedView"
+                    }
+                  ],
+                  "title": "Response Start Walkthru Authoring Walkthroughs Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Walkthru"
+      }
+    },
+    "/authoring/walkthroughs/{walkthru_id}": {
+      "get": {
+        "operationId": "read_walkthru_authoring_walkthroughs__walkthru_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "walkthru_id",
+            "required": true,
+            "schema": {
+              "title": "Walkthru Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "discriminator": {
+                    "mapping": {
+                      "awaiting_answer": "#/components/schemas/WalkthruAwaitingAnswerView",
+                      "awaiting_review": "#/components/schemas/WalkthruAwaitingReviewView",
+                      "awaiting_summary": "#/components/schemas/WalkthruAwaitingSummaryView",
+                      "finished": "#/components/schemas/WalkthruFinishedView",
+                      "ready_to_finish": "#/components/schemas/WalkthruReadyToFinishView"
+                    },
+                    "propertyName": "state"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/WalkthruAwaitingAnswerView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruAwaitingSummaryView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruAwaitingReviewView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruReadyToFinishView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruFinishedView"
+                    }
+                  ],
+                  "title": "Response Read Walkthru Authoring Walkthroughs  Walkthru Id  Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Read Walkthru"
+      }
+    },
+    "/authoring/walkthroughs/{walkthru_id}/transitions": {
+      "post": {
+        "operationId": "transition_walkthru_authoring_walkthroughs__walkthru_id__transitions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "walkthru_id",
+            "required": true,
+            "schema": {
+              "title": "Walkthru Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "discriminator": {
+                  "mapping": {
+                    "accept": "#/components/schemas/AcceptWalkthru",
+                    "answer": "#/components/schemas/AnswerWalkthru",
+                    "edit": "#/components/schemas/EditWalkthru",
+                    "finish": "#/components/schemas/FinishWalkthru",
+                    "revise": "#/components/schemas/ReviseWalkthru",
+                    "skip": "#/components/schemas/SkipWalkthru"
+                  },
+                  "propertyName": "action"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/AnswerWalkthru"
+                  },
+                  {
+                    "$ref": "#/components/schemas/AcceptWalkthru"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ReviseWalkthru"
+                  },
+                  {
+                    "$ref": "#/components/schemas/SkipWalkthru"
+                  },
+                  {
+                    "$ref": "#/components/schemas/EditWalkthru"
+                  },
+                  {
+                    "$ref": "#/components/schemas/FinishWalkthru"
+                  }
+                ],
+                "title": "Req"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "discriminator": {
+                    "mapping": {
+                      "awaiting_answer": "#/components/schemas/WalkthruAwaitingAnswerView",
+                      "awaiting_review": "#/components/schemas/WalkthruAwaitingReviewView",
+                      "awaiting_summary": "#/components/schemas/WalkthruAwaitingSummaryView",
+                      "finished": "#/components/schemas/WalkthruFinishedView",
+                      "ready_to_finish": "#/components/schemas/WalkthruReadyToFinishView"
+                    },
+                    "propertyName": "state"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/WalkthruAwaitingAnswerView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruAwaitingSummaryView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruAwaitingReviewView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruReadyToFinishView"
+                    },
+                    {
+                      "$ref": "#/components/schemas/WalkthruFinishedView"
+                    }
+                  ],
+                  "title": "Response Transition Walkthru Authoring Walkthroughs  Walkthru Id  Transitions Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Transition Walkthru"
+      }
+    },
+    "/dashboard": {
+      "get": {
+        "operationId": "dashboard_dashboard_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Dashboard Dashboard Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Dashboard"
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/ingress/file": {
+      "post": {
+        "operationId": "ingress_file_ingress_file_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileIngressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Ingress File Ingress File Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingress File"
+      }
+    },
+    "/metrics": {
+      "get": {
+        "operationId": "metrics_metrics_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Metrics"
+      }
+    },
+    "/pi/directive": {
+      "post": {
+        "operationId": "pi_directive_pi_directive_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PiDirectiveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Pi Directive Pi Directive Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pi Directive"
+      }
+    },
+    "/pi/directive/stream": {
+      "post": {
+        "operationId": "pi_directive_stream_pi_directive_stream_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PiDirectiveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pi Directive Stream"
+      }
+    },
+    "/projects": {
+      "get": {
+        "operationId": "projects_projects_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectCenterView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Projects"
+      }
+    },
+    "/projects/{project_id}/action": {
+      "get": {
+        "operationId": "project_action_projects__project_id__action_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectActionSnapshot"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Project Action"
+      }
+    },
+    "/projects/{project_id}/activity": {
+      "get": {
+        "operationId": "project_activity_projects__project_id__activity_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "project_id",
+            "required": true,
+            "schema": {
+              "title": "Project Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "lease_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Lease Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_sequence",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "After Sequence",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectActivityPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Project Activity"
+      }
+    },
+    "/questions": {
+      "post": {
+        "operationId": "question_questions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuestionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Question Questions Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Question"
+      }
+    },
+    "/registry/models": {
+      "get": {
+        "operationId": "model_registry_registry_models_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Model Registry Registry Models Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Model Registry"
+      }
+    },
+    "/registry/workspaces": {
+      "get": {
+        "operationId": "workspaces_registry_workspaces_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Workspaces Registry Workspaces Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Workspaces"
+      }
+    },
+    "/retrieval/search": {
+      "get": {
+        "operationId": "retrieval_search_retrieval_search_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "query",
+            "required": true,
+            "schema": {
+              "title": "Query",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "workspace_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Workspace Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "top_k",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "title": "Top K",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Retrieval Search Retrieval Search Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retrieval Search"
+      }
+    },
+    "/status-legend": {
+      "get": {
+        "description": "Meaning and operator next-move for every status token the cockpit renders.\n\nA constant, and served anyway: the legend must describe the statuses this\nserver emits, and a copy checked into the web bundle would drift from\nthem at the first mismatched deploy.",
+        "operationId": "status_legend_status_legend_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusLegendView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Status Legend"
+      }
+    },
+    "/work-units": {
+      "get": {
+        "operationId": "work_unit_index_work_units_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkUnitIndex"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Work Unit Index"
+      },
+      "post": {
+        "operationId": "start_work_unit_work_units_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StartWorkUnitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartWorkUnitResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Start Work Unit"
+      }
+    },
+    "/work-units/{work_unit_id}": {
+      "get": {
+        "operationId": "work_unit_detail_work_units__work_unit_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_unit_id",
+            "required": true,
+            "schema": {
+              "title": "Work Unit Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkUnitView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Work Unit Detail"
+      }
+    },
+    "/work-units/{work_unit_id}/artifacts": {
+      "get": {
+        "operationId": "work_unit_artifacts_work_units__work_unit_id__artifacts_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_unit_id",
+            "required": true,
+            "schema": {
+              "title": "Work Unit Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkUnitArtifactList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Work Unit Artifacts"
+      }
+    },
+    "/work-units/{work_unit_id}/cancel": {
+      "post": {
+        "operationId": "work_unit_cancel_work_units__work_unit_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_unit_id",
+            "required": true,
+            "schema": {
+              "title": "Work Unit Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkUnitCancelResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Work Unit Cancel"
+      }
+    },
+    "/work-units/{work_unit_id}/decisions": {
+      "post": {
+        "operationId": "work_unit_decision_work_units__work_unit_id__decisions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_unit_id",
+            "required": true,
+            "schema": {
+              "title": "Work Unit Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkUnitDecisionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkUnitDecisionResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Work Unit Decision"
+      }
+    },
+    "/work-units/{work_unit_id}/events": {
+      "get": {
+        "operationId": "work_unit_events_work_units__work_unit_id__events_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_unit_id",
+            "required": true,
+            "schema": {
+              "title": "Work Unit Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "after_sequence",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "After Sequence",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkUnitEventPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Work Unit Events"
+      }
+    },
+    "/work-units/{work_unit_id}/resume": {
+      "post": {
+        "operationId": "work_unit_resume_work_units__work_unit_id__resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_unit_id",
+            "required": true,
+            "schema": {
+              "title": "Work Unit Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkUnitResumeResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Work Unit Resume"
+      }
+    },
+    "/workflows": {
+      "get": {
+        "operationId": "workflows_workflows_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Workflows Workflows Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Workflows"
+      }
+    },
+    "/workflowy/sync": {
+      "post": {
+        "operationId": "workflowy_sync_workflowy_sync_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "additionalProperties": true,
+                    "type": "object"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Workflowy Sync Workflowy Sync Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Workflowy Sync"
+      }
+    },
+    "/workflowy/write": {
+      "post": {
+        "operationId": "workflowy_write_workflowy_write_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowyWriteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Workflowy Write Workflowy Write Post",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Workflowy Write"
+      }
+    }
+  }
+}

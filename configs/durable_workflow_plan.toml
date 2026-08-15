@@ -1,0 +1,102 @@
+schema_version = "durable_workflow_plan_contract.v1"
+artifact_schema_version = "durable_workflow_plan.v1"
+artifact_type = "durable_workflow_plan"
+
+[approval]
+generated_workflow_code_requires_operator_approval = true
+hot_load_generated_workflows = false
+approval_boundary = "Generated DBOS workflow modules must land in a worktree or PR with tests, then be reviewed and merged before runtime restart."
+
+[milestones]
+source_section = "Happy Path / Golden Flow"
+rule = "Create one milestone per happy-path step, preserving order and operator wording."
+owner = "planner"
+
+[derivation.core_design]
+source_section = "Core Design"
+owner = "senior_or_staff"
+produces = ["unit_of_work", "lifecycle", "data_model", "inputs", "outputs", "side_effects"]
+instruction = "Derive concrete workflow state, input/output contracts, and side effects from the unit of work, lifecycle, and data model."
+
+[derivation.failure_that_matters]
+source_section = "The Failure That Matters Most"
+owner = "operator_then_senior_or_staff"
+produces = ["retry_policy", "timeout_policy", "compensation_or_rollback", "block_conditions"]
+instruction = "Treat the operator's stated failure as the primary recovery design, then formalize retry, timeout, rollback, or block behavior."
+
+[derivation.verification]
+source_section = "Verification"
+owner = "senior_or_staff"
+produces = ["evidence_to_record", "final_smoke_checks"]
+instruction = "Turn verification bullets into evidence artifacts and smoke checks."
+
+[derivation.permission_envelope]
+source_section = "Permission Envelope"
+owner = "senior_or_staff"
+produces = ["approval_required", "allowed_capabilities", "denied_without_approval"]
+instruction = "Decide which steps can run autonomously and which require explicit operator approval."
+
+[[step_fields]]
+name = "step_id"
+required = true
+description = "Stable snake_case identifier generated from the happy-path milestone."
+
+[[step_fields]]
+name = "name"
+required = true
+description = "Human-readable step name."
+
+[[step_fields]]
+name = "source_sections"
+required = true
+description = "Mini GAWD sections used to derive the step."
+
+[[step_fields]]
+name = "durable_boundary_reason"
+required = true
+description = "Why this step is a DBOS checkpoint boundary."
+
+[[step_fields]]
+name = "inputs"
+required = true
+description = "Explicit inputs needed before the step can execute."
+
+[[step_fields]]
+name = "outputs"
+required = true
+description = "Explicit durable outputs expected from the step."
+
+[[step_fields]]
+name = "side_effects"
+required = true
+description = "External or persistent side effects, including repo, database, deployment, or communication changes."
+
+[[step_fields]]
+name = "idempotency_key"
+required = true
+description = "Stable key used to make retries safe."
+
+[[step_fields]]
+name = "retry_policy"
+required = true
+description = "Retry behavior derived from the failure section."
+
+[[step_fields]]
+name = "timeout_policy"
+required = true
+description = "Timeout behavior derived from failure and budget constraints."
+
+[[step_fields]]
+name = "compensation_or_rollback"
+required = true
+description = "Rollback, compensation, or fail-closed behavior."
+
+[[step_fields]]
+name = "approval_required"
+required = true
+description = "Whether this step is blocked pending explicit approval."
+
+[[step_fields]]
+name = "evidence_to_record"
+required = true
+description = "Artifacts, logs, traces, screenshots, or ledger rows the step must record."

@@ -1,0 +1,6 @@
+name: local-first-agent-os
+language: python
+runtimeConfig:
+  start:
+    - uv run local-agent serve
+system_database_url: ${LOCAL_AGENT_DBOS_SYSTEM_DATABASE_URL}

@@ -1,0 +1,43 @@
+# Closed ontology for the knowledge graph layer (`entity_graph.v1`).
+#
+# The type sets are closed on purpose: entities and relations whose type is not
+# named here are dropped at the extraction boundary and counted, which is what
+# keeps the graph queryable. Bumping `ontology_version` changes every extraction
+# `workflow_id`, so the graph re-derives cleanly rather than mixing vintages.
+
+ontology_version = "v1"
+
+[extraction]
+extractor_role = "general"
+# Cosine similarity above which two same-type entities are the same node.
+# Conservative by design: over-merging is the failure mode that costs most.
+resolution_threshold = 0.86
+# Confidence below which a node or edge is written but quarantined behind
+# `pi /graph review` rather than surfaced.
+review_threshold = 0.55
+max_extraction_chars = 24000
+max_entities_per_artifact = 60
+max_batch_artifacts = 500
+
+[retrieval]
+max_hops = 2
+max_neighbors = 40
+
+[entity_types]
+# name = description (fed verbatim into the extraction prompt)
+Person = "A named individual"
+Project = "A named initiative or body of work"
+Concept = "An idea, technique, or topic"
+Note = "A discrete note or document"
+Paper = "A paper, article, or external reference"
+Task = "An actionable item"
+Place = "A location"
+Tool = "A software tool, library, or service"
+
+[relation_types]
+MENTIONS = "Source references the target"
+RELATES_TO = "General association"
+PART_OF = "Target contains the source"
+DEPENDS_ON = "Source requires the target"
+AUTHORED_BY = "Target created the source"
+ABOUT = "Source is primarily about the target"

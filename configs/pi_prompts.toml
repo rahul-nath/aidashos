@@ -1,0 +1,119 @@
+[prompts.compaction]
+version = "context_compaction_prompt.v2"
+text = """You are the context compactor for a local Pi/GENERAL-role agent runtime.
+
+Return strict JSON only. Do not return prose.
+
+Extract durable structured state from these old assistant turns. User prompts are preserved
+verbatim separately — do not re-summarize them. This is lossy memory for a stronger decision
+model, so preserve exact technical artifacts verbatim.
+
+Extract:
+- durable_facts
+- user_preferences
+- current_decisions
+- unresolved_questions
+- commands_configs_paths
+- constraints
+- recent_conversation_state
+- exact_snippets_to_preserve
+- failed_attempts_still_relevant
+- image_state
+- tool_state
+
+Delete:
+- repeated back-and-forth
+- dead branches
+- politeness/filler
+- failed attempts unless still relevant
+
+Rules:
+- Preserve shell commands exactly.
+- Preserve file paths exactly.
+- Preserve config keys exactly.
+- Preserve filenames exactly.
+- Preserve model names exactly.
+- Preserve ports exactly.
+- Preserve JSON/code/error strings exactly.
+- Preserve user constraints exactly.
+- Preserve image refs and OCR/visible text exactly.
+- Do not invent facts.
+- Do not summarize away important implementation details.
+
+Return this exact JSON shape:
+
+{
+  "durable_facts": [],
+  "user_preferences": [],
+  "current_decisions": [],
+  "unresolved_questions": [],
+  "commands_configs_paths": [],
+  "constraints": [],
+  "recent_conversation_state": [],
+  "exact_snippets_to_preserve": [],
+  "failed_attempts_still_relevant": [],
+  "image_state": [],
+  "tool_state": [],
+  "discarded_as_redundant": []
+}
+
+Old assistant turns:
+<<<OLD_TURNS>>>
+"""
+
+[prompts.dependency_context_compaction]
+version = "dependency_context_compaction_prompt.v1"
+text = """You are compacting the completed-dependency section of a prompt about to be handed to another engineering agent. The text below is the full output of every task this agent's task depends on. It is too long to include verbatim, and the alternative to your summary is cutting it off partway through, so cover all of it rather than any part of it well.
+
+Rewrite it in at most <<<CHAR_BUDGET>>> characters. Keep the "## <task name>" heading for every task, in the same order, and under each one keep: its status, what it actually did or concluded, every changed file path, every risk, and any exact command, identifier, or error string a reader could not reconstruct. Drop narration, restated instructions, and repetition. Do not add findings, do not resolve disagreements between tasks, and do not mark anything done that the text does not say is done.
+
+Return only the rewritten section. No preamble.
+
+Completed dependency outputs:
+<<<DEPENDENCY_CONTEXT>>>"""
+
+[prompts.image_classifier]
+version = "image_classifier_prompt.v2"
+text = """A vision model was asked to OCR an image, or to describe it when it held little or no text. Its output follows. Decide whether the image is primarily a picture of text or a picture of a scene. Reply with JSON: {"is_text": bool, "description": str}. If is_text is true, leave description empty. Otherwise return a two-sentence description of the scene based on the output.
+
+Vision model output:
+<<<EXTRACT>>>"""
+
+[prompts.done_aggregation]
+version = "done_aggregation_prompt.v1"
+text = """Aggregate the following retrieved snippets into a concise answer to the user's query. Query: <<<QUERY>>>
+
+Snippets:
+<<<SNIPPETS>>>"""
+
+[prompts.chrome_decide]
+version = "chrome_decide_prompt.v1"
+default_instruction = "Decide what action, if any, the user should take based on these tabs."
+text = """Read the captured Chrome tab content and make a concrete recommendation. Use tab ids in the answer. Do not close tabs yourself; only recommend candidate tab ids and explain why.
+
+User instruction: <<<INSTRUCTION>>>
+
+"""
+
+[prompts.chrome_summary]
+version = "chrome_summary_prompt.v1"
+text = """Summarize these Chrome tabs for the user. Group the tabs into practical categories, name likely duplicates or stale tabs, and recommend which tab ids are safe candidates to close. Do not ask to close anything yourself.
+
+"""
+
+[prompts."skill.karpathy_coding_discipline"]
+version = "skill.karpathy_coding_discipline.v1"
+text = """Coding discipline:
+
+Before editing:
+- State your assumptions explicitly.
+- Surface ambiguity in the task; ask before guessing.
+- Prefer the simplest sufficient change. No abstractions for hypothetical futures.
+- Touch only files relevant to this task.
+- Define how you will verify the change (command + expected signal).
+
+After editing:
+- List every file changed and the one-line reason.
+- Report the verification you ran and its result.
+- Call out remaining risk or work you deliberately deferred.
+"""

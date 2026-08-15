@@ -1,0 +1,180 @@
+schema_version = 1
+source_root = "../local_first_agent_os"
+destination_root = "."
+
+# Root files.
+[[allow]]
+path = ".dockerignore"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = ".env.example"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = ".gitignore"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = ".node-version"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = ".nvmrc"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = ".python-version"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "Dockerfile"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "LICENSE"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "Makefile"
+kind = "file"
+overwrite = true
+
+# Required at runtime, not documentation. `policy_document.py` reads it from the
+# repository root and `POLICY_CONTENT_HASH` is pinned against its bytes. Absent,
+# `load_policy_document` compiles to an empty policy that permits everything -
+# deliberate, so a machine predating the file behaves as it did before, but it
+# means a public snapshot missing this file ships with no written policy at all
+# and no sign that it is missing one.
+[[allow]]
+path = "POLICIES.md"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "agent_coordination_mcp.py"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "agent_coordination_postgres_schema.sql"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "dbos-config.yaml"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "docker-compose.yml"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "model_download_example.sh"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "pyproject.toml"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "uv.lock"
+kind = "file"
+overwrite = true
+
+# README.md, CLAUDE.md, and AGENTS.md are deliberately absent from this list.
+# The private copies are written for an operator who has the handoff log, the
+# design docs, and the private target-project registry in front of them, and
+# they link to all three. This repository owns its own README instead, and the
+# importer never touches a destination file it was not asked to write, so the
+# public README survives every import.
+
+# The documentation tree does not travel. The private repository's docs/ is a
+# working engineering log - dated handoffs, session postmortems, design
+# arguments, client-project milestones - and publishing it publishes a
+# narrative, not a system. Exactly two paths under docs/ are here, and both are
+# here because code fails without them rather than because a reader wants them:
+#
+# docs/configuration.md is generated from the Settings model, not written.
+# `scripts/dump_config_reference.py --check` reads a missing file as an empty
+# one, so its absence is a mismatch, and `make config-docs-check` and
+# `tests/test_openapi_contract.py` both fail on it.
+#
+# docs/examples/ holds the two design documents the test suite compiles. Both
+# are loaded by path: `tests/work_unit_support.py` reads the acceptance doc and
+# `tests/test_work_unit_golden_path.py` reads the golden-path doc.
+[[allow]]
+path = "docs/configuration.md"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "docs/examples"
+kind = "directory"
+overwrite = true
+
+# Directories.
+[[allow]]
+path = "configs"
+kind = "directory"
+overwrite = true
+
+[[allow]]
+path = "docker"
+kind = "directory"
+overwrite = true
+
+[[allow]]
+path = "k8s"
+kind = "directory"
+overwrite = true
+
+[[allow]]
+path = "migrations"
+kind = "directory"
+overwrite = true
+
+[[allow]]
+path = "observability"
+kind = "directory"
+overwrite = true
+
+[[allow]]
+path = "scripts"
+kind = "directory"
+overwrite = true
+
+# Runtime prompt material rather than documentation, despite the file
+# extension. `pow_wow/prompts.py` names `skills/agent-startup/SKILL.md` to
+# every dispatched agent, and the pi slash commands are these files.
+[[allow]]
+path = "skills"
+kind = "directory"
+overwrite = true
+
+[[allow]]
+path = "src"
+kind = "directory"
+overwrite = true
+
+[[allow]]
+path = "tests"
+kind = "directory"
+overwrite = true
+
+[[allow]]
+path = "web"
+kind = "directory"
+overwrite = true

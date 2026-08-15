@@ -1,0 +1,28 @@
+# ASR trigger-word router.
+#
+# When `/start /asr` streams a transcription chunk, the ASR client scans the
+# chunk text (case-insensitive substring match) against each `phrase` below.
+# A hit currently logs the named `directive` with `args`; it does not execute
+# the directive. Treat this as a voice-command observation layer until saga/pow-wow
+# orchestration is reliable enough to accept spoken side effects.
+#
+# Add an entry by appending a [[triggers]] block. Example (commented out
+# because it would otherwise fire whenever you say "store this"):
+#
+#   [[triggers]]
+#   phrase = "store this"
+#   directive = "/store"
+#   args = ["~/note.md"]
+#
+#   [[triggers]]
+#   phrase = "compactor"
+#   directive = "/compact"
+#   args = []
+#
+# Phrases are lowercased before matching. Keep them distinct enough that
+# normal speech won't false-fire — short common words make for nasty
+# surprises. The dispatch hook in asr_client.maybe_dispatch_triggers is
+# intentionally logging-only; enabling real Pi dispatch must be an explicit code
+# change with tests around false positives and side-effect gating.
+
+triggers = []

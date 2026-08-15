@@ -1,0 +1,92 @@
+default_model_role = "general"
+
+[aliases]
+"/base" = "general"
+"/default" = "general"
+"/general" = "general"
+"/gemma4" = "general"
+"/qwen" = "general_fallback"
+"/qwen3.8" = "general_fallback"
+"/qwen38" = "general_fallback"
+"/glimmer" = "deliberator"
+"/deliberator" = "deliberator"
+"/surya" = "ocr"
+"/ocr" = "ocr"
+"/vision" = "ocr"
+"/chandra" = "hard_ocr"
+"/hard-ocr" = "hard_ocr"
+"/asr" = "asr"
+"/audio" = "asr"
+"/med" = "medical"
+"/medical" = "medical"
+"/embed" = "embedder"
+"/embedder" = "embedder"
+"/store-embed" = "embedder"
+"/fallback" = "general_fallback"
+"/general-fallback" = "general_fallback"
+"/general_fallback" = "general_fallback"
+"/compactor" = "compactor"
+
+[directives.start]
+description = "Load a local model role. Requires an alias argument (e.g. /start /qwen, /start /chandra)."
+
+[directives.stop]
+description = "Unload a local model role. Bare /stop unloads all roles known to the registry."
+
+[directives.get]
+description = "Query the local embedding store."
+
+[directives.fetch]
+description = "Fetch from a scoped indexed source, currently /workflowy."
+
+[directives.compact]
+description = "Compact current context when it crosses the configured context threshold."
+
+[directives.store]
+description = "Embed text files and OCR/index images from a local path."
+
+[directives.claude]
+description = "Ask Claude Code directly. Records the query and a pointer to its transcript, with no worktree or merge gate."
+
+[directives.codex]
+description = "Ask Codex directly. Records the query and a pointer to its transcript, with no worktree or merge gate."
+
+[directives.ocr]
+description = "OCR one image or a recursive image directory with Surya, without embedding or semantic interpretation."
+
+[directives."hard-ocr"]
+description = "OCR one difficult image or recursive image directory with Chandra, without embedding or semantic interpretation."
+
+[directives.screenshot]
+description = "Legacy OCR-and-index workflow for a screenshot/image, with an optional tail query."
+
+[directives."send-to-wf"]
+description = "Process a file (text/audio/image) and post the result to Workflowy under MM/DD."
+
+[directives.done]
+description = "Search local embeddings and aggregate results via the default model."
+
+[directives.chrome]
+description = "Control Chrome DevTools MCP tabs/pages: list, gather by category, read page text, decide from page text, summarize, open, select, navigate, close, evaluate JS, snapshot, and screenshot."
+
+[context]
+compaction_threshold_ratio = 0.9
+compaction_target_ratio = 0.5
+default_max_window_tokens = 32768
+
+[store]
+text_extensions = [".md", ".markdown", ".txt", ".json", ".jsonl", ".csv", ".tsv", ".py", ".ts", ".tsx", ".js", ".jsx", ".yaml", ".yml"]
+image_extensions = [".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff"]
+audio_extensions = [".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus"]
+max_file_bytes = 2000000
+
+[ocr]
+image_extensions = [".png", ".jpg", ".jpeg", ".webp", ".heic", ".tif", ".tiff"]
+max_file_bytes = 50000000
+# Fallback pixel budget for OCR roles whose registry entry declares no
+# ocr_max_dimension. Downscaling is triggered by the image's long edge, so a
+# well-compressed high-resolution photo is caught the same as a large file.
+max_dimension = 2048
+
+[directives.graph]
+description = "Build, analyze, query, and re-derive the knowledge graph. Subcommands: build, analyze, get, node, stats, review, rebuild."

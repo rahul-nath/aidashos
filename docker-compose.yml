@@ -1,0 +1,329 @@
+# Without this, Compose names the project after whatever directory it was invoked
+# from, so every git worktree gets a project of its own. That is wrong here in a
+# way that is worth spelling out: every service below pins `container_name`, and
+# container names are global to the daemon rather than scoped to a project. Two
+# projects therefore cannot coexist - the second one to start collides on the
+# name - so per-directory projects buy no isolation and only ever produce
+# orphans. A worktree deleted while its containers are up leaves a project
+# pointing at a path that no longer exists, still holding the ports.
+#
+# The pin lives here rather than in the scripts because every entry point needs
+# it: the startup and teardown scripts, the smoke test, the observability script,
+# the suite's own `docker compose up` in tests/postgres_server.py, and any command
+# typed by hand. A default in the file is the only place that covers the last one.
+# `COMPOSE_PROJECT_NAME` still overrides it for anyone who wants a private stack.
+name: local_first_agent_os
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: local-agent-minio
+    profiles: [observability]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: localagent
+      MINIO_ROOT_PASSWORD: localagent-secret
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - local-agent-minio:/data
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    container_name: local-agent-minio-init
+    profiles: [observability]
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: localagent
+      MINIO_ROOT_PASSWORD: localagent-secret
+    volumes:
+      - ./observability/minio/create-buckets.sh:/create-buckets.sh:ro
+    entrypoint: ["/bin/sh", "/create-buckets.sh"]
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: local-agent-postgres
+    # A named profile rather than no profile at all, which is the non-obvious
+    # half of this design. Compose selects a profile-less service on every
+    # profile-scoped command, so leaving this one profile-less would put it in
+    # the `observability` selection too, and `stop-docker-compose-infra.sh
+    # observability` exists precisely to stop the telemetry and spare the
+    # ledger the running agent is talking to. `core` keeps the two sets
+    # disjoint, so the asymmetry is expressible instead of accidental.
+    #
+    # This holds for every profile-scoped command: `up`, `rm`, `stop`, `logs`,
+    # and `down` alike act on the profile-filtered selection (verified with
+    # `down --dry-run` on Compose v5.3.1). The surprise is therefore the bare
+    # invocation: with every service profiled, `docker compose down` selects
+    # nothing, does nothing, and exits 0. The whole-project teardown is
+    # `docker compose --profile "*" down`.
+    profiles: [core]
+    # Every durable record in this system lives here: the coordination ledger,
+    # the DBOS system database, and the app database. Without this the container
+    # stays down after a reboot, a Docker Desktop restart, or an OOM kill, and
+    # the next command fails with a connection error a long way from the cause.
+    # `unless-stopped` rather than `always` so an explicit `docker compose stop`
+    # still means stopped.
+    restart: unless-stopped
+    # Postgres ships with max_connections=100, and this system routinely puts
+    # more than that many pooled slots against one server: the API, the ledger
+    # dispatcher, the enqueue drainer, the session daemon, and the crash
+    # reconciler each open up to AGENT_COORDINATION_POOL_MAX_SIZE, DBOS holds
+    # its own set, and every dispatched agent's coordination calls draw on the
+    # same budget. Their sum reached 100 on 2026-08-04 and surfaced as
+    # `FATAL: sorry, too many clients already` inside a streaming supervisor,
+    # a long way from the arithmetic that caused it.
+    #
+    # Headroom, not a fix. `check_connection_budget` is what makes the sum
+    # visible before work starts; this only moves the ceiling far enough that
+    # the ordinary configuration is not already against it.
+    command: ["postgres", "-c", "max_connections=300"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: local_agent
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - local-agent-postgres:/var/lib/postgresql/data
+      - ./docker/init-postgres.sql:/docker-entrypoint-initdb.d/001-init-postgres.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d local_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  postgres-test:
+    image: pgvector/pgvector:pg16
+    container_name: local-agent-postgres-test
+    # In no stack any operator command asks for, so bringing up infrastructure
+    # never starts a database nobody wanted. The suite is unaffected: naming a
+    # service explicitly starts it whether or not its profile is active, and
+    # tests/postgres_server.py runs `docker compose up --detach postgres-test`.
+    profiles: [test]
+    # The suite's own server, deliberately separate from the durable one above.
+    # Tests used to create their per-test schemas inside `local_agent`, the same
+    # database that holds the coordination ledger, so a run killed before its
+    # teardown left orphaned schemas among production data. Here that cannot
+    # happen: nothing durable lives in this container.
+    #
+    # No `restart` policy, because a test server has no business surviving a
+    # reboot. The suite starts it on demand in about a second.
+    #
+    # The data directory is a tmpfs. That is what makes it fast - applying the
+    # 35-table coordination schema costs 24ms here against 81ms on a disk-backed
+    # volume, and every test that touches the ledger pays that once. It is also
+    # what makes it safe: there is no volume to accumulate anything, and
+    # stopping the container is a complete reset. Never do this to the service
+    # above.
+    tmpfs:
+      - /var/lib/postgresql/data:rw,size=2g
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: local_agent
+      # tmpfs mounts the directory itself, and initdb refuses a data directory it
+      # does not own, so PGDATA has to be a subdirectory it can create.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      # The same init script the durable server runs, so the two do not differ in
+      # what a test can assume exists.
+      - ./docker/init-postgres.sql:/docker-entrypoint-initdb.d/001-init-postgres.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d local_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local-first-agent-os:latest
+    container_name: local-agent-app
+    # The only service here with a `build:` stanza. In no infrastructure stack,
+    # so no `start-docker-compose-infra.sh` invocation can trigger an image
+    # build as a side effect of asking for a database.
+    profiles: [app]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      LOCAL_AGENT_ENV: local
+      LOCAL_AGENT_SERVICE_NAME: local-agent
+      LOCAL_AGENT_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/local_agent
+      LOCAL_AGENT_DBOS_SYSTEM_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/local_agent_dbos
+      DBOS_SYSTEM_DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/local_agent_dbos
+      LOCAL_AGENT_USE_DBOS: "true"
+      LOCAL_AGENT_STRUCTURED_LOGS: "true"
+      LOCAL_AGENT_OTEL_TRACES_ENABLED: "true"
+      LOCAL_AGENT_OTEL_TRACES_ENDPOINT: http://alloy:4318/v1/traces
+      LOCAL_AGENT_OTEL_TRACES_EXPORT_TIMEOUT_SECONDS: "2"
+      LOCAL_AGENT_PYROSCOPE_ENABLED: "true"
+      LOCAL_AGENT_PYROSCOPE_SERVER_ADDRESS: http://pyroscope:4040
+      LOCAL_AGENT_MEMORY_PROFILING_ENABLED: "true"
+      LOCAL_AGENT_MEMORY_PROFILE_SAMPLE_EVERY: "20"
+      LOCAL_AGENT_MOCK_MODELS: "true"
+      LOCAL_AGENT_ARTIFACT_ROOT: /data/artifacts
+      LOCAL_AGENT_ARTIFACT_BACKEND: minio
+      LOCAL_AGENT_MINIO_ENDPOINT: minio:9000
+      LOCAL_AGENT_MINIO_ACCESS_KEY: localagent
+      LOCAL_AGENT_MINIO_SECRET_KEY: localagent-secret
+      LOCAL_AGENT_MINIO_SECURE: "false"
+      LOCAL_AGENT_MINIO_ARTIFACT_BUCKET: local-agent-artifacts
+      LOCAL_AGENT_SPOOL_DIR: /data/spool
+      LOCAL_AGENT_CONFIG_DIR: /app/configs
+      LOCAL_AGENT_WEB_DIST: /app/web/dist
+      LOCAL_AGENT_LLAMA_BASE_URL: http://host.docker.internal:8080
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - local-agent-data:/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health').read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  loki:
+    image: grafana/loki:3.7.3
+    container_name: local-agent-loki
+    profiles: [observability]
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    environment:
+      GOMEMLIMIT: 512MiB
+    mem_limit: 768m
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./observability/loki/loki.yaml:/etc/loki/loki.yaml:ro
+      - local-agent-loki:/loki
+
+  tempo:
+    image: grafana/tempo:3.0.0
+    container_name: local-agent-tempo
+    profiles: [observability]
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    ports:
+      - "3200:3200"
+      - "14317:4317"
+      - "14318:4318"
+    volumes:
+      - ./observability/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - local-agent-tempo:/var/tempo
+
+  pyroscope:
+    image: grafana/pyroscope:2.1.1
+    container_name: local-agent-pyroscope
+    profiles: [observability]
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    command: ["-config.file=/etc/pyroscope/pyroscope.yaml"]
+    ports:
+      - "4040:4040"
+    volumes:
+      - ./observability/pyroscope/pyroscope.yaml:/etc/pyroscope/pyroscope.yaml:ro
+      - local-agent-pyroscope:/var/lib/pyroscope
+
+  prometheus:
+    image: prom/prometheus:v3.13.1
+    container_name: local-agent-prometheus
+    # The one service in both telemetry stacks. Two profiles is how Compose
+    # says that directly, so `observability-minimal` is a real subset of
+    # `observability` rather than a second list that happens to overlap it.
+    profiles: [observability, observability-minimal]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-remote-write-receiver
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - local-agent-prometheus:/prometheus
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  alloy:
+    image: grafana/alloy:v1.17.1
+    container_name: local-agent-alloy
+    profiles: [observability]
+    depends_on:
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    ports:
+      - "12345:12345"
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - ./.local_agent/logs:/var/log/local-agent/repo:ro
+      - ${LOCAL_AGENT_HOST_DAEMON_LOG_DIR:-./.local_agent/logs}:/var/log/local-agent/daemon:ro
+      - ${LOCAL_AGENT_HOST_LAUNCHD_LOG_DIR:-./.local_agent/logs}:/var/log/local-agent/launchd:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - local-agent-alloy:/var/lib/alloy
+
+  grafana:
+    image: grafana/grafana:13.1.0
+    container_name: local-agent-grafana
+    profiles: [observability]
+    depends_on:
+      prometheus:
+        condition: service_started
+      loki:
+        condition: service_started
+      tempo:
+        condition: service_started
+      pyroscope:
+        condition: service_started
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_INSTALL_PLUGINS: grafana-pyroscope-datasource
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - local-agent-grafana:/var/lib/grafana
+
+volumes:
+  local-agent-minio:
+  local-agent-postgres:
+  local-agent-data:
+  local-agent-loki:
+  local-agent-tempo:
+  local-agent-pyroscope:
+  local-agent-prometheus:
+  local-agent-alloy:
+  local-agent-grafana:

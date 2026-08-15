@@ -1,0 +1,54 @@
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+backend_scheduler:
+  provider:
+    compaction:
+      compaction:
+        block_retention: 720h
+
+backend_worker:
+  compaction:
+    block_retention: 720h
+
+storage:
+  trace:
+    backend: s3
+    wal:
+      path: /var/tempo/wal
+    s3:
+      bucket: local-agent-tempo
+      endpoint: minio:9000
+      access_key: localagent
+      secret_key: localagent-secret
+      insecure: true
+      forcepathstyle: true
+
+metrics_generator:
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors:
+        - service-graphs
+        - span-metrics
+
+usage_report:
+  reporting_enabled: false

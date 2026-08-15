@@ -1,0 +1,167 @@
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+discovery.docker "local" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Discovery attaches what it knows about a container as `__meta_` labels, and
+// everything under that prefix is dropped on the way to Loki unless a rule here
+// promotes it. Without these rules every container on the socket wrote into one
+// undifferentiated stream: postgres, loki, minio and the app were all just
+// `collector="alloy"`, so a query could not name the container a line came from.
+//
+// The three below are the ones that answer "who wrote this". `container` is the
+// name a person types into `docker logs`, and the compose pair is what survives a
+// container being replaced, so a service's history stays one stream across
+// restarts and recreates rather than fragmenting per container instance.
+//
+// Deliberately not `service`. The JSON stage further down sets that from the
+// application's own log field, and reusing the name here would mean a container's
+// identity and an application's identity silently overwrote each other depending
+// on whether a given line happened to parse as JSON.
+discovery.relabel "local_containers" {
+  targets = discovery.docker.local.targets
+
+  // Docker reports the name with a leading slash (`/local-agent-postgres`), which
+  // is not how anyone refers to it. The optional group strips it.
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/?(.*)"
+    target_label  = "container"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "compose_project"
+  }
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+}
+
+loki.source.docker "local" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.local_containers.output
+  labels     = { collector = "alloy" }
+  forward_to = [loki.process.local_agent.receiver]
+}
+
+local.file_match "local_agent_files" {
+  path_targets = [
+    { __path__ = "/var/log/local-agent/repo/pi-daemon*.log", service = "pi-daemon", env = "local", log_source = "repo-runtime" },
+    { __path__ = "/var/log/local-agent/repo/llama*.log", service = "llama-cpp", env = "local", log_source = "repo-runtime" },
+    { __path__ = "/var/log/local-agent/repo/whisper*.log", service = "whisper", env = "local", log_source = "repo-runtime" },
+    { __path__ = "/var/log/local-agent/daemon/pi-daemon*.log", service = "pi-daemon", env = "local", log_source = "user-daemon" },
+    { __path__ = "/var/log/local-agent/daemon/session-daemon*.log", service = "session-daemon", env = "local", log_source = "user-daemon" },
+    { __path__ = "/var/log/local-agent/launchd/session-daemon*.log", service = "session-daemon", env = "local", log_source = "launchd" },
+    { __path__ = "/var/log/local-agent/launchd/llama*.log", service = "llama-cpp", env = "local", log_source = "launchd" },
+    { __path__ = "/var/log/local-agent/launchd/whisper*.log", service = "whisper", env = "local", log_source = "launchd" },
+    { __path__ = "/var/log/local-agent/launchd/pest-factory-dispatcher*.log", service = "dispatcher", env = "local", log_source = "launchd" },
+    { __path__ = "/var/log/local-agent/launchd/postgres-boot*.log", service = "postgres", env = "local", log_source = "launchd" },
+  ]
+}
+
+loki.source.file "local_agent_files" {
+  targets    = local.file_match.local_agent_files.targets
+  forward_to = [loki.process.local_agent.receiver]
+}
+
+loki.process "local_agent" {
+  forward_to = [loki.write.local.receiver]
+
+  stage.docker {}
+
+  stage.json {
+    expressions = {
+      service       = "service",
+      env           = "env",
+      level         = "level",
+      workflow_type = "workflow_type",
+      workflow_id   = "workflow_id",
+      trace_id      = "trace_id",
+      error_code    = "error_code",
+      category      = "category",
+      retryable     = "retryable",
+      phase         = "phase",
+      intent_id     = "intent_id",
+      task_id       = "task_id",
+      task_name     = "task_name",
+      lease_id      = "execution_lease_id",
+      checkpoint_id = "checkpoint_id",
+      promotion     = "promotion_state",
+      file_id       = "file_id",
+      request_id    = "request_id",
+      step          = "step",
+    }
+  }
+
+  stage.labels {
+    values = {
+      service       = "",
+      env           = "",
+      level         = "",
+      workflow_type = "",
+    }
+  }
+
+  stage.structured_metadata {
+    values = {
+      workflow_id = "",
+      trace_id    = "",
+      file_id     = "",
+      request_id  = "",
+      step        = "",
+      error_code  = "",
+      category    = "",
+      retryable   = "",
+      phase       = "",
+      intent_id   = "",
+      task_id     = "",
+      task_name   = "",
+      lease_id    = "",
+      checkpoint_id = "",
+      promotion   = "",
+    }
+  }
+}
+
+loki.write "local" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}
+
+otelcol.receiver.otlp "local" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+
+  http {
+    endpoint = "0.0.0.0:4318"
+  }
+
+  output {
+    traces = [otelcol.processor.batch.local.input]
+  }
+}
+
+otelcol.processor.batch "local" {
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls {
+      insecure             = true
+      insecure_skip_verify = true
+    }
+  }
+}

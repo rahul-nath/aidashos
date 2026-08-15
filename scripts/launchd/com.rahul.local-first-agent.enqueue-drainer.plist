@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The loop that hands a QUEUED WorkUnit to DBOS.
+
+  Supervised rather than started by hand because it is one of the two processes
+  that make queued work move on their own. Everything else launchd starts here
+  answers when asked; without this pair a WorkUnit sits at QUEUED until an
+  operator types a command, which is the whole difference between a system that
+  runs overnight and one that waits for a human to notice.
+
+  KeepAlive is unconditional, and the loop's own exits are what make that the
+  right setting rather than a blunt one. It already rides out a ledger outage
+  internally and only ends the process on a defect, so a restart here is a
+  restart after a real fault. And when another checkout already holds the
+  loop's advisory lock, this exits immediately saying so, which turns this
+  agent into a standby: it retries once a ThrottleInterval and takes ownership
+  the moment the manual copy stops.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rahul.local-first-agent.enqueue-drainer</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>__UV_BIN__</string>
+    <string>run</string>
+    <string>python</string>
+    <string>agent_coordination_mcp.py</string>
+    <string>--root</string>
+    <string>__REPO_ROOT__</string>
+    <string>run_enqueue_drainer</string>
+    <string>--interval-seconds</string>
+    <string>5</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LOCAL_AGENT_USE_DBOS</key>
+    <string>true</string>
+    <key>LOCAL_AGENT_DATABASE_URL</key>
+    <string>postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent</string>
+    <key>LOCAL_AGENT_COORDINATION_BACKEND</key>
+    <string>postgres</string>
+    <key>LOCAL_AGENT_COORDINATION_DATABASE_URL</key>
+    <string>postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent</string>
+    <key>LOCAL_AGENT_DBOS_SYSTEM_DATABASE_URL</key>
+    <string>postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent_dbos</string>
+    <key>DBOS_SYSTEM_DATABASE_URL</key>
+    <string>postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent_dbos</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local-agent/logs/enqueue-drainer.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local-agent/logs/enqueue-drainer.err.log</string>
+</dict>
+</plist>

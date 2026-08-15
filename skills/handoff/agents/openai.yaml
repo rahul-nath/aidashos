@@ -1,0 +1,4 @@
+interface:
+  display_name: "Handoff"
+  short_description: "Create durable agent handoffs"
+  default_prompt: "Use $handoff to create a durable project handoff packet."

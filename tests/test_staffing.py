@@ -1,0 +1,338 @@
+# SPDX-FileCopyrightText: 2026 Rahul Nath <https://github.com/rahul-nath>
+# SPDX-License-Identifier: AGPL-3.0-or-later
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Any, cast
+
+import pytest
+
+from local_first_agent_os.spawn_authority import ReadOnlyInspection, UnattendedImplementation
+from local_first_agent_os.staffing import (
+    DEFAULT_BENCH,
+    DEFAULT_ROSTERS,
+    BenchSlot,
+    CheckRole,
+    FrontierHarness,
+    Harness,
+    JudgmentRole,
+    Roster,
+    Tier,
+    dispatch_seat_counts,
+    load_bench,
+    resolve_bench,
+)
+
+
+def test_default_bench_seats_two_different_frontier_vendors() -> None:
+    """The fallback bench keeps the one property the seating exists for.
+
+    `DEFAULT_BENCH` is reached only when no staffing.toml exists. Which vendor
+    holds which seat there is currently allowed to differ from the repo config,
+    because a fleet of tests scripts its scenarios against the default seating;
+    what may never differ is the invariant that the two frontier seats are two
+    vendors, so that is what this asserts.
+    """
+
+    frontier_seats = {resolve_bench(Tier.SENIOR).harness, resolve_bench(Tier.STAFF).harness}
+    assert frontier_seats == {Harness.CLAUDE, Harness.CODEX}
+    junior = resolve_bench(Tier.JUNIOR)
+    assert junior.harness == Harness.PI
+    assert junior.model == "gemma4"
+    # qwen kept as a backup junior model for the upcoming local comparison eval
+    assert junior.backup_models == ("qwen3.8-27b-mtp",)
+
+
+def test_capacity_encodes_allocation() -> None:
+    assert resolve_bench(Tier.STAFF).capacity == 1
+    assert resolve_bench(Tier.SENIOR).capacity == 3
+    assert resolve_bench(Tier.JUNIOR).capacity == 4
+
+
+def test_dispatch_seat_counts_are_the_bench_capacities() -> None:
+    """The dispatcher's per-tier seats are staffing's capacity numbers, verbatim.
+
+    Keyed by tier value because the dispatcher speaks the ledger's tier strings.
+    A tier absent from the bench gets no key: an unstaffed tier has no seats.
+    """
+
+    bench = {
+        Tier.SENIOR: BenchSlot(harness=Harness.CODEX, capacity=3),
+        Tier.STAFF: BenchSlot(harness=Harness.CLAUDE, capacity=1),
+    }
+    assert dispatch_seat_counts(bench) == {"senior": 3, "staff": 1}
+    assert dispatch_seat_counts() == {
+        tier.value: slot.capacity for tier, slot in DEFAULT_BENCH.items()
+    }
+
+
+def test_stage_role_is_a_sum_type() -> None:
+    # A judgment role carries a tier and (optionally) a stance; a check carries a command.
+    judge = JudgmentRole(name="reviewer", tier=Tier.STAFF, stance="evaluator")
+    check = CheckRole(name="test_runner", command="uv run pytest")
+    assert judge.kind == "judgment" and judge.tier == Tier.STAFF and judge.stance == "evaluator"
+    assert check.kind == "check" and check.command == "uv run pytest"
+    # They are distinct types; a check has no tier, a judge has no command.
+    assert not hasattr(check, "tier")
+    assert not hasattr(judge, "command")
+
+
+def test_default_rosters_encode_two_models_checking_each_other() -> None:
+    impl = DEFAULT_ROSTERS["IMPLEMENTATION"]
+    review = DEFAULT_ROSTERS["REVIEW"]
+    assert impl.judgment[0].name == "implementer"
+    assert impl.judgment[0].tier == Tier.SENIOR
+    assert review.judgment[0].name == "reviewer"
+    assert review.judgment[0].tier == Tier.STAFF  # the other vendor checks the implementer's work
+    assert review.judgment[0].stance == "evaluator"
+    # consensus panel names come straight from the staffing model, not hardcoded strings
+    assert {role.name for role in review.consensus} == {"reviewer", "qa", "realist"}
+
+
+def test_load_bench_falls_back_to_defaults_when_absent(tmp_path: Path) -> None:
+    assert load_bench(tmp_path / "nope.toml") == DEFAULT_BENCH
+
+
+def test_load_bench_reads_toml(tmp_path: Path) -> None:
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+[bench.staff]
+harness = "claude"
+capacity = 2
+
+[bench.junior]
+harness = "pi"
+model = "gemma4"
+capacity = 8
+""".strip(),
+        encoding="utf-8",
+    )
+    bench = load_bench(cfg)
+    assert bench[Tier.STAFF] == BenchSlot(harness=Harness.CLAUDE, model=None, capacity=2)
+    assert bench[Tier.JUNIOR] == BenchSlot(harness=Harness.PI, model="gemma4", capacity=8)
+
+
+def test_a_bench_whose_reviewer_wrote_the_change_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Same (harness, model) in senior and staff is legal and must not be silent.
+
+    Legal because an operator with every subscription but one down may accept
+    same-model review as a last resort; not silent because the reviewer is then
+    the model that wrote the change, and that property change should be on the
+    record where the config was loaded.
+    """
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+[bench.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[bench.staff]
+harness = "claude"
+model = "claude-opus-5"
+""".strip(),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="local_first_agent_os.staffing"):
+        load_bench(cfg)
+    assert "second pair of eyes" in caplog.text
+
+
+def test_two_models_from_one_provider_do_not_warn(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The sanctioned outage fallback stays silent: opus implements, fable reviews.
+
+    The warning is about model identity, not vendor identity. Warning here would
+    train operators to ignore it, which is how a warning stops being one.
+    """
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+[bench.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[bench.staff]
+harness = "claude"
+model = "claude-fable-5"
+""".strip(),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.WARNING, logger="local_first_agent_os.staffing"):
+        load_bench(cfg)
+    assert "second pair of eyes" not in caplog.text
+
+
+def test_repo_staffing_toml_matches_locked_mapping() -> None:
+    """The mapping is locked; the effort dial is not, and pinning both hid that.
+
+    `configs/staffing.toml` locks that both frontier seats hold a frontier
+    vendor. Which vendor holds which seat is the operator's call and swapping it
+    is expected.
+
+    It no longer demands *two* vendors. `load_bench` already treats two models
+    from one provider as the sanctioned outage fallback, and only this assertion
+    disagreed - so when one provider's quota went out for six days on
+    2026-08-11, the config that the runtime would have accepted could not be
+    written down, and the seating had to be smuggled past the file it is
+    supposed to be declared in. A rule the code does not enforce and the
+    operator cannot satisfy is not protection.
+
+    The property it was reaching for lives in
+    `test_the_repo_bench_never_lets_the_reviewer_be_the_author`, which holds
+    across any staffing: the reviewer must not be the model that wrote the
+    change. That one is unchanged and still refuses a genuinely shared seat.
+
+    `reasoning_effort` is the opposite kind of setting. It is a dial the operator
+    turns against cost - senior runs at capacity 3, so effort is paid three times
+    on every fan-out - and pinning a specific value here made an intended
+    adjustment look like a regression. A tripwire that fires on the changes you
+    meant is one you learn to edit without reading, which costs you the ones you
+    did not mean.
+
+    So the mapping is asserted exactly and the dial is asserted only to be a
+    value the harnesses accept.
+    """
+
+    repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
+    bench = load_bench(repo_cfg)
+    senior = bench[Tier.SENIOR]
+    staff = bench[Tier.STAFF]
+
+    assert {senior.harness, staff.harness} <= {Harness.CLAUDE, Harness.CODEX}, (
+        "both frontier seats must be staffed by a frontier vendor; the junior harness "
+        "in a frontier seat is a different mistake and this is where it shows"
+    )
+    assert bench[Tier.JUNIOR].harness == Harness.PI
+    # `xhigh` joined this set on 2026-08-13, probed against the claude CLI
+    # (`claude --model claude-opus-5 --effort xhigh` answers) before being
+    # written here. The set is the harnesses' accepted vocabulary and nothing
+    # more; it is widened by proving a value, never by assuming one.
+    accepted_efforts = {"low", "medium", "high", "xhigh", "max"}
+    assert senior.reasoning_effort in accepted_efforts
+    assert staff.reasoning_effort in accepted_efforts
+
+
+def test_the_repo_bench_never_lets_the_reviewer_be_the_author() -> None:
+    """The invariant the seating exists to serve, stated on its own.
+
+    Separate from the mapping test because it survives any future swap: whatever
+    sits in the two seats, review is worth running only if the reviewer can
+    disagree with the implementer for reasons the implementer did not already
+    have. `load_bench` warns when this is violated; this refuses to let the
+    repository's own config be the violation.
+    """
+
+    repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
+    bench = load_bench(repo_cfg)
+    senior = bench[Tier.SENIOR]
+    staff = bench[Tier.STAFF]
+
+    assert (senior.harness, senior.model) != (staff.harness, staff.model)
+
+
+def test_prose_that_names_the_seating_matches_the_config() -> None:
+    """The find-and-replace list, enforced instead of remembered.
+
+    Most prose is deliberately seat-generic after the 2026-08-09 swap left four
+    stale claims behind, one of them a sentence the demo operator reads on
+    camera. Three places still name the vendor because their reader needs the
+    word: the demo narration, the README's as-staffed-today sentence, and the
+    config's own header. Each is asserted here against the loaded bench, so
+    editing staffing.toml fails this test with the exact sentences to update -
+    which is the mechanism for keeping prose coupled to config: not a habit of
+    searching, but a test that names every coupled location when it fires.
+
+    Anything this test does not assert is supposed to be seat-generic; a new
+    vendor-per-seat sentence anywhere else should either join this list or lose
+    the vendor name.
+    """
+
+    repo_root = Path(__file__).resolve().parents[1]
+    bench = load_bench(repo_root / "configs" / "staffing.toml")
+    senior = bench[Tier.SENIOR].harness
+    staff = bench[Tier.STAFF].harness
+    spoken = {Harness.CLAUDE: "Claude", Harness.CODEX: "Codex"}
+    written = {Harness.CLAUDE: "Claude Code", Harness.CODEX: "Codex"}
+
+    demo = (repo_root / "docs" / "demo_shooting_script.md").read_text(encoding="utf-8")
+    assert f"implementation was {spoken[senior]}, review is {spoken[staff]}" in demo, (
+        "the demo's 3:30 narration names the wrong vendor for the seat; "
+        "update docs/demo_shooting_script.md to match configs/staffing.toml"
+    )
+
+    readme = (repo_root / "README.md").read_text(encoding="utf-8")
+    assert f"that is {written[senior]} implementing and {written[staff]} reviewing" in readme, (
+        "the README's as-staffed-today sentence disagrees with configs/staffing.toml; "
+        "update the Frontier CLIs section"
+    )
+
+    header = (repo_root / "configs" / "staffing.toml").read_text(encoding="utf-8")
+    assert f"# Locked mapping: {senior.value} = senior, {staff.value} = staff" in header, (
+        "staffing.toml's own header comment disagrees with the tables below it"
+    )
+
+
+def test_roster_payload_is_json_friendly() -> None:
+    payload = Roster(
+        judgment=(JudgmentRole("implementer", Tier.SENIOR),),
+        checks=(CheckRole("test_runner", "uv run pytest"),),
+    ).to_payload()
+    judgment = cast(list[dict[str, Any]], payload["judgment"])
+    checks = cast(list[dict[str, Any]], payload["checks"])
+    assert judgment[0]["tier"] == "senior"
+    assert checks[0]["command"] == "uv run pytest"
+
+
+def test_bench_slot_reasoning_effort_reaches_codex_command(tmp_path) -> None:
+    from pathlib import Path
+
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+    from local_first_agent_os.staffing import load_bench
+
+    config = tmp_path / "staffing.toml"
+    config.write_text(
+        """
+[bench.staff]
+harness = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+capacity = 1
+""",
+        encoding="utf-8",
+    )
+    bench = load_bench(Path(config))
+    executor = CliPowWowExecutor(worktree_root=tmp_path / "wt", bench=bench)
+    command = executor._build_agent_cli_command(
+        FrontierHarness.CODEX,
+        "gpt-5.6-sol",
+        "review this",
+        ReadOnlyInspection(),
+        reasoning_effort="high",
+    )
+    assert "--model" in command and "gpt-5.6-sol" in command
+    assert "-c" in command and "model_reasoning_effort=high" in command
+    assert "-s" in command and "read-only" in command
+
+
+def test_bench_slot_reasoning_effort_reaches_claude_command(tmp_path: Path) -> None:
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+
+    executor = CliPowWowExecutor(worktree_root=tmp_path / "wt")
+    command = executor._build_agent_cli_command(
+        FrontierHarness.CLAUDE,
+        None,
+        "implement this",
+        UnattendedImplementation(),
+        reasoning_effort="max",
+    )
+    assert "--effort" in command
+    assert command[command.index("--effort") + 1] == "max"

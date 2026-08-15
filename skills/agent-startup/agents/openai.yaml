@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agent Startup"
+  short_description: "Onboard agents into this repo"
+  default_prompt: "Use $agent-startup to orient yourself before working in local_first_agent_os."

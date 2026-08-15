@@ -1,0 +1,17 @@
+# Stored reusable regimen consumed by the create-tomorrow named workflow.
+# This is source material, not a planner: it supplies the recurring morning
+# and maintenance bullets and bounds how many primary items one daily view
+# may carry. Edit freely; absent keys fall back to typed defaults.
+
+[regimen]
+name = "default"
+morning = [
+    "Medication and breakfast",
+    "Review today's target list",
+]
+maintenance = [
+    "Sync and review whiteboard changes",
+    "Update the agent handoff",
+]
+max_primary_items = 3
+done_top_level = "/done"

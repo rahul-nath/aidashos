@@ -1,0 +1,190 @@
+[project]
+name = "local-first-agent-os"
+version = "0.1.0"
+description = "Local-first durable agent orchestration with DBOS, llama.cpp, Pi policy boundaries, and Postgres"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+    { name = "rahul-nath", email = "rahul.nath.eph@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "dbos>=2.19.0",
+    "fastapi[standard]>=0.136.1",
+    "httpx>=0.28.1",
+    "mcp[cli]>=1.27.0",
+    "minio>=7.2.18",
+    "opentelemetry-api>=1.39.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.0",
+    "opentelemetry-instrumentation-fastapi>=0.60b1",
+    "opentelemetry-instrumentation-httpx>=0.60b1",
+    "opentelemetry-sdk>=1.39.0",
+    "playwright>=1.58.0,<2",
+    "pgvector>=0.3.6",
+    "prometheus-client>=0.25.0",
+    "psycopg[binary,pool]>=3.3.3",
+    "pydantic>=2.13.3",
+    "pydantic-settings>=2.14.0",
+    "pyroscope-io>=1.0.5",
+    "python-multipart>=0.0.26",
+    "rich>=15.0.0",
+    "sounddevice>=0.5.1",
+    "sqlalchemy>=2.0.49",
+    "typer>=0.25.0",
+    "watchdog>=6.0.0",
+    "webrtcvad-wheels>=2.0.14",
+    "networkx>=3.3",
+]
+
+[project.scripts]
+local-agent = "local_first_agent_os.cli:app"
+local-first-agent-os = "local_first_agent_os.cli:app"
+pi = "local_first_agent_os.pi_command:main"
+pi-daemon = "local_first_agent_os.pi_daemon:main"
+# The same `main` that `agent_coordination_mcp.py` at the repo root shells to.
+# That file's own docstring calls itself a compatibility shell, so this is the
+# ledger CLI's first proper name rather than a second surface: one entry point,
+# two spellings, and no second implementation for them to drift apart into.
+agent-ledger = "local_first_agent_os.coordination.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.10.10,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.409",
+    "pytest>=9.0.3",
+    "pytest-bdd>=8.1.0",
+    "pytest-cov>=7.1.0",
+    # tests/test_service_startup_scripts.py reads docker-compose.yml to assert
+    # which services each named stack is. It arrived transitively before this
+    # line; declared here so a dependency dropping it is a resolver failure
+    # rather than an import error in a test nobody expected to be fragile.
+    "pyyaml>=6.0.3",
+    "ruff>=0.15.12",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "analytics: graph structural analytics behavior",
+    "bounds: configured graph extraction or retrieval bound",
+    "degraded: intentional degraded-mode behavior",
+    "directive: graph directive parsing or dispatch",
+    "compose-profiles: which services a named Docker Compose stack is made of",
+    "stack-membership: the service set a named stack resolves to",
+    "teardown-asymmetry: a teardown that stops one stack and must spare another",
+    "single-source: a fact that must have exactly one place it is written down",
+    "acl: what a named agent principal is permitted to do",
+    "verification: whether a run may leave a checkpoint behind",
+    "registry: a linked-project registry entry the loader must accept or refuse",
+    "policy: the operator's written statement of who may do what",
+    "vocabulary: a name that means the same thing to an operator and to the runtime",
+    "authority: which of two sources of permission outranks the other",
+    "scope: a permission keyed to the pow-wow it was granted for",
+    "spawn: the boundary where an agent process is started",
+    "golden-path: a WorkUnit driven from a document to SUCCEEDED",
+    "surfaced-failures: a computed failure that actually reaches an operator",
+    "delivery: handing a root execution to a runtime",
+    "crash-recovery: unattended repair of an execution that died without a halt",
+    "liveness: what the durable runtime says about a workflow that should be running",
+    "budget: a bound on how often something may be retried automatically",
+    "candidates: which rows a sweep considers at all",
+    "spawn-acl: what a spawned agent process is allowed to do",
+    "bypass: a sandbox or permission bypass flag on an agent command line",
+    "narrowing: an authority intersection that can only remove",
+    "retry-budget: the per-milestone attempt bound the compiled plan carries",
+    "no-fault: a halt that consumed none of the work's own budget",
+    "override: an operator decision that lifts an automatic refusal",
+    "settlement: when a waiter may stop waiting on a dispatch intent",
+    "pause: work that stopped on purpose and is waiting on a decision",
+    "notification: a wake sent to a parked waiter",
+    "lost-notification: a wake that was consumed by a process that then died",
+    "timeout: a bounded wait that ran out",
+    "dispatch-link: the durable link between a milestone attempt and its dispatch intent",
+    "cancellation: stopping live work without erasing what already happened",
+    "retry: behavior on a second attempt at the same work",
+    "exhaustiveness: a dispatch that must account for every member of a closed set",
+    "fallback: cross-provider frontier fallback behavior",
+    "harness-not-tier: routing decided by the configured harness rather than the tier",
+    "local-harness: work that runs on the served local model rather than a CLI",
+    "provenance: durable attribution of a run to the row that owns it",
+    "refinery: the integration queue that lands approved agent branches",
+    "boundary: the one place a decision may enter or leave a subsystem",
+    "idempotence: a repeated operation that must produce one effect",
+    "routing: which runtime a planned task is sent to",
+    "doc-1.3: traces knowledge graph GAWD doc section 1.3",
+    "doc-2: traces knowledge graph GAWD doc section 2",
+    "doc-3: traces knowledge graph GAWD doc section 3",
+    "doc-4: traces knowledge graph GAWD doc section 4",
+    "doc-5: traces knowledge graph GAWD doc section 5",
+    "doc-7: traces knowledge graph GAWD doc section 7",
+    "doc-8: traces knowledge graph GAWD doc section 8",
+    "doc-9: traces knowledge graph GAWD doc section 9",
+    "doc-10: traces knowledge graph GAWD doc section 10",
+    "doc-11: traces knowledge graph GAWD doc section 11",
+    "doc-12: traces knowledge graph GAWD doc section 12",
+    "doc-13: traces knowledge graph GAWD doc section 13",
+    "failure: graph failure semantics",
+    "graphrag: graph-augmented retrieval behavior",
+    "happy-path: primary successful graph behavior",
+    "idempotency: graph idempotency behavior",
+    "idempotent-recovery: retry-safe graph recovery",
+    "integration: exercises real external infrastructure such as Postgres",
+    "isolation: per-artifact failure isolation",
+    "lifecycle: durable workflow lifecycle",
+    "logging: graph structured logging guarantee",
+    "metrics: graph Prometheus metric guarantee",
+    "operator: graph operator-facing output",
+    "opt-in: explicitly optional graph behavior",
+    "permanent: permanent failure behavior",
+    "quarantine: low-confidence review behavior",
+    "rebuild: graph rebuild behavior",
+    "repair: malformed-output repair behavior",
+    "resolution: graph entity resolution behavior",
+    "retryable: retryable failure behavior",
+    "security: graph policy boundary",
+    "slo-rebuildable: rebuild SLO behavior",
+    "slo-rerun-determinism: deterministic rerun SLO behavior",
+    "tradeoff-3: traces knowledge graph GAWD doc tradeoff 3",
+]
+filterwarnings = [
+    "ignore:'maxsplit' is passed as positional argument:DeprecationWarning:gherkin\\.gherkin_line",
+]
+
+[tool.coverage.run]
+source = ["src/local_first_agent_os"]
+branch = true
+
+[tool.coverage.report]
+# A ratchet, not a target. Raise it when a module improves; never lower it to
+# make a run pass. Measured at 67.10 on 2026-07-25 after workflowy_chunking
+# gained tests, so this fires only when coverage drops.
+fail_under = 67.0
+precision = 2
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# Both excluded paths hold frozen artifacts rather than living code: shelved
+# directions, and the scripts and diagrams attached to dated handoffs. Linting
+# them polices documents whose value is that they are exactly what the session
+# left behind, and it makes the format gate fail on every future attachment.
+extend-exclude = ["potential_directions", "docs/handoffs/attachments"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyright]
+include = ["src", "tests"]
+# `scripts/` is not a package, so tests that pin a script against its library
+# counterpart reach it through a sys.path insert. Pyright cannot follow that at
+# type-check time; this is the static half of the same statement.
+extraPaths = ["scripts"]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"

@@ -1,0 +1,77 @@
+# Which monitor signals may propose work, and what they may propose.
+#
+# This file is operator policy, not configuration of the reactor's mechanism.
+# Anything invalid or ambiguous here crashes at load: a feedback loop that is
+# quietly off looks exactly like one with nothing to report.
+#
+# Phase 1 responses are `advisory` (a read-only diagnosis intent, no worktree)
+# and `digest_only` (recorded, not dispatched). Nothing here can merge, deploy,
+# or resolve an approval.
+#
+# Matching is most-specific-wins: the rule with the most bound selector fields
+# takes the signal. Two rules of equal specificity matching one signal is a
+# crash, not a coin flip.
+
+schema_version = "feedback_rules.v1"
+
+# Ceiling on live feedback-originated intents across every rule. Reached, the
+# reactor emits one digest entry instead of N intents.
+global_open_intent_cap = 6
+
+[[rule]]
+rule_id = "pest_milestone_failure_diagnosis"
+enabled = true
+response = "advisory"
+tier = "junior"
+cooldown_seconds = 3600
+daily_cap = 4
+prompt_template = """
+A saga milestone failed in {target_project_id} with error code {error_code}.
+
+Read {evidence_table} row {evidence_row_id} in the coordination ledger, plus the
+dispatch intent and execution lease it points at. Determine why it failed and
+whether a retry would plausibly succeed.
+
+This is a read-only diagnosis. Do not edit files, do not create a worktree, and
+do not retry the milestone. Produce a short written finding: the proximate
+cause, whether it is an infrastructure or a business failure, and the single
+next action you would recommend to the operator.
+"""
+
+  [rule.selector]
+  signal_kind = "MILESTONE_FAILED"
+  target_project_id = "pest_site_factory"
+
+# Broader net than the rule above, so it is deliberately less specific and only
+# takes milestones the pest rule does not.
+[[rule]]
+rule_id = "milestone_failure_digest"
+enabled = true
+response = "digest_only"
+tier = "junior"
+cooldown_seconds = 0
+daily_cap = 50
+
+  [rule.selector]
+  signal_kind = "MILESTONE_FAILED"
+
+# A single failed attempt is usually not actionable: the next retry may fix it,
+# and retries in this ledger are new intent rows rather than a counter, so one
+# failed intent is one attempt and not an escalation.
+#
+# The milestone above is the operator-meaningful condition and gets the task.
+# This gets a digest line. That split is why one underlying failure yields one
+# advisory task even though it correctly produces two signals.
+#
+# When a real exhaustion kind exists, counting failed attempts per milestone
+# source with none succeeding, it belongs here as `advisory` and CRITICAL.
+[[rule]]
+rule_id = "dispatch_intent_failure_digest"
+enabled = true
+response = "digest_only"
+tier = "junior"
+cooldown_seconds = 0
+daily_cap = 50
+
+  [rule.selector]
+  signal_kind = "DISPATCH_INTENT_FAILED"

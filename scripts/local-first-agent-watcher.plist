@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.rahul.local-first-agent.whiteboard-watcher</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>local-agent</string>
+    <string>watch</string>
+    <string>__HOME__/AgentIngress/whiteboards</string>
+    <string>whiteboard_ocr</string>
+    <string>whiteboard_ocr</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/.local-agent/logs/whiteboard-watcher.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.local-agent/logs/whiteboard-watcher.err.log</string>
+</dict>
+</plist>
