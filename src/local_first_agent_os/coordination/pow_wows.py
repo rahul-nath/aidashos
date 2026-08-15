@@ -169,8 +169,8 @@ def join_pow_wow(
                 allowed_tools_json = excluded.allowed_tools_json,
                 status = '{PowWowStatus.ACTIVE}',
                 joined_at = excluded.joined_at
-            f""",
-            (pw_id := pow_wow_id, sid, agent_name, role, json.dumps(allowed_tools or []), t),
+            """,
+            (pow_wow_id, sid, agent_name, role, json.dumps(allowed_tools or []), t),
         )
         # Transition pow-wow to ACTIVE once at least one agent joins
         if PowWowStatus(str(pw["status"])) is PowWowStatus.FORMING:
@@ -180,7 +180,7 @@ def join_pow_wow(
                 (t, pow_wow_id),
             )
     data = ok(
-        pow_wow_id=pw_id,
+        pow_wow_id=pow_wow_id,
         agent_name=agent_name,
         role=role,
         allowed_tools=allowed_tools or [],

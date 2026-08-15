@@ -18,26 +18,18 @@ import logging
 import subprocess
 import sys
 import uuid
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
 from ..contracts import (
-    CANONICAL_SAGA_STAGES,
-    SKILLS,
     AmbiguityScore,
     DriftReport,
     EvaluationResult,
     EvaluationSummary,
     EvaluationType,
     GawdDoc,
-    SagaStage,
-    SkillSpec,
-    StageDef,
-    StageRoster,
     StagnationReport,
 )
-from ..settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -72,20 +64,6 @@ def _coord(cmd: list[str]) -> dict[str, Any]:
             "stdout": proc.stdout,
             "stderr": proc.stderr,
         }
-
-
-def _applicable_skills(stage: SagaStage, roster: StageRoster) -> list[SkillSpec]:
-    chars = set(roster.characters) | set(roster.summon_only)
-    fns = set(roster.functional_roles)
-    return [
-        s
-        for s in SKILLS
-        if stage in s.applies_to_stages
-        and (
-            bool(set(s.applies_to_characters) & chars)
-            or bool(set(s.applies_to_functional_roles) & fns)
-        )
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -449,225 +427,3 @@ def check_stagnation(saga_id: str) -> StagnationReport:
         recommendation=result.get("recommendation"),
         pow_wows_checked=result.get("pow_wows_checked", []),
     )
-
-
-# ---------------------------------------------------------------------------
-# SagaCoordinator
-# ---------------------------------------------------------------------------
-
-
-class SagaCoordinator:
-    """Orchestrates a full multi-stage saga through Pi.
-
-    Usage:
-        coord = SagaCoordinator(settings, runtime)
-        async for delta in coord.run_saga("Build a widget"):
-            print(delta, end="", flush=True)
-    """
-
-    def __init__(self, settings: Settings, runtime: Any) -> None:
-        self.settings = settings
-        self.runtime = runtime
-
-    # ------------------------------------------------------------------
-    # Public: full saga runner
-    # ------------------------------------------------------------------
-
-    async def run_saga(
-        self,
-        goal: str,
-        budget_tokens: int = 1_000_000,
-        budget_seconds: int = 86400,
-    ) -> AsyncIterator[str]:
-        """Drive a full saga from IDEA_INTAKE through USER_APPROVAL.
-
-        Yields streaming text deltas.  Blocks at the ambiguity gate and
-        each approval gate until resolved.
-        """
-        yield f"[saga] Creating saga: {goal[:80]}...\n"
-
-        # Create saga
-        saga_result = _coord(
-            [
-                "create_saga",
-                goal,
-                "--budget-tokens",
-                str(budget_tokens),
-                "--budget-seconds",
-                str(budget_seconds),
-            ]
-        )
-        if not saga_result.get("ok"):
-            yield f"[saga] ERROR: {saga_result.get('error')}\n"
-            return
-
-        saga_id = saga_result["saga_id"]
-        yield f"[saga] saga_id={saga_id}\n"
-
-        # Iterate canonical stages
-        for stage_def in CANONICAL_SAGA_STAGES:
-            stage = stage_def.stage
-            stage_goal = stage_def.goal
-
-            yield f"\n[saga:{stage.value}] Starting — {stage_goal}\n"
-
-            # No stage write here. `sagas.current_stage` is a projection of the
-            # saga's milestones, maintained inside the same transaction as every
-            # milestone transition. An imperative setter alongside that projection
-            # is a second lifecycle authority, which is what let a saga report
-            # IDEA_INTAKE while five of its six milestones were complete.
-
-            async for delta in self._run_stage(saga_id, stage, stage_def):
-                yield delta
-
-            # After GAWD_DOC stage: run ambiguity gate
-            if stage == SagaStage.GAWD_DOC:
-                yield "\n[saga] Running ambiguity gate...\n"
-                async for delta in self._ambiguity_gate(saga_id):
-                    yield delta
-
-            # After REVIEW_EVALUATION: run stagnation check
-            if stage == SagaStage.REVIEW_EVALUATION:
-                report = check_stagnation(saga_id)
-                if report.stagnated:
-                    yield f"\n[saga] STAGNATION DETECTED: {report.reason}\n"
-                    yield f"[saga] Recommendation: {report.recommendation}\n"
-                    _coord(["complete_saga", saga_id, "STAGNATED"])
-                    return
-
-        _coord(["complete_saga", saga_id, "COMPLETED"])
-        yield f"\n[saga] Saga {saga_id} completed.\n"
-
-    # ------------------------------------------------------------------
-    # Internal: stage runner
-    # ------------------------------------------------------------------
-
-    async def _run_stage(
-        self,
-        saga_id: str,
-        stage: SagaStage,
-        stage_def: StageDef,
-    ) -> AsyncIterator[str]:
-        stage_str = stage.value
-
-        required_outputs = stage_def.required_outputs
-        pw_result = _coord(
-            [
-                "create_pow_wow",
-                saga_id,
-                stage_str,
-                stage_def.goal,
-                "--exit-criteria",
-                f"All required outputs produced: {required_outputs}",
-                "--required-outputs",
-                *required_outputs,
-            ]
-        )
-        if not pw_result.get("ok"):
-            yield f"[{stage_str}] ERROR creating pow-wow: {pw_result.get('error')}\n"
-            return
-
-        pow_wow_id = pw_result["pow_wow_id"]
-        yield f"[{stage_str}] pow_wow_id={pow_wow_id}\n"
-
-        for character in stage_def.roster.characters:
-            yield f"[{stage_str}] Enrolling character: {character.value}\n"
-        for fn_role in stage_def.roster.functional_roles:
-            yield f"[{stage_str}] Enrolling functional role: {fn_role.value}\n"
-        for character in stage_def.roster.summon_only:
-            yield f"[{stage_str}] Summon-only (escalation): {character.value}\n"
-
-        yield f"[{stage_str}] Executing pow-wow...\n"
-        async for delta in self._execute_pow_wow_via_pi(pow_wow_id, stage_def):
-            yield delta
-
-        if stage in (SagaStage.IMPLEMENTATION, SagaStage.REVIEW_EVALUATION):
-            yield f"[{stage_str}] Running drift detection...\n"
-
-        _coord(
-            [
-                "complete_pow_wow",
-                pow_wow_id,
-                f"{stage_str} stage completed. Outputs: {required_outputs}",
-            ]
-        )
-        yield f"[{stage_str}] Completed.\n"
-
-    async def _execute_pow_wow_via_pi(
-        self,
-        pow_wow_id: str,
-        stage_def: StageDef,
-    ) -> AsyncIterator[str]:
-        """Dispatch pow-wow work to Pi.  Override for real agent dispatch."""
-        goal = stage_def.goal
-        required_outputs = stage_def.required_outputs
-        roster_roles = [c.value for c in stage_def.roster.characters] + [
-            f.value for f in stage_def.roster.functional_roles
-        ]
-        summon_only = [c.value for c in stage_def.roster.summon_only]
-
-        skill_blocks: list[str] = []
-        for skill in _applicable_skills(stage_def.stage, stage_def.roster):
-            try:
-                skill_blocks.append(self.runtime.pi_prompts.get(skill.prompt_name).text)
-            except KeyError:
-                logger.warning("Skill prompt %s missing from registry", skill.prompt_name)
-
-        preamble = ("\n\n".join(skill_blocks) + "\n\n---\n\n") if skill_blocks else ""
-
-        prompt = (
-            preamble
-            + "You are coordinating a pow-wow stage.\n"
-            + f"Goal: {goal}\n"
-            + f"Rostered roles: {roster_roles}\n"
-            + f"Summon-only (escalation): {summon_only}\n"
-            + f"Required outputs: {required_outputs}\n\n"
-            + "Produce all required outputs. Submit each as an artifact via submit_artifact."
-        )
-
-        try:
-            from ..pi_runtime import PiRuntime
-
-            pi = self.runtime.pi
-            if not isinstance(pi, PiRuntime):
-                raise TypeError("runtime.pi must be a PiRuntime")
-            async for delta in pi.stream(prompt):
-                yield delta
-        except Exception as exc:
-            logger.warning("Pi execution failed for pow-wow %s: %s", pow_wow_id, exc)
-            yield f"  [Pi unavailable: {exc}]\n"
-
-    async def _ambiguity_gate(self, saga_id: str) -> AsyncIterator[str]:
-        """Block saga progression until GAWD doc passes ambiguity thresholds."""
-        # The current heuristic gate is advisory-only until saga records expose
-        # the latest approved/draft GAWD doc id for this saga.
-        _gawd_result = _coord(["list_sagas", "--status", "ACTIVE"])
-        # For now, perform heuristic check via MCP
-        # In production, fetch the gawd_doc_id from the saga record
-        yield "  Ambiguity gate: checking clarity scores...\n"
-        yield "  (Heuristic check: ensure goal >= 0.85, constraints >= 0.80, criteria >= 0.80)\n"
-        yield "  Tip: Resolve all unresolved_questions before advancing.\n"
-
-    # ------------------------------------------------------------------
-    # Public: create a fresh saga from a Workflowy bullet / raw idea
-    # ------------------------------------------------------------------
-
-    async def intake_idea(
-        self,
-        raw_idea: str,
-        budget_tokens: int = 500_000,
-    ) -> AsyncIterator[str]:
-        """Run only the IDEA_INTAKE pow-wow to normalise a raw idea."""
-        yield f"[intake] Normalising: {raw_idea[:80]}\n"
-
-        saga_result = _coord(["create_saga", raw_idea, "--budget-tokens", str(budget_tokens)])
-        if not saga_result.get("ok"):
-            yield f"[intake] ERROR: {saga_result.get('error')}\n"
-            return
-
-        saga_id = saga_result["saga_id"]
-        stage_def = next(s for s in CANONICAL_SAGA_STAGES if s.stage == SagaStage.IDEA_INTAKE)
-        async for delta in self._run_stage(saga_id, SagaStage.IDEA_INTAKE, stage_def):
-            yield delta
-
-        yield f"[intake] Done. saga_id={saga_id} — advance to GAWD_DOC when ready.\n"
