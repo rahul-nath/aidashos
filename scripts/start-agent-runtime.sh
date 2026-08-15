@@ -145,13 +145,39 @@ if [ "$START_ASR" = "true" ]; then
 fi
 LAUNCH_DOMAIN="gui/$(id -u)"
 LAUNCH_PLIST_DIR="$HOME/Library/LaunchAgents"
+# A failed bootstrap used to be discarded (`2>/dev/null || true`) and the script
+# went on to exit 0, so a runtime that never came up reported success. That is
+# how five plists pointing at a `uv` version that no longer existed stayed
+# invisible: launchd could not exec, exited before writing a log line, and the
+# only surviving evidence was a log file frozen at the last working run.
+#
+# The error is now printed and the script exits non-zero, because a bring-up
+# script that cannot bring a service up has failed at the one thing it does.
+# `already bootstrapped` (EALREADY, 37) stays benign: the guard above races with
+# a concurrent start, and losing that race is not an error.
+bootstrap_failures=()
 for label in "${LAUNCH_LABELS[@]}"; do
   plist="$LAUNCH_PLIST_DIR/$label.plist"
   if [ -f "$plist" ] && ! launchctl print "$LAUNCH_DOMAIN/$label" >/dev/null 2>&1; then
     echo "Bootstrapping launchd agent: $label"
-    launchctl bootstrap "$LAUNCH_DOMAIN" "$plist" 2>/dev/null || true
+    if ! bootstrap_error="$(launchctl bootstrap "$LAUNCH_DOMAIN" "$plist" 2>&1)"; then
+      if printf '%s' "$bootstrap_error" | grep -qi 'already bootstrapped'; then
+        echo "  already bootstrapped by another process; continuing."
+      else
+        echo "  bootstrap failed: ${bootstrap_error:-(no output)}" >&2
+        bootstrap_failures+=("$label")
+      fi
+    fi
   fi
 done
+if [ "${#bootstrap_failures[@]}" -gt 0 ]; then
+  echo >&2
+  echo "Failed to bootstrap: ${bootstrap_failures[*]}" >&2
+  echo "The runtime is not up. Inspect a plist with:" >&2
+  echo "  plutil -p $LAUNCH_PLIST_DIR/${bootstrap_failures[0]}.plist" >&2
+  echo "A plist naming a binary that no longer exists is the usual cause." >&2
+  exit 1
+fi
 
 LLAMA_URL="${LOCAL_AGENT_LLAMA_BASE_URL:-http://127.0.0.1:8080}"
 LLAMA_LABEL="com.rahul.local-first-agent.llama"

@@ -3,7 +3,7 @@
 
 """Remove test-fixture workflow trees from the durable DBOS system database.
 
-The 2026-08-09 verification-gate incident (docs/verification_gate_environment_design.md)
+The 2026-08-09 verification-gate incident (docs/completed/verification_gate_environment_design.md)
 left the durable execution history holding work-unit workflows that no
 coordination row explains: a gate's suite, inheriting the dispatcher's
 environment, ran fixture WorkUnits against the production DBOS database.

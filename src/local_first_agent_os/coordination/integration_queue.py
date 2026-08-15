@@ -3,7 +3,7 @@
 
 """The refinery's queue as durable rows.
 
-Invariant 11 of `docs/refinery_integration_queue_design.md`: every queue state
+Invariant 11 of `docs/completed/refinery_integration_queue_design.md`: every queue state
 transition is a durable row, and the queue is never reconstructed by inspecting
 git. This module is the whole of that. `refinery/` decides; this writes down
 what was decided and reads it back.

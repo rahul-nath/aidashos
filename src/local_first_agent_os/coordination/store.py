@@ -159,7 +159,7 @@ def normalize_paths(paths: Iterable[str]) -> list[str]:
 # string printed for a human, so N milestones running concurrently produced N
 # branches from one base with no order and no combination ever tested. This is
 # the row that makes the queue a query rather than an inspection of git, which
-# is invariant 11 of docs/refinery_integration_queue_design.md.
+# is invariant 11 of docs/completed/refinery_integration_queue_design.md.
 # `integration_batches` is deliberately not here yet: its columns are decided by
 # the driver that writes them, which is milestone 3, and a table shaped before
 # its writer exists is the unconsulted-mechanism defect this design was written

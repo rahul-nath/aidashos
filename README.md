@@ -55,6 +55,11 @@ It never merges, deploys, or completes a milestone on its own.
 
 Work is routed to three tiers.
 Junior is a local model making the cheap judgment calls, senior is the frontier agent that writes code, and staff is a frontier agent from a different vendor that reviews it.
+
+A **cast** is the other shape a dispatch can take, and it varies stance instead of seniority.
+It runs several roles concurrently on one question, each told to hold its stance rather than pre-compromise, and reduces them with a synthesizer that names the disagreements before resolving them.
+A member's role is also its `POLICIES.md` principal, since the capability gate resolves a role to a policy section before falling back to the seat, so per-stance privileges are a markdown section rather than a code change.
+The default cast seats every stance on the junior tier today, which measures one model's prior three times rather than three architectures.
 A tier names a seat rather than a model: `configs/staffing.toml` decides which harness and which model sit in each seat, and swapping one is a one-line edit with no code change.
 
 ## Does it run remotely? Is it containerized?

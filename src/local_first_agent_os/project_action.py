@@ -672,7 +672,7 @@ def _build_project_action_snapshot(
             # The action here is the fast-forward itself, composed the same way
             # `workflow/engine.py` composes it for the approved-GAWD path. When
             # the refinery's runner lands (milestone 4 of
-            # docs/refinery_integration_queue_design.md) this stops being an
+            # docs/completed/refinery_integration_queue_design.md) this stops being an
             # operator action at all and becomes a state the queue is about to
             # resolve on its own.
             payload = _parse_json_object(approval.get("payload"))

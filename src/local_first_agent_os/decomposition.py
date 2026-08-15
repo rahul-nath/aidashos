@@ -15,9 +15,10 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
-from typing import Any, Protocol
+from typing import Any, Final, Protocol
 
 from .pow_wow import DispatchKind, PowWowTaskSpec
+from .pow_wow.cast import CastMember, build_cast_tasks
 from .pow_wow.planning import PlanningContractError, validate_planning_visibility_contract
 from .pow_wow.protocol import PlanningPhase, ReferencePack, TaskPurpose
 from .project_center import LinkedProject
@@ -375,7 +376,13 @@ class RuleBasedDecompositionPlanner:
             target_project=target_project,
         )
         prefix = _task_prefix(intent_id)
-        if kind == "code":
+        if kind == "cast":
+            tasks = _cast_plan(prefix, prompt)
+            rationale = (
+                "Cast work runs several stances concurrently and reduces them with a "
+                "synthesizer, because the disagreement between stances is the output."
+            )
+        elif kind == "code":
             tasks = _code_plan(prefix, prompt)
             rationale = (
                 "Code work is split into local context extraction, senior implementation, "
@@ -518,6 +525,61 @@ def parse_mini_gawd_from_planner_payload(payload: Mapping[str, Any]) -> MiniGawd
             )
         ),
     )
+
+
+# The stances a cast holds when the intent names none. Deliberately about how a
+# question is approached rather than about a trade, because a default that
+# guessed "marketing, design, engineering" would be wrong for every question that
+# is not a product launch, and a wrong default is worse than a general one. A
+# domain cast is the operator's to declare; this is what a bare `cast` intent
+# gets.
+#
+# Every member sits on JUNIOR today, which means every member is gemma4, which
+# means this cast currently measures one model's prior three times. That is the
+# objection that parked the homogeneous junior swarm, and it is recorded here
+# rather than hidden because the fix is not this module's to make.
+#
+# Two drafts own it. `Model residency as a schedulable resource` establishes that
+# one heavy model is resident at a time (gemma4 at 5.6GB plus one of qwen3.8 at
+# 20.6GB or glimmer at ~21GB, against 36GB), so a cast may hold at most one heavy
+# stance before it starts paying a swap per member. `Midlevel tier and deferred
+# frontier review` adds the seat those heavy models would occupy, since `Tier`
+# has only JUNIOR, SENIOR, and STAFF and the junior seat is defined as cheap and
+# advisory.
+#
+# So the diverse default is one midlevel stance beside two junior ones, and it is
+# unavailable until that tier exists. Until then this is a panel of stances
+# rather than a panel of architectures, and it should be read as the weaker of
+# the two.
+DEFAULT_CAST: Final[tuple[CastMember, ...]] = (
+    CastMember(
+        name="advocate",
+        stance=(
+            "Argue the strongest version of the proposal and say what has to be "
+            "true for it to work."
+        ),
+        tier=Tier.JUNIOR,
+    ),
+    CastMember(
+        name="skeptic",
+        stance=(
+            "Argue the strongest case against, naming the failure that would actually happen first."
+        ),
+        tier=Tier.JUNIOR,
+    ),
+    CastMember(
+        name="pragmatist",
+        stance=(
+            "Ignore whether it is a good idea and say what it would cost to do the "
+            "smallest real version."
+        ),
+        tier=Tier.JUNIOR,
+    ),
+)
+
+
+def _cast_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...]:
+    return build_cast_tasks(prefix=prefix, goal=prompt, members=DEFAULT_CAST)
 
 
 def _code_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...]:

@@ -23,7 +23,7 @@ from .protocol import (
 
 type DelegateFn = Callable[..., Mapping[str, Any]]
 type CoordinationCommandFn = Callable[[CoordinationCommand], CoordinationResult]
-type DispatchKind = Literal["advisory", "code"]
+type DispatchKind = Literal["advisory", "code", "cast"]
 type ExecutionLeaseStatus = Literal[
     "COMPLETED",
     "FAILED",

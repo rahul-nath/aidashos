@@ -93,7 +93,7 @@ def shutdown_dbos() -> None:
     result, and sat in `wait_for_thread_shutdown` for minutes - main thread
     joining a DBOS heartbeat, the notification listener still in `poll()` -
     until it was sampled and killed. The 26-minute figure in
-    docs/verification_gate_environment_design.md is this shape seen from the
+    docs/completed/verification_gate_environment_design.md is this shape seen from the
     outside.
 
     Only a process boundary calls this. The command functions must not: they

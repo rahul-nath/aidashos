@@ -315,7 +315,7 @@ class Settings(BaseSettings):
             "had no way to run that query and inferred instead. Read-only by "
             "construction: no verb it exposes can write, so an agent cannot file "
             "evidence about its own run. Off returns the spawn to no MCP configuration "
-            "at all. See docs/agent_ledger_read_access_design.md."
+            "at all. See docs/completed/agent_ledger_read_access_design.md."
         ),
     )
     access_posture: AccessPosture = Field(

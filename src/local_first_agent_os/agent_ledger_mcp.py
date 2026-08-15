@@ -12,7 +12,7 @@ Nothing here starts a server. A stdio MCP server is a child of whoever consumes
 it, so what these functions produce is an argument telling the harness what to
 spawn if it decides to ask something. A task that asks nothing spawns nothing.
 
-See docs/agent_ledger_read_access_design.md.
+See docs/completed/agent_ledger_read_access_design.md.
 """
 
 from __future__ import annotations

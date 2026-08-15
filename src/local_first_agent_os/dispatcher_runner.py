@@ -69,7 +69,7 @@ from .runtime import AppRuntime
 from .spawn_authority import SpawnAuthority
 from .staffing import Bench, JudgmentRole, Tier, load_bench
 
-DispatchKind = Literal["advisory", "code"]
+DispatchKind = Literal["advisory", "code", "cast"]
 
 
 @dataclass(frozen=True)

@@ -266,7 +266,7 @@ def verification_gate_environment(cwd: Path) -> tuple[dict[str, str], tuple[str,
     the process that hands work to DBOS. Inherited by a gate's `pytest`, that one
     variable made this repository's own suite fail 72 tests against a clean diff,
     and the evidence blamed the diff. See
-    docs/verification_gate_environment_design.md.
+    docs/completed/verification_gate_environment_design.md.
 
     Returns the environment beside the sorted names it stripped, because a
     stripped variable is invisible unless the run record says so. Names only,

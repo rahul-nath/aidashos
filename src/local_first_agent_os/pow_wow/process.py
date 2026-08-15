@@ -58,7 +58,7 @@ def _run_reaped_process_group(
     schedule, which means a command whose clock has fired can hold the executor
     for as long as the orphan pleases. A suite whose lingering threads keep the
     interpreter alive after the summary prints is the recorded case: see the
-    incident in docs/verification_gate_environment_design.md. The group kill is
+    incident in docs/completed/verification_gate_environment_design.md. The group kill is
     what makes the timeout an actual bound rather than a request.
     """
 

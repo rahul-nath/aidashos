@@ -7,7 +7,7 @@ The runtime's worker threads are non-daemon, so a launched runtime nobody
 destroys leaves the interpreter in `Py_Finalize` joining them forever. Observed
 live on 2026-08-10: a one-poll enqueue drainer finished its work, printed its
 result, and sat in `wait_for_thread_shutdown` until it was sampled and killed -
-the 26-minute shape from docs/verification_gate_environment_design.md, seen
+the 26-minute shape from docs/completed/verification_gate_environment_design.md, seen
 from inside. `main` in `coordination/cli.py` owns the stop because it is the
 process boundary; this runs that boundary for real.
 """

@@ -7,7 +7,7 @@ A verification command is a statement about the target project, so it runs in
 the target project's environment and not the control plane's. The supervised
 dispatcher exports `LOCAL_AGENT_USE_DBOS=true`; inherited by a gate's `pytest`,
 that one variable failed this repository's own suite against a clean diff, and
-the evidence blamed the diff. docs/verification_gate_environment_design.md is
+the evidence blamed the diff. docs/completed/verification_gate_environment_design.md is
 the full account; these tests are its Tests section, one for one.
 """
 
