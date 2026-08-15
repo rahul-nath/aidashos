@@ -16,12 +16,34 @@ git clone https://github.com/rahul-nath/aidashos.git && cd aidashos && make
 `./scripts/boot/boot.sh` is the boot sequence: llama.cpp, the model weights, both subscription sign-ins, the default stack config, and a final readiness check that prints the fixing command for anything missing.
 Windows runs `.\scripts\boot\boot.ps1` for the model stack and the runtime under WSL2.
 
-Prefer to have an agent do it?
-Paste [docs/onboarding/BOOT_PROMPT.md](docs/onboarding/BOOT_PROMPT.md) into Claude Code, Codex, or any AI tool with shell access, opened at the repo root.
-It drives the same scripts, stage by stage, and leaves the sign-ins and the large downloads to you.
-
 The whole path, start to finish, is [docs/onboarding/ONBOARDING.md](docs/onboarding/ONBOARDING.md), drawn as a DAG in [docs/diagrams/aidashos-onboarding-dag.png](docs/diagrams/aidashos-onboarding-dag.png).
-Stuck at any point, `./scripts/first-run-check.sh` says what is missing and what fixes it.
+Stuck at any point, `./scripts/first-run-check.sh` says what is missing and prints the command that fixes it.
+
+## Let an agent install it
+
+Paste [docs/onboarding/BOOT_PROMPT.md](docs/onboarding/BOOT_PROMPT.md) into Claude Code, Codex, or any AI tool with shell access, opened at the repo root.
+It drives the same scripts, one stage at a time so a failure is visible and fixable, and hands the two subscription sign-ins and the large model downloads back to you rather than deciding them for you.
+
+Three prompts run the whole lane: boot the stack, start the runtime and prove it, attach your own tool.
+All three live in [docs/onboarding/prompts.json](docs/onboarding/prompts.json), which is the single source for them.
+The walkthrough quotes that file and the website renders it, so a test (`tests/test_onboarding_prompts.py`) pins all three together and to the scripts they name.
+Nothing here can tell you to run a script this repository does not ship.
+
+## Drive it from the AI tool you already use
+
+The coordination ledger is an MCP server, so the system is operable from your daily driver rather than only from its own terminal.
+
+```bash
+uv run agent-ledger serve      # stdio MCP, from the repo root
+```
+
+Claude Code needs no setup at all: the repo ships [.mcp.json](.mcp.json), so opening a session at the root offers the `agent-os` server.
+Codex and any other stdio MCP client get their config block from [skills/operate-agent-os/SKILL.md](skills/operate-agent-os/SKILL.md), which also carries the operating ritual: what to check first, how to drive the workflows, and which boundaries an assistant does not cross.
+
+`run_first_run_check` is there too, for clients with no shell of their own.
+It is an adapter over `scripts/first-run-check.sh` rather than a second copy of the readiness rules, so it cannot drift from what the script says.
+
+A dispatched agent inside the system gets a different, deliberately smaller surface: three read-only tools, and no way to file evidence about its own run.
 
 The rest of this README is what the system actually does.
 
