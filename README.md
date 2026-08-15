@@ -8,7 +8,7 @@ Every step writes a row to a local Postgres ledger as it happens, which is what 
 
 Frontier agents (Claude Code and Codex today, swappable in config) run through their own headless CLIs under your existing subscriptions.
 Local models run through llama.cpp.
-There is no hosted service, no cloud backend, and no telemetry.
+There is no hosted service, no cloud backend, and nothing reports home.
 
 ## Who this is for
 
@@ -66,6 +66,12 @@ A compose profile (`app`) and the Kind manifests under `k8s/` can run the applic
 
 The only network dependency is the frontier tiers calling their vendors' models through their own CLIs, under your accounts.
 The junior tier and the entire control plane run with the network unplugged.
+
+The system is instrumented, and all of it points at your own machine.
+The API serves Prometheus metrics at `/metrics`, and `observability/` brings up Loki, Tempo, Prometheus, Pyroscope, and Grafana as local compose services.
+OpenTelemetry traces (`LOCAL_AGENT_OTEL_TRACES_ENABLED`) and continuous profiling (`LOCAL_AGENT_PYROSCOPE_ENABLED`) are both off by default and both default to a `127.0.0.1` endpoint when you turn them on.
+Nothing is collected by the author or by any vendor.
+If you want traces on a remote collector, `LOCAL_AGENT_OTEL_TRACES_ENDPOINT` and `LOCAL_AGENT_OTEL_TRACES_HEADERS` are how you send them there, and that is your decision to make rather than a default to discover.
 
 ## Is there a UI, or is it terminal only?
 
