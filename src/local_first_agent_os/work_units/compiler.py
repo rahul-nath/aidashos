@@ -18,6 +18,7 @@ can change between compiling and running.
 from __future__ import annotations
 
 import re
+import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from enum import StrEnum
@@ -616,7 +617,9 @@ def compile_design_doc(
             reason="the plan is advisory-only and declares no implementation milestone"
         )
 
-    target_project_id, target_blocker = _resolve_target_project(parsed.declared_target_project_id)
+    target_project_id, target_blocker, target_notice = _resolve_target_project(
+        parsed.declared_target_project_id
+    )
 
     plan = CompiledWorkPlan(
         schema_version=SCHEMA_VERSION_COMPILED_WORK_PLAN,
@@ -653,6 +656,17 @@ def compile_design_doc(
     blockers.extend(capability_blockers)
     if target_blocker is not None:
         blockers.append(target_blocker)
+    if target_notice is not None:
+        # Reported rather than logged: creating a directory and editing the
+        # operator's registry is a side effect, and it belongs where they read
+        # the rest of what compiling did.
+        diagnostics.append(
+            Diagnostic(
+                severity=DiagnosticSeverity.INFO,
+                code="target_project_scaffolded",
+                message=target_notice,
+            )
+        )
     for item in diagnostics:
         if item.severity is DiagnosticSeverity.WARNING and item.code == "ambiguous_inferred_phase":
             blockers.append(item.message)
@@ -664,32 +678,47 @@ def compile_design_doc(
     )
 
 
-def _resolve_target_project(declared: str | None) -> tuple[str, str | None]:
-    """Resolve the document's target to a registered project id.
+def _resolve_target_project(declared: str | None) -> tuple[str, str | None, str | None]:
+    """Resolve the document's target to a project id, adopting one if needed.
 
-    An unknown project becomes an execution blocker rather than an exception, so
-    a typo is a compile-time answer an operator can read next to the other
-    blockers instead of a `KeyError` an hour into a run. The plan still carries
-    the declared value in that case: a blocked plan is not runnable, and blanking
-    the field would hide what the document actually asked for.
+    An unregistered target used to become an execution blocker. It no longer
+    does: a missing target directory is an instruction to make one, not a reason
+    to refuse a milestone. `adopt_unregistered_target` creates the repository
+    under the current working directory and registers it, so the id every later
+    `project_by_id` looks up is real by the time anything asks.
 
-    Silence resolves to the project-center default, which is where the executor's
-    fallback already pointed. That keeps this change from moving any existing
-    behavior; it only makes the choice visible in the plan and hashed into it.
+    Silence still resolves to the project-center default rather than inventing a
+    name. That default is a registered project the operator chose, and supplying
+    a missing target is this function's job in a way that overriding a chosen one
+    is not.
+
+    A blocker survives for exactly one case: an id that cannot become a directory
+    name. That is a typo the operator has to see, and guessing at what they meant
+    would be worse than saying so.
     """
 
     from ..project_center import load_project_center
+    from ..project_scaffold import adopt_unregistered_target
+    from ..settings import get_settings
 
     center = load_project_center()
     if declared is None:
-        return center.default_saga_project, None
+        return center.default_saga_project, None, None
     known = {project.id for project in center.projects}
-    if declared not in known:
+    if declared in known:
+        return declared, None, None
+
+    try:
+        adopted = adopt_unregistered_target(declared, settings=get_settings())
+    except (ValueError, OSError, subprocess.SubprocessError) as error:
         return declared, (
-            f"target project {declared!r} is not registered in linked_projects.toml; "
-            f"known projects: {', '.join(sorted(known))}"
-        )
-    return declared, None
+            f"target project {declared!r} is not registered and could not be "
+            f"adopted: {error}. Known projects: {', '.join(sorted(known))}"
+        ), None
+    verb = "created" if adopted["created"] else "adopted existing"
+    return declared, None, (
+        f"{verb} target project {declared!r} at {adopted['path']} and registered it"
+    )
 
 
 __all__ = [

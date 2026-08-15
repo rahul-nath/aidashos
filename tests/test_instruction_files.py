@@ -33,7 +33,20 @@ _INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
 
 
 def _read(name: str) -> str:
-    return (_REPOSITORY_ROOT / name).read_text(encoding="utf-8")
+    """The instruction file's text, skipping when this checkout does not own one.
+
+    `CLAUDE.md` and `AGENTS.md` are deliberately absent from the public
+    snapshot's allowlist, because a public clone owns its own instructions and
+    the private ones point at handoffs and design principles that do not travel.
+    This suite does travel, so without the guard these five tests fail in the
+    snapshot forever, for a reason that is a deliberate decision rather than a
+    regression. A failure nobody can fix teaches a reader to ignore the suite.
+    """
+
+    path = _REPOSITORY_ROOT / name
+    if not path.exists():
+        pytest.skip(f"{name} is not part of this checkout; it is private-repo-owned")
+    return path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("name", _INSTRUCTION_FILES)

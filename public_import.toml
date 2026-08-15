@@ -148,6 +148,42 @@ path = "docs/onboarding"
 kind = "directory"
 overwrite = true
 
+# The four documents the travelling test suite reads.
+#
+# tests/ travels whole and docs/ does not, and that asymmetry shipped a suite
+# which had never passed in the snapshot since its first commit: sixteen tests
+# asserted properties of documents that were not there. Each of these is the
+# subject of a test that already travels, so they are not narrative - they are
+# fixtures with prose around them.
+#
+# tests/test_deep_think_gawd_doc.py compiles the first one and drives it to
+# SUCCEEDED. tests/test_operator_command_surface.py scans the fenced bash in the
+# next three and asserts every command in them actually resolves.
+# tests/test_staffing.py reads the shooting script and fails when its named
+# seating disagrees with configs/staffing.toml.
+#
+# All four were scanned against docs/public_release_checklist.md's denylist on
+# 2026-08-15 with zero hits.
+[[allow]]
+path = "docs/deep_think_buys_a_second_pass_gawd.md"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "docs/demo_shooting_script.md"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "docs/cockpit_e2e_runbook.md"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "docs/work_unit_operator_walkthrough.md"
+kind = "file"
+overwrite = true
+
 # The agent-facing manual. It travels for the same reason the onboarding lane
 # does: this system has a hard requirement that an AI agent with local disk
 # access is the primary way a person uses it, and a public clone whose agent has

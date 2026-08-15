@@ -99,10 +99,23 @@ def _argv_of(line: str) -> list[str] | None:
 
 
 def _documented_commands() -> list[tuple[str, str]]:
+    """Every `agent-ledger` line in the operator docs this tree actually carries.
+
+    A missing document is skipped rather than fatal, because `tests/` and
+    `docs/` do not travel together. The public snapshot's manifest is code-only:
+    it carries the whole test suite and exactly four paths under `docs/`, none
+    of them these three, so reading them unconditionally turned a deliberate
+    publishing decision into a collection error that took the entire suite down
+    with it. Here every document is present and the coverage is unchanged; there
+    the list is empty and the parametrized test below skips.
+    """
+
     found: list[tuple[str, str]] = []
     for relative in _OPERATOR_DOCS:
-        text = (_REPOSITORY_ROOT / relative).read_text(encoding="utf-8")
-        for block in _BASH_BLOCK.finditer(text):
+        document = _REPOSITORY_ROOT / relative
+        if not document.is_file():
+            continue
+        for block in _BASH_BLOCK.finditer(document.read_text(encoding="utf-8")):
             for line in block.group(1).splitlines():
                 if "agent-ledger" in line:
                     found.append((relative, line.strip()))

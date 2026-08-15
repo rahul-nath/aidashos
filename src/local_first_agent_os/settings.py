@@ -9,7 +9,8 @@ from enum import StrEnum
 from functools import lru_cache
 from os import getenv
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from types import NoneType, UnionType
+from typing import Annotated, Any, Literal, Union, get_args, get_origin
 from urllib.parse import urlsplit
 
 from pydantic import (
@@ -21,6 +22,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic.fields import FieldInfo
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .access_posture import AccessPosture
@@ -37,6 +39,46 @@ from .constants import (
 )
 
 LedgerOutboxName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+def _optional_field_keys(model: type[BaseSettings]) -> frozenset[str]:
+    """Every key that can carry an optional field's value, name and aliases both.
+
+    Settings sources hand values over under whichever key matched, so a field
+    declared with `validation_alias=AliasChoices(...)` arrives under one of
+    those alias strings rather than under its Python name. A lookup keyed only
+    by field name silently misses exactly the fields that name their own
+    environment variables, which is most of the ones a .env file sets.
+    """
+
+    keys: set[str] = set()
+    for name, field in model.model_fields.items():
+        if not _field_accepts_none(field):
+            continue
+        keys.add(name)
+        alias = field.validation_alias
+        if isinstance(alias, str):
+            keys.add(alias)
+        elif isinstance(alias, AliasChoices):
+            keys.update(choice for choice in alias.choices if isinstance(choice, str))
+    return frozenset(keys)
+
+
+def _field_accepts_none(field: FieldInfo) -> bool:
+    """Whether a field's declared type admits None.
+
+    Read off the annotation rather than off the default, because the two answer
+    different questions. `Settings` has optional fields whose default is not
+    None, and required fields do not have a default at all, so a default-based
+    test would be wrong in both directions.
+    """
+
+    annotation = field.annotation
+    if annotation is None or annotation is NoneType:
+        return True
+    if get_origin(annotation) in {Union, UnionType}:
+        return any(argument in {None, NoneType} for argument in get_args(annotation))
+    return False
 
 
 class DisabledLedgerOutbox(BaseModel):
@@ -204,6 +246,21 @@ class Settings(BaseSettings):
     # ``task_artifacts`` and the saga tables is never in scope here; deleting a
     # project's evidence is an operator decision, not a scheduled one.
     lifecycle_retention_seconds: int | None = Field(default=90 * 24 * 60 * 60, gt=0)
+    # Whether scheduled maintenance may delete session-artifact blobs that no
+    # live transcript still references, or only count them.
+    #
+    # Off by default, and the asymmetry is deliberate rather than timid. The
+    # content-addressed store is bounded by deduplication and unbounded in
+    # time, so it does need collecting; but the things in it are images an
+    # operator pasted, the reachability argument rests on every transcript root
+    # being found, and a scheduled job that silently deletes them on a
+    # first-run bug is a worse failure than a directory that grows. Reporting
+    # first makes the argument inspectable in the maintenance record before
+    # anyone acts on it.
+    lifecycle_sweep_session_artifacts: bool = Field(
+        default=False,
+        json_schema_extra={"feature_flag": True},
+    )
     # The durable outbox is operational delivery state, not an audit log.
     # Keep it disabled unless a named consumer and topic make every PENDING row
     # actionable. events.jsonl remains the local human-readable audit trail.
@@ -528,6 +585,43 @@ class Settings(BaseSettings):
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def treat_blank_environment_values_as_unset(cls, data: Any) -> Any:
+        """`KEY=` in a .env file means unset, not "the empty value".
+
+        `.env.example` is generated from this model, and an optional field with
+        no default renders as a bare `KEY=` line. Copying that template to `.env`
+        is the first step of every install - `scripts/bootstrap.sh` and
+        `scripts/boot/50-set-default-stack.sh` both do it - so every one of those
+        fields arrived as `''` on a freshly installed machine, and an empty
+        string is not what any of them means.
+
+        Two of the fourteen broke outright rather than subtly. A `dict | None`
+        field rejects `''` during field validation, so `Settings()` could not be
+        constructed at all, and `first-run-check.sh` reported the blocked item
+        as a broken target-project registry - the registry was fine, and the
+        settings object it needed had never existed. A `Path | None` field
+        accepts `''` and resolves it to `.`, so `LOCAL_AGENT_WORKFLOWY_FETCH_SCRIPT=`
+        pointed the fetch subprocess at the current directory, which fails with
+        `PermissionError: [Errno 13] Permission denied: '.'`. That one is why a
+        fresh clone's `uv run pytest` failed sixteen tests immediately after
+        `make`, while the same suite passed before `.env` existed.
+
+        Restricted to optional fields, because for them "absent" is already a
+        representable state and the default is the right answer. A required
+        field given a blank value still fails, which is what should happen.
+        """
+
+        if not isinstance(data, dict):
+            return data
+        optional_keys = _optional_field_keys(cls)
+        return {
+            key: value
+            for key, value in data.items()
+            if not (isinstance(value, str) and not value.strip() and key in optional_keys)
+        }
+
     @field_validator(
         "artifact_root",
         "lifecycle_log_dir",
@@ -631,7 +725,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def prefer_process_dbos_conductor_metadata(self) -> Settings:
-        raw = getenv("DBOS_CONDUCTOR_EXECUTOR_METADATA")
+        # Stripped before the emptiness test, for the same reason
+        # `treat_blank_conductor_metadata_as_unset` strips: a blank assignment
+        # means unset, and `json.loads` raises on whitespace rather than
+        # returning nothing.
+        raw = (getenv("DBOS_CONDUCTOR_EXECUTOR_METADATA") or "").strip()
         if not raw:
             return self
         parsed = json.loads(raw)

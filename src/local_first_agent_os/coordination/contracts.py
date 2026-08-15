@@ -49,6 +49,7 @@ class CoordinationCommandName(StrEnum):
     RUN_CRASH_RECONCILER = "run_crash_reconciler"
     GET_WORK_UNIT = "get_work_unit"
     LIST_WORK_UNITS = "list_work_units"
+    LIST_DESIGN_DOCS = "list_design_docs"
     LIST_WORK_UNIT_ARTIFACTS = "list_work_unit_artifacts"
     LIST_WORK_UNIT_EVENTS = "list_work_unit_events"
     RESUME_WORK_UNIT = "resume_work_unit"

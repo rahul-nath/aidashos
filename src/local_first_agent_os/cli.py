@@ -224,6 +224,25 @@ def session_daemon() -> None:
     run_session_daemon()
 
 
+@app.command("runtime-activity")
+def runtime_activity() -> None:
+    """Say whether this runtime has work in flight, from the coordination ledger.
+
+    Prints the answer - ``busy``, ``idle``, or ``unknown`` - on the first line,
+    then one line per live fact so a reader learns which lease or intent is
+    holding the runtime up. ``unknown`` means the ledger could not be read and
+    is never a synonym for ``idle``.
+
+    Read-only, so anyone may run it at any time. It exits zero for all three
+    answers: the answer is the output, and a non-zero exit is reserved for this
+    command itself failing, which a caller must also treat as unknown.
+    """
+
+    from .coordination.runtime_activity import read_runtime_activity, render_runtime_activity
+
+    print(render_runtime_activity(read_runtime_activity()))
+
+
 @app.command("lifecycle-maintenance")
 def lifecycle_maintenance(
     quiet: bool = typer.Option(False, "--quiet", help="Only update the latest status file."),
@@ -294,6 +313,102 @@ def session_flush(session_id: str | None = None) -> None:
 
     rows = SessionDaemonClient(get_settings()).flush(session_id=session_id)
     console.print_json(data={"flushed": rows})
+
+
+# `session_handoff` was 1148 lines with no caller anywhere outside its own test:
+# not a directive, not a workflow, not a route. Finished code nobody wired up is
+# worse than missing code, because a reader cannot tell the difference from the
+# outside and a design document keeps claiming it works. These four commands are
+# the call path. Each is a thin adapter over one existing function and adds no
+# behavior of its own.
+
+
+@app.command("handoff-externalize")
+def handoff_externalize(session_jsonl: Path) -> None:
+    """Promote a session JSONL in place, moving blobs into a sibling store.
+
+    Lossless and atomic: consumers see the whole old file or the whole new one.
+    Pause the native Claude/Codex writer first; the lock only serializes
+    promotions made through here.
+    """
+
+    from .session_handoff import externalize_session_in_place
+
+    result = externalize_session_in_place(session_jsonl_path=session_jsonl.expanduser())
+    console.print_json(
+        data={
+            "session_path": str(result.session_path),
+            "backup_path": str(result.backup_path),
+            "original_bytes": result.original_bytes,
+            "rewritten_bytes": result.rewritten_bytes,
+            "image_count": result.image_count,
+        }
+    )
+
+
+@app.command("handoff-export")
+def handoff_export(session_id: str, raw_jsonl: Path, output_root: Path) -> None:
+    """Write a portable bundle: rewritten transcript, manifest, and blobs."""
+
+    from .session_handoff import export_handoff_bundle
+
+    bundle = export_handoff_bundle(
+        session_id=session_id,
+        raw_jsonl_path=raw_jsonl.expanduser(),
+        output_root=output_root.expanduser(),
+    )
+    console.print_json(
+        data={
+            "bundle_dir": str(bundle.bundle_dir),
+            "artifacts": len(bundle.manifest.artifacts),
+            "original_bytes": bundle.original_bytes,
+            "rewritten_bytes": bundle.rewritten_bytes,
+        }
+    )
+
+
+@app.command("handoff-verify")
+def handoff_verify(bundle_dir: Path) -> None:
+    """Check every reference in a bundle resolves and no image data remains."""
+
+    from .session_handoff import HandoffIntegrityError, verify_handoff_bundle
+
+    try:
+        manifest = verify_handoff_bundle(bundle_dir.expanduser())
+    except HandoffIntegrityError as error:
+        console.print_json(data={"ok": False, "error": str(error)})
+        raise typer.Exit(1) from error
+    console.print_json(
+        data={
+            "ok": True,
+            "session_id": manifest.session_id,
+            "artifacts": len(manifest.artifacts),
+            "image_references": len(manifest.image_references),
+        }
+    )
+
+
+@app.command("handoff-init")
+def handoff_init(session_id: str, raw_jsonl: Path, workspace_root: Path) -> None:
+    """Hydrate a handed-off session into receiving context, before any model turn."""
+
+    from .session_handoff import initialize_handoff_context
+
+    session = initialize_handoff_context(
+        session_id=session_id,
+        raw_jsonl_path=raw_jsonl.expanduser(),
+        workspace_root=workspace_root.expanduser(),
+    )
+    console.print_json(
+        data={
+            "source_session_id": session.context.source_session_id,
+            "token_count": session.context.token_count,
+            "artifact_refs": len(session.context.artifact_refs),
+            "images": len(session.images),
+            "tool_outputs": len(session.tool_outputs),
+            "enabled_tools": session.context.enabled_tools,
+        }
+    )
 
 
 @app.command()

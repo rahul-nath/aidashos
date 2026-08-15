@@ -31,7 +31,7 @@ DEFAULT_MODELS: list[ModelSpec] = [
     ModelSpec(
         alias="qwen38_fallback",
         role=ModelRole.GENERAL_FALLBACK,
-        model_id="qwen3.8-27b-mtp-q4-k-m",
+        model_id="qwen3.8-27b-mtp-ud-q5-k-xl",
         server_model_name="qwen3.8-27b-mtp",
         runtime="llama.cpp",
         backend="metal",

@@ -145,6 +145,34 @@ class CompiledPlanRevisionRow:
 
 
 @dataclass(frozen=True)
+class DesignDocStatusRow:
+    """One design document's position in the pipeline, newest revision first.
+
+    This is a read-only projection assembled from three immutable tables. It
+    exists because every other entity in the ledger has a lister and design docs
+    had only a getter, so the question "what state is this document in" could be
+    answered by SQL alone and was therefore answered by hand in a README.
+
+    ``work_unit_count`` is not always 0 or 1. A document that was started,
+    cancelled, and started again has one row per attempt, and reporting only the
+    latest would make a document with five abandoned attempts look untouched.
+    """
+
+    design_doc_id: str
+    source_path: str | None
+    revision_count: int
+    latest_revision_number: int
+    latest_design_doc_revision_id: str
+    latest_plan_hash: str | None
+    latest_validation_status: str | None
+    execution_blocker_count: int
+    work_unit_count: int
+    latest_work_unit_id: str | None
+    latest_work_unit_status: str | None
+    latest_work_unit_phase: str | None
+
+
+@dataclass(frozen=True)
 class WorkUnitRow:
     work_unit_id: str
     title: str
@@ -1431,6 +1459,86 @@ def list_work_units(status: WorkUnitStatus | None = None) -> tuple[WorkUnitRow, 
                 (status.value,),
             ).fetchall()
     return tuple(_work_unit(row) for row in rows)
+
+
+def list_design_docs() -> tuple[DesignDocStatusRow, ...]:
+    """Every design document the ledger has ever seen, with its pipeline state.
+
+    The grouping is done here rather than in SQL. The three tables are immutable
+    and small, the join needs a per-document "latest revision" and a per-revision
+    "latest plan", and expressing both as window functions buys nothing at this
+    size while costing portability against the SQLite adapter the tests use.
+    """
+
+    with tx() as c:
+        revision_rows = c.execute(
+            "SELECT * FROM design_doc_revisions ORDER BY design_doc_id, revision_number"
+        ).fetchall()
+        plan_rows = c.execute(
+            "SELECT compiled_plan_revision_id, design_doc_revision_id, plan_hash,"
+            " validation_status, execution_blockers, created_at"
+            " FROM compiled_plan_revisions ORDER BY created_at"
+        ).fetchall()
+        unit_rows = c.execute(
+            "SELECT work_unit_id, status, current_phase, compiled_plan_revision_id,"
+            " design_doc_revision_id, created_at FROM work_units ORDER BY created_at"
+        ).fetchall()
+
+    revisions_by_doc: dict[str, list[dict[str, Any]]] = {}
+    for row in revision_rows:
+        data = rowdict(row)
+        revisions_by_doc.setdefault(str(data["design_doc_id"]), []).append(data)
+
+    plans_by_revision: dict[str, list[dict[str, Any]]] = {}
+    for row in plan_rows:
+        data = rowdict(row)
+        plans_by_revision.setdefault(str(data["design_doc_revision_id"]), []).append(data)
+
+    units_by_revision: dict[str, list[dict[str, Any]]] = {}
+    for row in unit_rows:
+        data = rowdict(row)
+        units_by_revision.setdefault(str(data["design_doc_revision_id"]), []).append(data)
+
+    out: list[DesignDocStatusRow] = []
+    for design_doc_id, revisions in revisions_by_doc.items():
+        latest = max(revisions, key=lambda item: int(item["revision_number"]))
+        latest_revision_id = str(latest["design_doc_revision_id"])
+
+        plans = plans_by_revision.get(latest_revision_id, ())
+        latest_plan = plans[-1] if plans else None
+
+        # Attempts are counted across every revision, not only the newest one,
+        # so a document whose latest edit has not been compiled still reports
+        # the runs that its earlier text produced.
+        units = [
+            unit
+            for item in revisions
+            for unit in units_by_revision.get(str(item["design_doc_revision_id"]), ())
+        ]
+        latest_unit = units[-1] if units else None
+
+        out.append(
+            DesignDocStatusRow(
+                design_doc_id=design_doc_id,
+                source_path=latest["source_path"],
+                revision_count=len(revisions),
+                latest_revision_number=int(latest["revision_number"]),
+                latest_design_doc_revision_id=latest_revision_id,
+                latest_plan_hash=str(latest_plan["plan_hash"]) if latest_plan else None,
+                latest_validation_status=(
+                    str(latest_plan["validation_status"]) if latest_plan else None
+                ),
+                execution_blocker_count=(
+                    len(_json_array(latest_plan["execution_blockers"])) if latest_plan else 0
+                ),
+                work_unit_count=len(units),
+                latest_work_unit_id=str(latest_unit["work_unit_id"]) if latest_unit else None,
+                latest_work_unit_status=str(latest_unit["status"]) if latest_unit else None,
+                latest_work_unit_phase=str(latest_unit["current_phase"]) if latest_unit else None,
+            )
+        )
+
+    return tuple(sorted(out, key=lambda item: item.design_doc_id))
 
 
 def list_milestone_executions(work_unit_id: str) -> tuple[MilestoneExecutionRow, ...]:

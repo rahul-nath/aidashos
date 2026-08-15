@@ -1,4 +1,18 @@
-.PHONY: whisper-coreml api-types api-types-check config-docs config-docs-check format format-check
+.PHONY: setup boot whisper-coreml api-types api-types-check config-docs config-docs-check format format-check
+
+# The public front door, and deliberately the first target: the site tells a
+# fresh clone to run bare `make`, so bare `make` has to be the base install
+# rather than whichever recipe happens to sit first in this file.
+setup:
+	./scripts/bootstrap.sh --install-system
+	@echo
+	@echo "Base install done. Next, the boot sequence (models, logins, stack):"
+	@echo "  ./scripts/boot/boot.sh"
+	@echo "Or paste docs/onboarding/BOOT_PROMPT.md into any AI agent to run it for you."
+
+# The rest of the onboarding lane, for people who prefer make verbs.
+boot:
+	./scripts/boot/boot.sh
 
 whisper-coreml:
 	./scripts/setup-whisper-coreml.sh
@@ -29,6 +43,17 @@ config-docs:
 # stops that happening again.
 config-docs-check:
 	uv run python scripts/dump_config_reference.py --check
+
+design-status:
+	uv run python scripts/dump_design_status.py --write
+
+# The design-status table was hand-maintained and had already drifted: README.md
+# and docs/gawd_drafts/completed/README.md disagreed about which drafts were
+# live, and a 200-line design doc had never been listed at all. The generated
+# half is the ledger's pipeline state; the check is the roster, which is the
+# only part of the human judgement that is decidable.
+design-status-check:
+	uv run python scripts/dump_design_status.py --check
 
 format:
 	uv run ruff format

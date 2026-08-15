@@ -1,0 +1,609 @@
+/* aidashos.com. Dark, terminal-adjacent, fast: system fonts, no images on the
+   critical path, one accent. */
+
+:root {
+  --bg: #0b0e14;
+  --bg-raise: #10151e;
+  --bg-inset: #0d1119;
+  --border: #202939;
+  --border-soft: #182031;
+  --text: #e7eaf0;
+  --muted: #9aa4b3;
+  --accent: #ff7a1a;
+  --accent-dim: #b35410;
+  --green: #46d17c;
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  /* Wide content scrolls inside its own box; the page itself never does. */
+  overflow-x: hidden;
+  overflow-wrap: break-word;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.925em;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+a {
+  color: var(--text);
+  text-decoration-color: var(--accent-dim);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: #fff;
+  text-decoration-color: var(--accent);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.2;
+  margin: 0 0 0.5rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+main {
+  display: block;
+}
+
+section {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 3.5rem 1.25rem 0;
+}
+
+section h2 {
+  font-size: 1.7rem;
+  margin-bottom: 1.25rem;
+}
+
+/* Header */
+
+.site-header {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 1.1rem 1.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.wordmark {
+  font-family: var(--mono);
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+.wordmark-accent {
+  color: var(--accent);
+}
+
+.site-header nav {
+  display: flex;
+  gap: 1.1rem;
+  flex-wrap: wrap;
+}
+
+.site-header a {
+  text-decoration: none;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+.site-header a:hover {
+  color: var(--text);
+}
+
+.site-header .github-link {
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.25rem 0.7rem;
+}
+
+.site-header .github-link:hover {
+  border-color: var(--accent);
+}
+
+/* Hero */
+
+.hero {
+  padding-top: 3.25rem;
+  text-align: left;
+}
+
+.kicker {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-size: 0.9rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin: 0 0 0.75rem;
+}
+
+.hero h1 {
+  font-size: clamp(1.9rem, 4.6vw, 3.1rem);
+  margin-bottom: 1rem;
+  max-width: 20ch;
+  /* Balanced rather than hard-broken: a checked-in <br> either lands mid-phrase
+     on a phone or has to be hidden, and hiding it removes the space too. */
+  text-wrap: balance;
+}
+
+.lede {
+  color: var(--muted);
+  font-size: 1.12rem;
+  max-width: 46rem;
+  margin: 0 0 1.25rem;
+}
+
+.badges {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0;
+  margin: 0;
+}
+
+.badges li {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.7rem;
+}
+
+/* Terminal */
+
+.terminal {
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raise);
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.terminal-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.55rem 0.9rem;
+  background: var(--bg-inset);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.dot.red {
+  background: #ff5f57;
+}
+
+.dot.yellow {
+  background: #febc2e;
+}
+
+.dot.green {
+  background: #28c840;
+}
+
+.terminal-title {
+  margin-left: 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.terminal-body {
+  padding: 1rem 1.1rem 1.1rem;
+}
+
+.terminal-line {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  justify-content: space-between;
+  padding: 0.35rem 0;
+  /* Flex items refuse to shrink below their content width by default, which is
+     how one long clone command used to widen the whole page on a phone. */
+  min-width: 0;
+}
+
+.terminal-line code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.95rem;
+  /* Block, so overflow applies at all: the command scrolls inside this box
+     rather than pushing the document sideways. */
+  display: block;
+  min-width: 0;
+  flex: 1;
+  overflow-x: auto;
+  white-space: pre;
+  scrollbar-width: thin;
+}
+
+.prompt-char {
+  color: var(--green);
+}
+
+.terminal-note {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin: 0.9rem 0 0;
+  border-top: 1px dashed var(--border);
+  padding-top: 0.9rem;
+}
+
+/* Copy buttons */
+
+.copy {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--text);
+  background: var(--bg-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.75rem;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+
+.copy:hover {
+  border-color: var(--accent);
+}
+
+.copy.copied {
+  color: var(--green);
+  border-color: var(--green);
+}
+
+/* Prompt sequence */
+
+.prompts-heading {
+  margin-top: 2.25rem;
+  font-size: 1.2rem;
+}
+
+.prompts-lede {
+  color: var(--muted);
+  max-width: 46rem;
+  margin-top: 0.25rem;
+}
+
+.prompt-sequence {
+  display: grid;
+  gap: 0.9rem;
+  margin-top: 1.25rem;
+}
+
+.prompt-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raise);
+  padding: 1rem 1.1rem;
+}
+
+.prompt-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.9rem;
+}
+
+.prompt-head h3 {
+  font-size: 1.05rem;
+  margin: 0;
+}
+
+.prompt-head > div {
+  flex: 1;
+}
+
+.prompt-index {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--accent);
+  border: 1px solid var(--accent-dim);
+  border-radius: 6px;
+  width: 1.7rem;
+  height: 1.7rem;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 0.9rem;
+}
+
+.prompt-summary {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin: 0.2rem 0 0;
+}
+
+.prompt-card details {
+  margin-top: 0.7rem;
+}
+
+.prompt-card summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-family: var(--mono);
+}
+
+.prompt-card summary:hover {
+  color: var(--text);
+}
+
+.prompt-text {
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  color: var(--muted);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  padding: 0.9rem;
+  white-space: pre-wrap;
+  margin: 0.6rem 0 0;
+}
+
+/* Lane */
+
+.lane-steps {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 0.9rem;
+}
+
+.lane-steps li {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raise);
+  padding: 0.9rem;
+}
+
+.lane-step-number {
+  font-family: var(--mono);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.lane-steps h3 {
+  font-size: 1rem;
+  margin: 0.3rem 0;
+}
+
+.lane-steps p {
+  color: var(--muted);
+  font-size: 0.86rem;
+  margin: 0;
+}
+
+.lane-note {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin-top: 1rem;
+}
+
+/* Features */
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0.9rem;
+}
+
+.feature-grid article {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raise);
+  padding: 1rem 1.1rem;
+}
+
+.feature-grid h3 {
+  font-size: 1.02rem;
+}
+
+.feature-grid p {
+  color: var(--muted);
+  font-size: 0.92rem;
+  margin: 0;
+}
+
+/* Stack table */
+
+.stack p {
+  color: var(--muted);
+  max-width: 46rem;
+}
+
+.stack table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+  font-size: 0.95rem;
+}
+
+.stack th,
+.stack td {
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--border-soft);
+  vertical-align: top;
+}
+
+.stack thead th {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.stack tbody th {
+  font-family: var(--mono);
+  color: var(--accent);
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.stack td:last-child {
+  color: var(--muted);
+}
+
+/* FAQ */
+
+.faq details {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-raise);
+  padding: 0.85rem 1.1rem;
+  margin-bottom: 0.7rem;
+}
+
+.faq summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.faq p {
+  color: var(--muted);
+  margin: 0.6rem 0 0;
+}
+
+/* Closing */
+
+.closing {
+  text-align: center;
+  padding-bottom: 1rem;
+}
+
+.closing p {
+  color: var(--muted);
+}
+
+.cta {
+  display: inline-block;
+  margin-top: 0.75rem;
+  font-family: var(--mono);
+  font-weight: 700;
+  text-decoration: none;
+  color: #0b0e14;
+  background: var(--accent);
+  border-radius: 8px;
+  padding: 0.7rem 1.4rem;
+}
+
+.cta:hover {
+  background: #ff8c3a;
+  color: #0b0e14;
+}
+
+/* Footer */
+
+.site-footer {
+  max-width: 60rem;
+  margin: 0 auto;
+  padding: 3rem 1.25rem 2.5rem;
+  border-top: 1px solid var(--border-soft);
+  margin-top: 3.5rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.footer-honesty {
+  font-size: 0.82rem;
+  color: var(--muted);
+  opacity: 0.85;
+}
+
+/* Responsive */
+
+@media (max-width: 860px) {
+  .lane-steps {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .feature-grid {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .lane-steps,
+  .feature-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .terminal-line {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.4rem;
+  }
+
+  .terminal-line code {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .prompt-head {
+    flex-wrap: wrap;
+  }
+
+  .stack table {
+    display: block;
+    overflow-x: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  .copy {
+    transition: none;
+  }
+}

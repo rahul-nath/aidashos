@@ -19,6 +19,7 @@ A field is listed here when it carries `feature_flag` in its `json_schema_extra`
 | `chrome_devtools_transport` | `LOCAL_AGENT_CHROME_DEVTOOLS_TRANSPORT` | `Literal` | `mcp` | Which Chrome DevTools implementation to drive. The cli path exists as a diagnostic fallback; its honest end state is deletion, not documentation. |
 | `coordination_transport` | `LOCAL_AGENT_COORDINATION_TRANSPORT`<br>`AGENT_COORDINATION_TRANSPORT` | `CoordinationTransportKind` | `in_process` | _undescribed_ |
 | `ledger_outbox` | `LOCAL_AGENT_LEDGER_OUTBOX` | `DisabledLedgerOutbox \| ConfiguredLedgerOutbox` | _derived_ | Whether ledger events are delivered to an external consumer. A discriminated union, so the disabled case cannot carry a half-filled consumer and topic. |
+| `lifecycle_sweep_session_artifacts` | `LOCAL_AGENT_LIFECYCLE_SWEEP_SESSION_ARTIFACTS` | `bool` | `False` | _undescribed_ |
 | `memory_profiling_enabled` | `LOCAL_AGENT_MEMORY_PROFILING_ENABLED` | `bool` | `False` | Run the tracemalloc collector. The test suite forces this off, because a live collector turns an ordinary run into a profiling workload. |
 | `mock_models` | `LOCAL_AGENT_MOCK_MODELS` | `bool` | `False` | Replace real inference with canned responses. Changes every downstream output, so it is a behaviour switch rather than wiring. |
 | `otel_traces_enabled` | `LOCAL_AGENT_OTEL_TRACES_ENABLED` | `bool` | `False` | Export OpenTelemetry traces to otel_traces_endpoint. |
@@ -241,6 +242,10 @@ The least-privileged way into the DBOS system database: a role granted the two m
 **`lifecycle_retention_seconds`**
 
 How long scheduled maintenance keeps collectable audit evidence: execution transcripts and artifacts not pinned by a checkpoint, terminal leases and dispatch intents nothing still references, settled ledger events, notes, and handoffs.  ``None`` keeps them forever.  Durable evidence in ``task_artifacts`` and the saga tables is never in scope here; deleting a project's evidence is an operator decision, not a scheduled one.
+
+**`lifecycle_sweep_session_artifacts`** _(flag)_
+
+Whether scheduled maintenance may delete session-artifact blobs that no live transcript still references, or only count them.  Off by default, and the asymmetry is deliberate rather than timid. The content-addressed store is bounded by deduplication and unbounded in time, so it does need collecting; but the things in it are images an operator pasted, the reachability argument rests on every transcript root being found, and a scheduled job that silently deletes them on a first-run bug is a worse failure than a directory that grows. Reporting first makes the argument inspectable in the maintenance record before anyone acts on it.
 
 **`pi_handoff_to_daemon`** _(flag)_
 

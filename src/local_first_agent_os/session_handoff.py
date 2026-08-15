@@ -42,6 +42,7 @@ import os
 import re
 import shutil
 import struct
+import time
 from base64 import b64decode
 from collections import Counter
 from enum import StrEnum
@@ -1145,4 +1146,104 @@ def initialize_handoff_context(
         resolver=resolver,
         images=images,
         tool_outputs=externalized.tool_outputs,
+    )
+
+
+class ArtifactSweepResult(BaseModel):
+    """What a reachability sweep found, and what it removed."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: str = "artifact_sweep_result.v1"
+    session_dir: Path
+    scanned_transcripts: int
+    reachable_digests: int
+    unreferenced_blobs: int
+    reclaimed_bytes: int
+    deleted: bool
+    skipped_recent: int
+
+
+def sweep_unreferenced_artifacts(
+    session_dir: Path,
+    *,
+    delete: bool = False,
+    min_age_seconds: float = 3600.0,
+) -> ArtifactSweepResult:
+    """Find blobs no live transcript references, and optionally remove them.
+
+    The store deduplicates by content, so it is bounded in the number of
+    distinct images an operator ever pastes and unbounded in time: compacting a
+    transcript rewrites the text that referenced a blob, and nothing has ever
+    removed the blob afterwards. This is the reachability half the store was
+    missing, shaped like `gc_ledger`: enumerate the roots, collect what they
+    reach, and collect the rest.
+
+    The roots are every transcript in the session directory, which means the
+    session file, every retained generation under `backups/`, and any bundle
+    transcript beside them. Backups are roots rather than garbage precisely
+    because they exist to be restored; a sweep that ignored them would make
+    restoring a generation produce dangling references.
+
+    Read-only by default, because deleting bytes on a reachability argument
+    deserves a look at the argument first. `min_age_seconds` additionally spares
+    blobs younger than the window, so a sweep running while another process is
+    mid-externalization cannot collect a blob written seconds before the
+    transcript that will reference it.
+    """
+
+    artifacts_dir = session_dir / "artifacts"
+    if not artifacts_dir.is_dir():
+        return ArtifactSweepResult(
+            session_dir=session_dir,
+            scanned_transcripts=0,
+            reachable_digests=0,
+            unreferenced_blobs=0,
+            reclaimed_bytes=0,
+            deleted=delete,
+            skipped_recent=0,
+        )
+
+    reachable: set[str] = set()
+    scanned = 0
+    for transcript in sorted(session_dir.rglob("*.jsonl")):
+        if artifacts_dir in transcript.parents:
+            continue
+        try:
+            text = transcript.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as error:
+            # An unreadable transcript is not evidence that its blobs are dead.
+            # Refuse the whole sweep rather than under-count reachability.
+            raise HandoffIntegrityError(
+                f"Could not read transcript for sweep: {transcript}"
+            ) from error
+        reachable.update(_ARTIFACT_REF_PATTERN.findall(text))
+        scanned += 1
+
+    cutoff = time.time() - min_age_seconds
+    unreferenced = 0
+    reclaimed = 0
+    skipped_recent = 0
+    for blob in sorted(artifacts_dir.iterdir()):
+        if not blob.is_file() or not blob.name.startswith("sha256-"):
+            continue
+        digest = blob.name.removeprefix("sha256-").split(".", 1)[0]
+        if digest in reachable:
+            continue
+        if blob.stat().st_mtime > cutoff:
+            skipped_recent += 1
+            continue
+        unreferenced += 1
+        reclaimed += blob.stat().st_size
+        if delete:
+            blob.unlink()
+
+    return ArtifactSweepResult(
+        session_dir=session_dir,
+        scanned_transcripts=scanned,
+        reachable_digests=len(reachable),
+        unreferenced_blobs=unreferenced,
+        reclaimed_bytes=reclaimed,
+        deleted=delete,
+        skipped_recent=skipped_recent,
     )

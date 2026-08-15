@@ -4,7 +4,14 @@ version = "0.1.0"
 description = "Local-first durable agent orchestration with DBOS, llama.cpp, Pi policy boundaries, and Postgres"
 readme = "README.md"
 license = "AGPL-3.0-or-later"
-license-files = ["LICENSE"]
+# `license-files` is deliberately absent. The AGPL text lives in the public
+# repository, which owns its own LICENSE the way it owns its own README, and
+# this operator checkout no longer carries a copy - that absence is how the two
+# trees are told apart at a glance. uv rejects a `license-files` glob that
+# matches nothing, so naming LICENSE here would fail every build in this tree.
+# The license itself has not changed: it is declared above, every source file
+# still carries its SPDX header, and the snapshot that gets distributed ships
+# the full text beside them.
 authors = [
     { name = "rahul-nath", email = "rahul.nath.eph@gmail.com" }
 ]

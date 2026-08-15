@@ -8,8 +8,10 @@ list_models() {
   cat <<'EOF'
 gemma4          unsloth/gemma-4-E4B-it-GGUF
                 gemma-4-E4B-it-Q4_K_M.gguf + mmproj-F16.gguf
-qwen38          ggml-org/Qwen3.8-27B-GGUF
-                Qwen3.8-27B-Q4_K_M.gguf + mtp-Qwen3.8-27B-Q4_0.gguf
+qwen38          unsloth/Qwen3.8-27B-GGUF + ggml-org/Qwen3.8-27B-GGUF
+                Qwen3.8-27B-UD-Q5_K_XL.gguf + mtp-Qwen3.8-27B-Q4_0.gguf
+glimmer         meta-models/Muse-Glimmer-30B-GGUF
+                muse-glimmer-30B-kquant-dynamic.gguf + dflash-kquant.gguf
 surya           datalab-to/surya-ocr-2-gguf
                 surya-2.gguf + surya-2-mmproj.gguf
 chandra         mradermacher/chandra-ocr-2-GGUF
@@ -42,11 +44,32 @@ download_one() {
       hf_download unsloth/gemma-4-E4B-it-GGUF mmproj-F16.gguf "$MODELS_DIR/gemma4" mmproj.gguf
       ;;
     qwen38)
-      # Two files, unlike the qwen3.6 entry this replaced: 3.6 carried its MTP
-      # draft head inside the main GGUF, and ggml-org ships 3.8's as a separate
-      # file that the registry's `draft_gguf_path` points llama.cpp at.
-      hf_download ggml-org/Qwen3.8-27B-GGUF Qwen3.8-27B-Q4_K_M.gguf "$MODELS_DIR/qwen3.8-27b-mtp" model.gguf
+      # Two files from two repositories, which is the part worth reading before
+      # editing. Unsloth's UD-Q5_K_XL is the target: 20.2GB against ggml-org's
+      # 19.0GB Q4_K_M for the same weights, which on a 36GB machine is a
+      # 1.2GB premium this tier can afford and the quant it replaced could not
+      # justify refusing. Unsloth publishes no MTP drafter, so the draft still
+      # comes from ggml-org, and the registry's `draft_gguf_path` points
+      # llama.cpp at it.
+      #
+      # Mixing vendors across a speculative pair is an inference, not a
+      # guarantee: both derive from Qwen/Qwen3.8-27B, and the target verifies
+      # every proposal, so a mismatch would show up as collapsed acceptance
+      # rather than as wrong output. Measured on 2026-08-15 rather than assumed:
+      # 0.82 and 0.71 acceptance across two turns, mean draft length ~2.5,
+      # against the 0.72-0.76 the qwen3.6 pair used to return.
+      hf_download unsloth/Qwen3.8-27B-GGUF Qwen3.8-27B-UD-Q5_K_XL.gguf "$MODELS_DIR/qwen3.8-27b-mtp" model.gguf
       hf_download ggml-org/Qwen3.8-27B-GGUF mtp-Qwen3.8-27B-Q4_0.gguf "$MODELS_DIR/qwen3.8-27b-mtp" draft.gguf
+      ;;
+    glimmer)
+      # The deliberator seat in configs/model_registry.toml. The draft file is a
+      # DFlash speculative drafter, not MTP, so the registry declares
+      # `type = "draft-dflash"` for it. Roughly 20GB resident: on a 36GB machine
+      # this and qwen38 must not be loaded at once, which is what the
+      # LOCAL_AGENT_LLAMA_MODELS_MAX=1 guard in scripts/boot/50-set-default-stack.sh
+      # exists for.
+      hf_download meta-models/Muse-Glimmer-30B-GGUF muse-glimmer-30B-kquant-dynamic.gguf "$MODELS_DIR/glimmer" model.gguf
+      hf_download meta-models/Muse-Glimmer-30B-GGUF dflash-kquant.gguf "$MODELS_DIR/glimmer" draft.gguf
       ;;
     surya)
       hf_download datalab-to/surya-ocr-2-gguf surya-2.gguf "$MODELS_DIR/surya-ocr-2" model.gguf
@@ -74,7 +97,7 @@ download_one() {
 case "${1:---list}" in
   --list|-l) list_models ;;
   all)
-    for model in gemma4 qwen38 surya chandra embedder medgemma whisper; do download_one "$model"; done
+    for model in gemma4 qwen38 glimmer surya chandra embedder medgemma whisper; do download_one "$model"; done
     ;;
   *) download_one "$1" ;;
 esac

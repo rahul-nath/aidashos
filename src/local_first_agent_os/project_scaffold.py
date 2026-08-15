@@ -326,3 +326,67 @@ def _scaffold_result(spec: TargetProjectScaffold, *, replayed: bool) -> dict[str
         "verification_commands": list(spec.verification_commands),
         "replayed": replayed,
     }
+
+
+def adopt_unregistered_target(
+    project_id: str,
+    *,
+    settings: Settings,
+    root: Path | None = None,
+) -> dict[str, Any]:
+    """Make an unregistered target real, without the approval-time machinery.
+
+    `scaffold_target_project` above is the approval-time path: it runs `uv init`,
+    adds dev dependencies, projects the verification commands into CI, and runs
+    them before committing. It also requires a finalized GAWD document, because
+    at approval time there is one.
+
+    Compiling a design document that names an unknown target is a different
+    moment with the same need. There is no finalized document yet, the caller is
+    a synchronous compile rather than a workflow step, and running a test suite
+    inside it would make compiling depend on the network and on minutes of
+    toolchain work. What that moment needs is the part both share: a real git
+    repository at a known path, and a registry entry so every later
+    `project_by_id` resolves.
+
+    So this is deliberately the smaller half of the same job, living beside the
+    larger one because scaffolding a target is one module's business. It reuses
+    this module's id rule and its registry writer rather than restating either.
+    A target adopted here can be filled in by the approval-time path afterwards:
+    the manifest is absent, which is exactly what `scaffold_target_project`
+    refuses to overwrite, so an operator gets an error rather than a surprise.
+    """
+
+    if _PROJECT_ID.fullmatch(project_id) is None:
+        raise ValueError(
+            "Target project id must start with a lowercase letter and contain "
+            "only lowercase letters, digits, and underscores."
+        )
+    base = (root or Path.cwd()).expanduser().resolve()
+    spec = TargetProjectScaffold(project_id=project_id, path=str(base / project_id))
+    target = spec.expanded_path
+    created = not target.exists()
+    target.mkdir(parents=True, exist_ok=True)
+
+    if not (target / ".git").exists():
+        # Worktrees, checkpoints, and the diff the verification gate reads all
+        # assume a repository; a target that is not one fails later and further
+        # from the cause.
+        _run_checked_scaffold_command(["git", "init", "-b", "main"], cwd=target)
+
+    readme = target / "README.md"
+    if not readme.exists():
+        readme.write_text(
+            f"# {project_id}\n\n"
+            "Adopted automatically: a design document named this target and no "
+            "project was registered under the id.\n"
+            "The registry entry in `configs/linked_projects.toml` is a starting "
+            "point rather than a decision.\n",
+            encoding="utf-8",
+        )
+
+    _register_linked_project(settings.linked_projects_path, spec)
+    result = _scaffold_result(spec, replayed=not created)
+    result["schema_version"] = "adopted_target_project_result.v1"
+    result["created"] = created
+    return result

@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "clone_command": "git clone https://github.com/rahul-nath/aidashos.git && cd aidashos && make",
+  "prompts": [
+    {
+      "id": "boot",
+      "title": "Boot the stack",
+      "summary": "Runs the boot sequence: llama.cpp, model weights, both subscription sign-ins, stack config, verification.",
+      "prompt": "You are working inside a fresh clone of aidashos, a local-first agent OS. Read scripts/boot/README.md and docs/onboarding/ONBOARDING.md before acting.\n\nThen complete the boot sequence:\n\n1. Run ./scripts/bootstrap.sh --check-only and report what is missing.\n2. If uv or the Python environment is not ready, run `make` and wait for it to finish.\n3. Run the boot stages one at a time from scripts/boot/, in numeric order (10-check-prereqs.sh, 20-install-llama-cpp.sh, 30-fetch-model-qwen3.sh, 31-fetch-model-gemma4.sh, 40-login-anthropic.sh, 41-login-chatgpt.sh, 50-set-default-stack.sh, 60-verify-boot.sh), rather than boot.sh, so each failure is visible and fixable. On Windows use the .ps1 twins and follow the WSL2 note in scripts/boot/README.md.\n4. Stages 30 and 31 download model weights and are the only slow, large steps. Before each, run `./scripts/download-models.sh --list` to show me exactly which repository and file it will fetch, and wait for my confirmation.\n5. The two sign-ins are interactive browser flows. Hand control to me for them and never enter credentials yourself.\n6. If a stage fails, read its output: every blocked line prints the command that fixes it. Fix, then re-run the stage; all stages are idempotent.\n7. Finish by running ./scripts/boot/60-verify-boot.sh and show me its full output."
+    },
+    {
+      "id": "first-run",
+      "title": "Start the runtime and prove it",
+      "summary": "Brings the resident services up, re-checks readiness, and compiles the example design document into a governed plan.",
+      "prompt": "The aidashos boot sequence finished on this machine. Bring the system up and prove it works:\n\n1. Run ./scripts/start-agent-runtime.sh. It exits non-zero naming any service that failed to come up; report what started.\n2. Run ./scripts/first-run-check.sh and show me the report.\n3. Compile the example design document into a governed plan: uv run agent-ledger compile_design_doc docs/examples/work_unit_acceptance_design_doc.md. Show me the compiled milestones.\n4. Run uv run pi /ledger and summarize the current state.\n5. Stop there. Approving a plan and dispatching work are my decisions; tell me the exact commands (uv run pi /approve-most-recent, uv run pi /dispatch) and what each will do, then wait."
+    },
+    {
+      "id": "attach-tool",
+      "title": "Attach your own AI tool",
+      "summary": "Connects Claude Code, Codex, or any MCP client to the coordination ledger, so your daily driver can operate the OS.",
+      "prompt": "Connect my AI coding tool to the aidashos coordination ledger over MCP.\n\n1. Read skills/operate-agent-os/SKILL.md and docs/AGENT_MANUAL.md in this repo.\n2. If my tool is Claude Code: the repo ships .mcp.json, so open a session in the repo root and confirm the agent-os server's tools are listed.\n3. If my tool is Codex: show me the [mcp_servers] block from the SKILL file, wait for my approval, then add it to ~/.codex/config.toml.\n4. For any other MCP client: the server command is `uv run agent-ledger --root <repo> serve`, stdio transport.\n5. Verify the connection by calling read_execution_ledger, describe_resident_loops, and list_dispatch_intents, and summarize what they say about this machine.\n6. From now on, prefer the ledger tools for reading system state, and drive workflows with the pi commands described in the SKILL file."
+    }
+  ]
+}

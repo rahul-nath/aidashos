@@ -585,8 +585,34 @@ def list_work_units(status: str | None = None) -> tuple[dict[str, Any], ...]:
             "current_phase": item.current_phase,
             "root_workflow_id": item.root_workflow_id,
             "compiled_plan_hash": item.compiled_plan_hash,
+            # Provenance. Without it this list is a dead end: a reader can see
+            # that six work units exist and cannot get back to the documents
+            # that produced them, which is why design-doc state was tracked by
+            # hand in a README instead of read from here.
+            "design_doc_revision_id": item.design_doc_revision_id,
+            "compiled_plan_revision_id": item.compiled_plan_revision_id,
         }
         for item in rows
+    )
+
+
+def list_design_docs() -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "design_doc_id": item.design_doc_id,
+            "source_path": item.source_path,
+            "revision_count": item.revision_count,
+            "latest_revision_number": item.latest_revision_number,
+            "latest_design_doc_revision_id": item.latest_design_doc_revision_id,
+            "latest_plan_hash": item.latest_plan_hash,
+            "latest_validation_status": item.latest_validation_status,
+            "execution_blocker_count": item.execution_blocker_count,
+            "work_unit_count": item.work_unit_count,
+            "latest_work_unit_id": item.latest_work_unit_id,
+            "latest_work_unit_status": item.latest_work_unit_status,
+            "latest_work_unit_phase": item.latest_work_unit_phase,
+        }
+        for item in repo.list_design_docs()
     )
 
 

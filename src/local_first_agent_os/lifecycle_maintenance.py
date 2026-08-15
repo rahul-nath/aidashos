@@ -70,6 +70,53 @@ def bound_log_files(
     return bounded
 
 
+def sweep_session_artifacts(
+    export_root: Path,
+    *,
+    delete: bool,
+) -> list[dict[str, Any]]:
+    """Report, and optionally reclaim, blobs no live transcript still references.
+
+    The content-addressed store deduplicates, so it is bounded in the number of
+    distinct images an operator pastes and unbounded in time: compacting a
+    transcript rewrites away the reference and nothing has ever removed the
+    blob. This is the same janitorial shape as the log bounding above and the
+    ledger sweep below, and it belongs here rather than inside ``gc_ledger``
+    because the roots are transcripts on disk rather than rows in a
+    transaction.
+
+    Reporting is the default and deleting is opt-in through
+    ``LOCAL_AGENT_LIFECYCLE_SWEEP_SESSION_ARTIFACTS``, because a scheduled job
+    that silently removes an operator's pasted screenshots should be a decision
+    rather than a default. A directory that cannot be swept degrades that one
+    entry instead of the run: this is a janitor, and one unreadable session is
+    not a reason to skip bounding everything else.
+    """
+
+    if not export_root.is_dir():
+        return []
+
+    from .session_handoff import sweep_unreferenced_artifacts
+
+    sweeps: list[dict[str, Any]] = []
+    for session_dir in sorted(path for path in export_root.iterdir() if path.is_dir()):
+        if not (session_dir / "artifacts").is_dir():
+            continue
+        try:
+            result = sweep_unreferenced_artifacts(session_dir, delete=delete)
+        except Exception as exc:  # one bad session must not stop the janitor
+            sweeps.append(
+                {
+                    "session_dir": str(session_dir),
+                    "status": "DEGRADED",
+                    "error_type": type(exc).__name__,
+                }
+            )
+            continue
+        sweeps.append(result.model_dump(mode="json"))
+    return sweeps
+
+
 def _write_latest(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -111,6 +158,10 @@ def run_lifecycle_maintenance(
         "bounded_logs": logs,
         "retention_seconds": settings.lifecycle_retention_seconds,
         "ledger": None,
+        "artifact_sweeps": sweep_session_artifacts(
+            settings.session_context_export_dir,
+            delete=settings.lifecycle_sweep_session_artifacts,
+        ),
     }
     try:
         # The window is the operator's, not this function's.  A janitor that

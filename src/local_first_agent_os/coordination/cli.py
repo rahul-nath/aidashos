@@ -79,6 +79,7 @@ from .execution import (
 )
 from .execution_ledger import read_execution_ledger
 from .integration_queue import list_integration_requests
+from .machine_readiness import run_first_run_check
 from .milestones import (
     MILESTONE_EVIDENCE_TYPES,
     amend_saga_milestone,
@@ -223,7 +224,9 @@ def build_mcp_server():
             "CODE_MERGE / MODEL_ESCALATION\n"
             "  8. complete_pow_wow → check_stagnation → complete_saga\n\n"
             "POLICY: roles do not imply permissions. A CEO agent can recommend; it cannot pay. "
-            "A Staff Engineer can approve a plan; it cannot bypass file claims."
+            "A Staff Engineer can approve a plan; it cannot bypass file claims.\n\n"
+            "Start with run_first_run_check when the machine's readiness is in question: "
+            "it reports what is missing and the exact command that fixes each miss."
         ),
     )
 
@@ -240,6 +243,7 @@ def build_mcp_server():
     mcp.tool(name="start_work_unit")(work_unit_commands.start_work_unit)
     mcp.tool(name="get_work_unit")(work_unit_commands.get_work_unit)
     mcp.tool(name="list_work_units")(work_unit_commands.list_work_units)
+    mcp.tool(name="list_design_docs")(work_unit_commands.list_design_docs)
     mcp.tool(name="list_work_unit_events")(work_unit_commands.list_work_unit_events)
     mcp.tool(name="list_work_unit_artifacts")(work_unit_commands.list_work_unit_artifacts)
     mcp.tool(name="submit_work_unit_decision")(work_unit_commands.submit_work_unit_decision)
@@ -261,6 +265,12 @@ def build_mcp_server():
     mcp.tool(name="read_execution_ledger")(read_execution_ledger)
     mcp.tool(name="run_ledger_dispatcher")(run_ledger_dispatcher)
     mcp.tool(name="describe_resident_loops")(describe_resident_loops)
+
+    # Machine readiness. The one question every onboarding conversation starts
+    # with, adapted from scripts/first-run-check.sh for MCP clients that have no
+    # shell. Operator surface only: a dispatched agent's machine is already
+    # ready by the time it exists.
+    mcp.tool(name="run_first_run_check")(run_first_run_check)
 
     # Layer 2 — GAWD docs
     mcp.tool(name="create_gawd_doc")(create_gawd_doc)
@@ -512,6 +522,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     lwu = sub.add_parser("list_work_units")
     lwu.add_argument("--status")
+
+    sub.add_parser("list_design_docs")
 
     lwe = sub.add_parser("list_work_unit_events")
     lwe.add_argument("work_unit_id")
@@ -998,6 +1010,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         out = work_unit_commands.get_work_unit(args.work_unit_id)
     elif cmd == "list_work_units":
         out = work_unit_commands.list_work_units(args.status)
+    elif cmd == "list_design_docs":
+        out = work_unit_commands.list_design_docs()
     elif cmd == "list_work_unit_events":
         out = work_unit_commands.list_work_unit_events(
             args.work_unit_id,

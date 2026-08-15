@@ -176,6 +176,10 @@ def list_work_units(status: str | None = None) -> dict[str, Any]:
         return err("invalid_status", message=str(exc))
 
 
+def list_design_docs() -> dict[str, Any]:
+    return ok(design_docs=list(service.list_design_docs()))
+
+
 def list_work_unit_events(
     work_unit_id: str,
     after_sequence: int = 0,
@@ -462,6 +466,7 @@ __all__ = [
     "drain_work_unit_enqueues",
     "run_enqueue_drainer",
     "get_work_unit",
+    "list_design_docs",
     "list_work_unit_artifacts",
     "list_work_unit_events",
     "list_work_units",

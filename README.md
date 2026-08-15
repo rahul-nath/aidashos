@@ -106,6 +106,8 @@ It runs several roles concurrently on one question, each told to hold its stance
 A member's role is also its `POLICIES.md` principal, since the capability gate resolves a role to a policy section before falling back to the seat, so per-stance privileges are a markdown section rather than a code change.
 The default cast seats every stance on the junior tier today, which measures one model's prior three times rather than three architectures.
 A tier names a seat rather than a model: `configs/staffing.toml` decides which harness and which model sit in each seat, and swapping one is a one-line edit with no code change.
+As staffed today that is Codex implementing and Claude Code reviewing; `configs/staffing.toml` is the one place that says so, and swapping it is a one-line edit.
+The two seats are never the same vendor, so the reviewer does not share the implementer's blind spots.
 
 ## Does it run remotely? Is it containerized?
 

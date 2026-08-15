@@ -28,7 +28,10 @@ top_p = 0.95
 
 [models.qwen38_fallback]
 role = "general_fallback"
-model_id = "qwen3.8-27b-mtp-q4-k-m"
+# Swapped from ggml-org's Q4_K_M to Unsloth's UD-Q5_K_XL on 2026-08-15. This id
+# is provenance: it is recorded against session memory and ledger rows, so it
+# has to name the quant that actually answered, not the one that used to.
+model_id = "qwen3.8-27b-mtp-ud-q5-k-xl"
 server_model_name = "qwen3.8-27b-mtp"
 runtime = "llama.cpp"
 backend = "metal"

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>aidashos - a local-first agent OS</title>
+    <meta
+      name="description"
+      content="aidashos turns a design document into governed agent work on your own machine: compiled plans, isolated worktrees, cross-vendor review, and an approval gate before anything merges. Local models via llama.cpp, frontier agents under your own subscriptions, every step in a local Postgres ledger."
+    />
+    <link rel="canonical" href="https://www.aidashos.com/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#0b0e14" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://www.aidashos.com/" />
+    <meta property="og:title" content="aidashos - a local-first agent OS" />
+    <meta
+      property="og:description"
+      content="Durable orchestration of coding agents on your own machine. One clone command, one boot sequence, a governed pipeline with an audit trail."
+    />
+    <meta property="og:image" content="https://www.aidashos.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="aidashos - a local-first agent OS" />
+    <meta
+      name="twitter:description"
+      content="Durable orchestration of coding agents on your own machine. One clone command, one boot sequence, a governed pipeline with an audit trail."
+    />
+    <meta name="twitter:image" content="https://www.aidashos.com/og.png" />
+
+    <!--
+      Telemetry is deliberately absent by default. To count page views and the
+      custom events telemetry.ts emits (copy_clone, copy_prompt_*, click_github),
+      uncomment the Plausible snippet below after creating the site there, or set
+      VITE_TELEMETRY_ENDPOINT at build time to receive JSON beacons yourself.
+      The OS this page describes reports nothing, and the page should not
+      undercut that claim silently.
+
+      <script defer data-domain="aidashos.com" src="https://plausible.io/js/script.tagged-events.js"></script>
+    -->
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "aidashos",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux, Windows (WSL2)",
+        "url": "https://www.aidashos.com/",
+        "sameAs": ["https://github.com/rahul-nath/aidashos"],
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+        "description": "A local-first agent OS: durable orchestration of coding agents on your own machine, with compiled plans, isolated worktrees, cross-vendor review, approval gates, and a local Postgres ledger."
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Does it run in the cloud?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. It runs on your machine, on purpose. Postgres runs in local Docker, local models run through llama.cpp on your hardware, and the frontier agents run through their own CLIs under your existing subscriptions. There is no hosted service and nothing reports home."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What happens if I close the laptop mid-run?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Work state lives in Postgres rows, not in context windows. A crashed agent process loses only its own context window; the crash reconciler reaps its dead lease and the next dispatch resumes from what the ledger says."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can it merge or deploy on its own?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Merge, deploy, spend, and external communications all stop at ledger approval gates that only the operator resolves. Staff review approval ends at a pending CODE_MERGE request, never at a merge."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What do I need to run it?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "macOS or Linux (Windows via WSL2), Git, Python 3.13 via uv, Node, Docker, and one local model you can serve. The default stack is gemma-4-E4B for the junior tier plus Qwen3.8-27B, with Claude Code and Codex under your own subscriptions for the senior and staff seats. Budget tens of GB of disk for the model weights. One local model with every tier staffed locally also works."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is there telemetry?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "The OS reports nothing to anyone. Its observability stack points at your own machine. This website counts only its own button clicks, and only when its owner enables analytics."
+            }
+          }
+        ]
+      }
+    </script>
+  </head>
+  <body>
+    <div id="root"><!--app-html--></div>
+    <script type="module" src="/src/entry-client.tsx"></script>
+  </body>
+</html>
