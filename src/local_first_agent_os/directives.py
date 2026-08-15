@@ -105,8 +105,6 @@ APPROVED_GAWD_ALIAS = "/approved-gawd"
 APPROVE_MOST_RECENT_ALIAS = "/approve-most-recent"
 TRY_MILESTONE_ALIAS = "/try-milestone"
 DISPATCH_ALIAS = "/dispatch"
-LEGACY_DISPATCH_ONCE_ALIAS = "/dispatch-once"
-DISPATCH_ONCE_ALIASES = frozenset({DISPATCH_ALIAS, LEGACY_DISPATCH_ONCE_ALIAS})
 REVIEW_MERGE_ALIAS = "/review-merge"
 APPROVE_MERGE_ALIAS = "/approve-merge"
 DispatcherTier = Literal["junior", "senior", "staff"]
@@ -145,7 +143,7 @@ TOP_LEVEL_DIRECTIVES = set(AGENT_QUERY_ALIASES) | {
     "/stagnation",
     "/try-milestone",
     "/approve-most-recent",
-    *DISPATCH_ONCE_ALIASES,
+    DISPATCH_ALIAS,
     "/review-merge",
     "/approve-merge",
 }
@@ -333,7 +331,7 @@ class DirectiveParser(Parser):
                 action="approve_most_recent",
                 alias=APPROVE_MOST_RECENT_ALIAS,
             )
-        if command in DISPATCH_ONCE_ALIASES:
+        if command == DISPATCH_ALIAS:
             if tail:
                 raise ValueError(
                     f"{command} takes no arguments; use /start /dispatcher for "

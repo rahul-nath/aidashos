@@ -15,7 +15,7 @@ from typing import Any
 from rich.console import Console
 
 from .contracts import ArtifactRole, WorkspaceId
-from .directives import DISPATCH_ONCE_ALIASES, DirectiveParser
+from .directives import DISPATCH_ALIAS, DirectiveParser
 from .local_timer import is_timer_directive, run_timer_directive
 from .pi_daemon import PiDaemonClient, PiDaemonUnavailable, ensure_pi_daemon
 from .settings import get_settings
@@ -146,7 +146,7 @@ def _run_daemon_query(
     streaming: bool,
 ) -> int:
     settings = get_settings()
-    if text.strip() in DISPATCH_ONCE_ALIASES and not json_output:
+    if text.strip() == DISPATCH_ALIAS and not json_output:
         print(
             "dispatch: claiming at most one PENDING intent; if claimed, "
             "executing its tiered tasks, verification, checkpoint, and terminal "

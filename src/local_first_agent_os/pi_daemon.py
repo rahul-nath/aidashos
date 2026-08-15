@@ -31,7 +31,7 @@ from .constants import (
     DEFAULT_PI_STREAM_IDLE_TIMEOUT_SECONDS,
 )
 from .daemon_stdio import detach_inherited_stdin
-from .directives import DISPATCH_ONCE_ALIASES
+from .directives import DISPATCH_ALIAS
 from .progress_events import progress_event_sink
 from .runtime_source import runtime_revision
 from .settings import Settings, get_settings
@@ -279,7 +279,7 @@ def build_pi_daemon_http_handler(
             self.end_headers()
             try:
                 text = str(payload.get("text") or "").strip()
-                if text in DISPATCH_ONCE_ALIASES:
+                if text == DISPATCH_ALIAS:
                     self._write_event(
                         {
                             "type": "status",

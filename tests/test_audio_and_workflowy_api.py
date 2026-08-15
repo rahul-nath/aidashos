@@ -65,7 +65,6 @@ def test_directive_parser_resolves_operator_shortcuts(runtime) -> None:
     retry = parser.parse("/try-milestone Retry after provider fallback repair")
     approve = parser.parse("/approve-most-recent")
     dispatch = parser.parse("/dispatch")
-    legacy_dispatch = parser.parse("/dispatch-once")
     review = parser.parse("/review-merge")
     approve_merge = parser.parse("/approve-merge approval-123")
 
@@ -75,9 +74,7 @@ def test_directive_parser_resolves_operator_shortcuts(runtime) -> None:
     assert dispatch.action == "dispatch_once"
     assert dispatch.alias == "/dispatch"
     assert dispatch.dispatcher_max_polls == 1
-    assert legacy_dispatch.action == dispatch.action
-    assert legacy_dispatch.alias == dispatch.alias
-    assert legacy_dispatch.dispatcher_max_polls == dispatch.dispatcher_max_polls
+    assert dispatch.alias == "/dispatch"
     assert review.action == "review_merge"
     assert review.query is None
     assert approve_merge.action == "approve_merge"
