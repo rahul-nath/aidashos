@@ -135,6 +135,10 @@ A build that made them by calling somebody's API would be an agent OS that canno
 
 One model is enough.
 A machine with a local model and no frontier subscription is supported: staff every tier locally in `configs/staffing.toml` and the governed pipeline still runs end to end.
+That is not a claim on paper.
+`tests/test_work_unit_golden_path.py` drives a design document to SUCCEEDED with junior, senior, and staff all staffed on the local harness, through the same resident loops `scripts/start-agent-runtime.sh` starts, as real subprocesses.
+Run that lane with `LOCAL_AGENT_RUN_POSTGRES_INTEGRATION=1`.
+
 The reverse is not supported.
 A machine with frontier subscriptions and no local model is missing the half of the system that decides what the subscriptions are allowed to do.
 
