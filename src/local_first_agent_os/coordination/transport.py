@@ -261,7 +261,7 @@ def _spill_large_payload(
     return rewritten, temporary_content_path
 
 
-def legacy_command(argv: list[str]) -> RawCoordinationCommand:
+def command_from_argv(argv: list[str]) -> RawCoordinationCommand:
     return RawCoordinationCommand.from_argv(argv)
 
 
@@ -277,5 +277,5 @@ __all__ = [
     "coordination_root",
     "coordination_script_path",
     "default_coordination_root",
-    "legacy_command",
+    "command_from_argv",
 ]

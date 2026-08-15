@@ -24,7 +24,7 @@ from local_first_agent_os.coordination import transport as transport_module
 from local_first_agent_os.coordination.ledger_selection import CoordinationLedgerSelection
 from local_first_agent_os.coordination.transport import (
     SubprocessCoordinationTransport,
-    legacy_command,
+    command_from_argv,
 )
 from local_first_agent_os.daemon_stdio import detach_inherited_stdin
 
@@ -85,7 +85,7 @@ def test_subprocess_transport_gives_children_devnull_stdin(
         )
     )
 
-    payload = transport.execute(legacy_command(["get_gawd_doc", "any-doc-id"]))
+    payload = transport.execute(command_from_argv(["get_gawd_doc", "any-doc-id"]))
 
     assert payload["stdin_is_devnull"] is True
 

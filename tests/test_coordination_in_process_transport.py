@@ -35,7 +35,7 @@ from local_first_agent_os.coordination.transport import (
     InProcessCoordinationTransport,
     PackagedCoordinationCore,
     SubprocessCoordinationTransport,
-    legacy_command,
+    command_from_argv,
 )
 from local_first_agent_os.settings import CoordinationTransportKind, Settings
 
@@ -74,7 +74,7 @@ def test_both_transports_return_the_same_payload_for_the_same_command(tmp_path: 
     # Each transport can read the row the other one wrote, which is the only
     # proof that they reached the same database rather than two consistent ones.
     saga_id = str(through_memory["saga_id"])
-    read_back = subprocess_transport.execute(legacy_command(["get_saga", saga_id]))
+    read_back = subprocess_transport.execute(command_from_argv(["get_saga", saga_id]))
     assert cast(Mapping[str, object], read_back["saga"])["goal"] == "parity: in process"
 
     listed = in_process.execute(ListSagas())
@@ -112,9 +112,9 @@ def test_a_failing_command_raises_the_same_error_contract(tmp_path: Path) -> Non
     in_process, subprocess_transport = _both_transports(tmp_path)
 
     with pytest.raises(RuntimeError) as through_memory:
-        in_process.execute(legacy_command(["get_saga", "saga-that-does-not-exist"]))
+        in_process.execute(command_from_argv(["get_saga", "saga-that-does-not-exist"]))
     with pytest.raises(RuntimeError) as through_subprocess:
-        subprocess_transport.execute(legacy_command(["get_saga", "saga-that-does-not-exist"]))
+        subprocess_transport.execute(command_from_argv(["get_saga", "saga-that-does-not-exist"]))
 
     assert "get_saga" in str(through_memory.value)
     assert str(through_memory.value) == str(through_subprocess.value)

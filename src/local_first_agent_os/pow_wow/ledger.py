@@ -20,9 +20,9 @@ from ..coordination.contracts import (
 )
 from ..coordination.transport import (
     CoordinationTransportFactory,
+    command_from_argv,
     coordination_database_url,
     coordination_root,
-    legacy_command,
 )
 from ..settings import Settings
 from .types import PowWowArtifact, PowWowRunResult
@@ -61,7 +61,7 @@ def run_coordination_command(
     settings: Settings | None = None,
     root: Path | None = None,
 ) -> dict[str, Any]:
-    command = legacy_command(args) if isinstance(args, list) else args
+    command = command_from_argv(args) if isinstance(args, list) else args
     transport = CoordinationTransportFactory.create(
         settings=settings,
         root=root,

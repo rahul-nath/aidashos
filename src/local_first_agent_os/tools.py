@@ -617,7 +617,7 @@ class ChromeDevToolsTool:
         configured_args = [
             arg.lower()
             for arg in [
-                *self._legacy_attach_args(),
+                *self._attach_args(),
                 *self.settings.chrome_devtools_start_args,
             ]
         ]
@@ -627,13 +627,13 @@ class ChromeDevToolsTool:
         start = self._run_cli(
             [
                 "start",
-                *self._legacy_attach_args(),
+                *self._attach_args(),
                 *self.settings.chrome_devtools_start_args,
             ]
         )
         return [status, start]
 
-    def _legacy_attach_args(self) -> list[str]:
+    def _attach_args(self) -> list[str]:
         mode = self.settings.chrome_devtools_attach_mode
         if mode == "auto_connect":
             return ["--auto-connect"]
