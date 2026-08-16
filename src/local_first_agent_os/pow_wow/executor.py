@@ -4064,7 +4064,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         reason = (
             "final typed staff review did not approve"
             if typed_reviews
-            else "staff review produced no typed review_result.v1 evidence"
+            else self._missing_review_reason(review_tasks[-1], task_results)
         )
         return (
             *task_results,
@@ -4074,6 +4074,38 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 reason=reason,
             ),
         )
+
+    def _missing_review_reason(
+        self,
+        review_task: PowWowTaskSpec,
+        task_results: Sequence[PowWowTaskResult],
+    ) -> str:
+        """Why no typed review exists, separating "reviewed badly" from "never ran".
+
+        These are different failures with different fixes and they used to share
+        one sentence. A review task blocked by a failed implementation produced
+        "staff review produced no typed review_result.v1 evidence", which reads
+        as a reviewer or parser fault and sends an operator to debug the review
+        path. The actual cause was upstream and already recorded on the review
+        task's own result, one field away.
+
+        The distinction is worth a branch because the recovery differs. An
+        unparsed verdict is what `recover_unparsed_staff_review` exists for; a
+        review that never ran has nothing to reparse, and pointing an operator at
+        that verb wastes the trip.
+        """
+
+        result = next(
+            (item for item in task_results if item.task_name == review_task.task_name),
+            None,
+        )
+        if result is not None and result.status != "completed":
+            cause = "; ".join(result.risks) or result.summary
+            return (
+                f"staff review never ran (task {result.status}): {cause}. "
+                "There is no verdict to reparse; fix the upstream failure and re-dispatch"
+            )
+        return "staff review produced no typed review_result.v1 evidence"
 
     def _capture_code_patches(
         self,

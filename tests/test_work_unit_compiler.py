@@ -608,3 +608,46 @@ def test_motivation_reaches_the_plan_and_the_prompt_it_renders() -> None:
 
     # Motivation explains the work; it never becomes something the work must ship.
     assert pain not in outcome.plan.required_final_artifacts
+
+
+def test_a_document_with_no_declared_target_cannot_be_started() -> None:
+    """Silence used to resolve to the project-center default with zero diagnostics.
+
+    That cost a real dispatch. Five design documents in `docs/` had no
+    `Target project:` line, every one compiled VALID and runnable against an
+    unrelated repository, and starting one sent a frontier agent to read that
+    repository for context while implementing in a worktree of this one. The
+    failure surfaced four layers later as a complaint about missing staff-review
+    evidence, which is nowhere near the cause.
+
+    It blocks rather than inferring the target from the document's own location.
+    The compiler is pure and offline so one document compiles to one plan hash on
+    every host, and a default read from the filesystem would make the same text
+    produce different plans in different checkouts.
+    """
+
+    document = ACCEPTANCE_DESIGN_DOC.replace("Target project: local_first_agent_os\n", "")
+    assert "Target project:" not in document
+
+    parsed = parse_design_doc(document, design_doc_id="no-declared-target")
+    outcome = compile_design_doc(parsed, design_doc_revision_id="ddr-no-target")
+
+    assert isinstance(outcome, CompiledPlanOutcome)
+    assert outcome.runnable is False
+    assert outcome.validation_status is ValidationStatus.BLOCKED
+    blocker = "; ".join(outcome.execution_blockers)
+    assert "declares no target project" in blocker
+    assert "Target project:" in blocker, "the blocker must name the line that fixes it"
+
+
+def test_a_declared_target_is_not_blocked() -> None:
+    """The blocker must not fire for a document that says what it means."""
+
+    parsed = parse_design_doc(ACCEPTANCE_DESIGN_DOC, design_doc_id="declared-target")
+    outcome = compile_design_doc(parsed, design_doc_revision_id="ddr-declared")
+
+    assert isinstance(outcome, CompiledPlanOutcome)
+    assert outcome.runnable is True
+    assert not [
+        item for item in outcome.execution_blockers if "target project" in item
+    ]

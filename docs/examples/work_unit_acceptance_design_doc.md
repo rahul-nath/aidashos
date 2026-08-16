@@ -1,5 +1,7 @@
 # Acceptance design doc
 
+Target project: local_first_agent_os
+
 ## Requirements
 
 - Compile one DesignDoc revision into one immutable plan.

@@ -1,5 +1,7 @@
 # Golden path design doc
 
+Target project: local_first_agent_os
+
 A DesignDoc whose milestones a real dispatch can actually finish.
 
 The acceptance document beside this one cannot: milestones B and C require

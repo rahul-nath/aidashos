@@ -385,6 +385,11 @@ class WorkUnitSummary(OperatorContract):
     current_phase: str
     root_workflow_id: str
     compiled_plan_hash: str
+    # Provenance, so a row in this list can be traced back to the document that
+    # produced it. Without these the list is a dead end: a reader sees that runs
+    # exist and has no way to reach the design doc behind one.
+    design_doc_revision_id: str
+    compiled_plan_revision_id: str
 
 
 class WorkUnitIndex(OperatorContract):

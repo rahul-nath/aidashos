@@ -654,6 +654,31 @@ def compile_design_doc(
         f"unresolved blocking question: {question}" for question in _blocking_questions(parsed)
     ]
     blockers.extend(capability_blockers)
+    if parsed.declared_target_project_id is None:
+        # An execution blocker, because silence here already cost a real
+        # dispatch. Five design documents in docs/ had no `Target project:` line,
+        # every one resolved to the project-center default, and the compiler
+        # reported VALID and runnable with zero diagnostics. Starting one sent a
+        # frontier agent to read an unrelated repository for context while
+        # implementing in a worktree of this one, and the failure surfaced four
+        # layers later as a complaint about missing staff-review evidence.
+        #
+        # Blocking rather than inferring from the document's own location, which
+        # is the tempting fix. The compiler is pure and offline so that one
+        # document compiles to one plan hash on every host; a default read from
+        # the filesystem would make the same text produce different plans in
+        # different checkouts, and the plan hash is what approval binds to.
+        #
+        # A blocker refuses a run rather than refusing a compile: the document
+        # still compiles and can be read, it just cannot start until it says
+        # which repository it means. The cost of the line is one line, and the
+        # cost of guessing wrong is a frontier dispatch against the wrong tree.
+        blockers.append(
+            "the document declares no target project, so it cannot be started. "
+            "Add a 'Target project: <id>' line naming the repository this document "
+            f"means. Without it this would run against {target_project_id!r}, the "
+            "project-center default."
+        )
     if target_blocker is not None:
         blockers.append(target_blocker)
     if target_notice is not None:

@@ -1855,8 +1855,12 @@ export interface components {
         WorkUnitSummary: {
             /** Compiled Plan Hash */
             compiled_plan_hash: string;
+            /** Compiled Plan Revision Id */
+            compiled_plan_revision_id: string;
             /** Current Phase */
             current_phase: string;
+            /** Design Doc Revision Id */
+            design_doc_revision_id: string;
             /** Root Workflow Id */
             root_workflow_id: string;
             status: components["schemas"]["WorkUnitStatus"];

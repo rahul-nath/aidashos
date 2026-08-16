@@ -3712,8 +3712,16 @@
             "title": "Compiled Plan Hash",
             "type": "string"
           },
+          "compiled_plan_revision_id": {
+            "title": "Compiled Plan Revision Id",
+            "type": "string"
+          },
           "current_phase": {
             "title": "Current Phase",
+            "type": "string"
+          },
+          "design_doc_revision_id": {
+            "title": "Design Doc Revision Id",
             "type": "string"
           },
           "root_workflow_id": {
@@ -3738,7 +3746,9 @@
           "status",
           "current_phase",
           "root_workflow_id",
-          "compiled_plan_hash"
+          "compiled_plan_hash",
+          "design_doc_revision_id",
+          "compiled_plan_revision_id"
         ],
         "title": "WorkUnitSummary",
         "type": "object"

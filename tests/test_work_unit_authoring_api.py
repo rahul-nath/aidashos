@@ -185,3 +185,46 @@ def test_cli_decision_surface_launches_dbos_before_recording(
 
     assert result["ok"] is True
     assert calls == ["launch", "record"]
+
+
+def test_the_work_unit_list_serialises_a_real_row_through_its_response_model(
+    authoring_client: TestClient,
+) -> None:
+    """GET /work-units must render a WorkUnit the ledger actually holds.
+
+    This is a regression test with a specific cause. `list_work_units` grew two
+    provenance fields and `WorkUnitSummary` sets ``extra="forbid"``, so the route
+    began raising two validation errors for every row. Nothing caught it: the
+    contract test compares schemas rather than payloads, and no test had ever
+    asked this endpoint to serialise a row, so the suite stayed green while the
+    cockpit rendered a pydantic traceback where its WorkUnit list should be.
+
+    Asserting on the provenance fields specifically, because a bare 200 with an
+    empty list would pass while the bug was still there.
+    """
+
+    compiled = authoring_client.post(
+        "/authoring/design-docs/compile",
+        json={"design_doc_id": "list-serialisation", "raw_content": ACCEPTANCE_DESIGN_DOC},
+    )
+    assert compiled.status_code == 200, compiled.text
+    plan = compiled.json()
+
+    started = authoring_client.post(
+        "/work-units",
+        json={
+            "compiled_plan_revision_id": plan["compiled_plan_revision_id"],
+            "approved_plan_hash": plan["plan_hash"],
+            "title": "Listed run",
+        },
+    )
+    assert started.status_code == 200, started.text
+
+    listed = authoring_client.get("/work-units")
+    assert listed.status_code == 200, listed.text
+    rows = listed.json()["work_units"]
+    assert rows, "a started WorkUnit must appear in the list"
+
+    row = next(item for item in rows if item["title"] == "Listed run")
+    assert row["compiled_plan_revision_id"] == plan["compiled_plan_revision_id"]
+    assert row["design_doc_revision_id"] == plan["design_doc_revision_id"]

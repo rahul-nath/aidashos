@@ -17,7 +17,25 @@ authors = [
 ]
 requires-python = ">=3.13"
 dependencies = [
-    "dbos>=2.19.0",
+    # Pinned exactly, and it is the only exact pin here on purpose.
+    #
+    # This project installs itself two ways that resolve differently. `uv sync`
+    # and `uv run` read `uv.lock`; `scripts/install_pi_shell.sh` runs
+    # `uv tool install -e .`, which ignores the lock and resolves this line
+    # against PyPI. With a `>=` bound those two paths drift the moment DBOS
+    # publishes a release, and they did: the lock held 2.19.0 while the tool
+    # venv floated to 2.29.0, so `agent-ledger` and the resident loops ran
+    # different DBOS versions against one system database.
+    #
+    # That database is shared mutable state. DBOS migrates its own schema on
+    # launch, 2.29.0 ships 47 migrations against 2.19.0's 19, and the newer
+    # process silently migrated the schema 28 steps past what the drainer and
+    # the dispatcher were written for. Nothing failed loudly, which is the
+    # problem: the processes that recover pending workflows were the stale ones.
+    #
+    # An exact pin is what makes both resolution paths land on one version.
+    # Bump it deliberately, run the suite, and reinstall the tool venv.
+    "dbos==2.29.0",
     "fastapi[standard]>=0.136.1",
     "httpx>=0.28.1",
     "mcp[cli]>=1.27.0",

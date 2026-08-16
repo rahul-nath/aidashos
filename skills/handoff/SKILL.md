@@ -21,6 +21,21 @@ Use this skill to leave a durable packet that lets the next agent resume without
 4. Persist it to the coordination ledger as canonical durable truth. Also write a readable mirror under `docs/handoffs/` when the packet is more than a short note or the user asked for a file.
 5. In the final response, give the ledger scope/id or file path and call out any unverified or blocked items.
 
+## Additional Ritual For A Long Session (operator instruction, 2026-08-16)
+
+When the operator asks for a handoff at the end of a long chat, the packet above is the minimum and these are also required. Re-read the whole conversation before writing; a handoff assembled from memory of a long session will be wrong in the specific ways that matter.
+
+1. **Lead with the command reference.** Operator commands get buried under diagnosis in a long chat. Restate the working `agent-ledger` and `scripts/` commands the next agent needs, including the ones whose output is misleading and what the misleading part means.
+2. **What this chat did**, as verified outcomes rather than a narrative of attempts.
+3. **Mistakes made, named plainly, with the rule that prevents each.** This section is not optional and not softened. A handoff that hides a mistake spends the next agent's time rediscovering it.
+4. **Guards to harden.** For each mistake, say what would have caught it and whether that guard now exists. Note any check that was green while the thing it guards was broken, because that is a defective guard rather than a passing one.
+5. **An ordered TODO**, most valuable first, each item actionable without rereading the chat.
+6. **Design documents ready to run**, with milestone counts and compile status, and which are reserved or already running.
+7. **Suggestions made but never spec'd**, so ideas raised in conversation are not lost when the context is.
+8. **Update `README.md`** so newly created, completed, or restructured design documents sit in their proper section, then run `make design-status-check`.
+
+Answer any operator question about publishing or syncing in the packet itself, with the distinction between "safe to sync" and "safe to make public" kept explicit.
+
 ## Required Packet
 
 Use these sections in this order:

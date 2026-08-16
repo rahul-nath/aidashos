@@ -37,7 +37,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _README_PATH = _REPO_ROOT / "README.md"
@@ -86,12 +86,82 @@ class LedgerUnavailable(RuntimeError):
     """
 
 
+# Executable specifications exempt from the compile invariant because they
+# predate it. This list may only shrink, and the check also fails when an exempt
+# document starts compiling, so an exemption cannot outlive its problem.
+#
+# All four remaining are malformed rather than unwritten: m7 has an "Execution Milestones"
+# heading the parser finds nothing under, and the other three carry a numbered
+# `## Milestones` list with no PLAN and no VERIFY milestone.
+_COMPILE_EXEMPT: Final = frozenset(
+    {
+        "m7_conversion_grade_template_gawd",
+        "privileged_capability_broker_design",
+        "tamper_evident_ledger_design",
+        "whiteboard_intent_design",
+    }
+)
+
+
 def _design_doc_files() -> list[Path]:
+    """Executable specifications: the documents that must compile.
+
+    `docs/designs/` is excluded deliberately. That directory holds prose design
+    notes, and asking them to declare milestones would be asking a document to
+    be something it never intended to be.
+    """
+
     return sorted(
         path
         for path in _DOCS_DIR.glob("*.md")
         if path.name not in _NOT_DESIGN_DOCS and not path.name.startswith("README")
     )
+
+
+def _design_note_files() -> list[Path]:
+    notes = _DOCS_DIR / "designs"
+    if not notes.is_dir():
+        return []
+    return sorted(path for path in notes.glob("*.md") if not path.name.startswith("README"))
+
+
+def _compile_problems() -> list[str]:
+    """Executable specifications in docs/ that do not compile.
+
+    Parsed and compiled in-process rather than through the service, so this
+    needs no database. Compilability is a property of the text and the compiler,
+    and making the check require Postgres would mean it ran rarely.
+    """
+
+    from local_first_agent_os.work_units.compiler import compile_design_doc
+    from local_first_agent_os.work_units.design_doc import parse_design_doc
+
+    problems: list[str] = []
+    for path in _design_doc_files():
+        stem = path.stem
+        parsed = parse_design_doc(
+            path.read_text(encoding="utf-8"),
+            design_doc_id=stem,
+            source_path=str(path),
+        )
+        outcome = compile_design_doc(parsed, design_doc_revision_id="design-status-check")
+        valid = getattr(outcome, "validation_status", None) == "VALID"
+        if valid and stem in _COMPILE_EXEMPT:
+            problems.append(f"{stem} now compiles; remove it from _COMPILE_EXEMPT in this script")
+        elif not valid and stem not in _COMPILE_EXEMPT:
+            reasons = sorted(
+                {
+                    str(item.code)
+                    for item in getattr(outcome, "diagnostics", ())
+                    if getattr(item.severity, "name", "") == "ERROR"
+                }
+            )
+            detail = ", ".join(reasons) or "no milestones the compiler recognises"
+            problems.append(
+                f"docs/{path.name} is an executable spec that does not compile ({detail}); "
+                "fix it, or move it to docs/designs/ if it is a design note"
+            )
+    return problems
 
 
 def _completed_doc_files() -> list[Path]:
@@ -190,11 +260,15 @@ def _roster_problems() -> list[str]:
     problems: list[str] = []
 
     on_disk = {path.stem for path in _design_doc_files()}
+    notes = {path.stem for path in _design_note_files()}
     completed = {path.stem for path in _completed_doc_files()}
 
     for stem in sorted(on_disk):
         if not _names_document(text, stem):
             problems.append(f"docs/{stem}.md exists and README.md never names it")
+    for stem in sorted(notes):
+        if not _names_document(text, stem):
+            problems.append(f"docs/designs/{stem}.md exists and README.md never names it")
     for stem in sorted(completed):
         if not _names_document(text, stem):
             problems.append(f"docs/completed/{stem}.md exists and README.md never names it")
@@ -221,7 +295,7 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    problems = _roster_problems()
+    problems = _roster_problems() + _compile_problems()
 
     try:
         rows = _ledger_rows()

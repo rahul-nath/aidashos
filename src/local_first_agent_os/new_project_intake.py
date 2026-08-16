@@ -1257,9 +1257,19 @@ def render_gawd_review_markdown(draft: SparseGawdDraft, envelope: PermissionEnve
 def _sparse_gawd_template(draft_id: str, created_at: datetime) -> str:
     return f"""# THE GAWD DOC - Mini
 
+Target project: _REGISTERED PROJECT ID_
+
 **Draft ID:** {draft_id}
 **Project:** _PROJECT NAME_ | **Version:** v4-mini | **Status:** SPARSE_DRAFT
 **Date:** {created_at.date().isoformat()}
+
+<!-- Replace _REGISTERED_PROJECT_ID_ above with a project id from the registry,
+     which `local-agent projects` lists. It is the only line here the compiler
+     refuses to guess: a draft without it used to compile against the
+     project-center default and dispatch a frontier agent at the wrong
+     repository, so it is now an execution blocker. The `**Project:**` banner
+     below it is a human title and is not read as an id. -->
+
 
 **Priority order:** correctness > stability > debuggability > throughput > latency
 
