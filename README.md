@@ -92,7 +92,7 @@ pi /ledger                                              # inspect sagas, tasks, 
 ```
 
 `pi /dispatch` claims at most one pending dispatch intent, the oldest, with `LIMIT 1 FOR UPDATE SKIP LOCKED` so several dispatchers cannot double-run one piece of work.
-`/dispatch-once` still works as a legacy alias.
+`/start /dispatcher --max-polls N` is the form that takes a poll count.
 For that one milestone it builds the typed task graph, collects a local-model context turn, runs the senior agent in an isolated worktree, runs verification, checkpoints the exact branch, base, and commit, and starts staff review.
 A staff BLOCK triggers a bounded revision and re-review loop.
 Staff approval stops at a pending `CODE_MERGE` request.
@@ -120,6 +120,9 @@ Claude Code picks up the repo's `.mcp.json` with no setup; [skills/operate-agent
 A dispatched agent inside the system gets a different, read-only surface: three tools and no way to file evidence about its own run.
 
 A React cockpit at `http://127.0.0.1:8000` shows work units, milestones, events, artifacts, and pending approvals.
+
+![alt text](image.png)
+![alt text](image-1.png)
 
 It writes exactly one thing: an approval decision.
 `web/src/workunits/WorkUnitCockpit.tsx` renders Approve and Deny buttons that POST to `/work-units/{work_unit_id}/decisions`, and the result is recorded as a ledger approval like any other, attributed to `cockpit`.
