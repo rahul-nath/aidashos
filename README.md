@@ -109,24 +109,6 @@ A tier names a seat rather than a model: `configs/staffing.toml` decides which h
 As staffed today that is Codex implementing and Claude Code reviewing; `configs/staffing.toml` is the one place that says so, and swapping it is a one-line edit.
 The two seats are never the same vendor, so the reviewer does not share the implementer's blind spots.
 
-## Does it run remotely? Is it containerized?
-
-It runs on your machine, on purpose.
-
-Postgres and the optional observability stack run in Docker.
-The local model server and the frontier CLIs run as host processes, because the model wants your GPU and the CLIs want your logged-in subscriptions.
-A compose profile (`app`) and the Kind manifests under `k8s/` can run the application itself in a container, but the supported everyday mode is the host.
-
-The only network dependency is the frontier tiers calling their vendors' models through their own CLIs, under your accounts.
-The junior tier and the entire control plane run with the network unplugged.
-
-The system is instrumented, and all of it points at your own machine.
-The API serves Prometheus metrics at `/metrics`, and `observability/` brings up Loki, Tempo, Prometheus, Pyroscope, and Grafana as local compose services.
-OpenTelemetry traces (`LOCAL_AGENT_OTEL_TRACES_ENABLED`) and continuous profiling (`LOCAL_AGENT_PYROSCOPE_ENABLED`) are both off by default on the host, and both default to a `127.0.0.1` endpoint when you turn them on.
-The containerized `app` compose profile turns both on and points them at the Alloy and Pyroscope services inside the same stack.
-Nothing is collected by the author or by any vendor.
-If you want traces on a remote collector, `LOCAL_AGENT_OTEL_TRACES_ENDPOINT` and `LOCAL_AGENT_OTEL_TRACES_HEADERS` are how you send them there, and that is your decision to make rather than a default to discover.
-
 ## Is there a UI, or is it terminal only?
 
 Three ways in, and the terminal is primary.
@@ -166,6 +148,24 @@ The coordination ledger's connection pool is Postgres-only (`coordination/store.
 The SQLAlchemy layer is the softer half: `db.py` still builds a SQLite engine if `LOCAL_AGENT_DATABASE_URL` names one, and the vector columns degrade from `halfvec` to plain JSON when it does.
 That path exists for the test suite.
 Nothing shipped is pointed at it, and no config, compose file, or `.env.example` line names a SQLite URL.
+
+## Does it run remotely? Is it containerized?
+
+It runs on your machine, on purpose.
+
+Postgres and the optional observability stack run in Docker.
+The local model server and the frontier CLIs run as host processes, because the model wants your GPU and the CLIs want your logged-in subscriptions.
+A compose profile (`app`) and the Kind manifests under `k8s/` can run the application itself in a container, but the supported everyday mode is the host.
+
+The only network dependency is the frontier tiers calling their vendors' models through their own CLIs, under your accounts.
+The junior tier and the entire control plane run with the network unplugged.
+
+The system is instrumented, and all of it points at your own machine.
+The API serves Prometheus metrics at `/metrics`, and `observability/` brings up Loki, Tempo, Prometheus, Pyroscope, and Grafana as local compose services.
+OpenTelemetry traces (`LOCAL_AGENT_OTEL_TRACES_ENABLED`) and continuous profiling (`LOCAL_AGENT_PYROSCOPE_ENABLED`) are both off by default on the host, and both default to a `127.0.0.1` endpoint when you turn them on.
+The containerized `app` compose profile turns both on and points them at the Alloy and Pyroscope services inside the same stack.
+Nothing is collected by the author or by any vendor.
+If you want traces on a remote collector, `LOCAL_AGENT_OTEL_TRACES_ENDPOINT` and `LOCAL_AGENT_OTEL_TRACES_HEADERS` are how you send them there, and that is your decision to make rather than a default to discover.
 
 ## Quick start
 
