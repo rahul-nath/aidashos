@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS sagas (
   current_stage  text NOT NULL DEFAULT 'IDEA_INTAKE',
   status         text NOT NULL DEFAULT 'PLANNING',
   budget_tokens  bigint NOT NULL DEFAULT 1000000,
+  consumed_tokens bigint NOT NULL DEFAULT 0,
   budget_seconds int    NOT NULL DEFAULT 86400,
   tokens_used    bigint NOT NULL DEFAULT 0,
   created_at     timestamptz NOT NULL DEFAULT now(),
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS pow_wows (
   input_artifacts_json  jsonb NOT NULL DEFAULT '[]',
   allowed_tools_json    jsonb NOT NULL DEFAULT '[]',
   budget_tokens         bigint NOT NULL DEFAULT 100000,
+  consumed_tokens       bigint NOT NULL DEFAULT 0,
   exit_criteria         text NOT NULL DEFAULT '',
   required_outputs_json jsonb NOT NULL DEFAULT '[]',
   status                text NOT NULL DEFAULT 'FORMING',  -- FORMING | ACTIVE | EVALUATING | COMPLETED | FAILED

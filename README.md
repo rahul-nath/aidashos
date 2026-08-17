@@ -14,7 +14,8 @@ git clone https://github.com/rahul-nath/aidashos.git && cd aidashos && make
 
 `make` is the base install: uv, Python 3.13, Node, Docker, Postgres, and the schemas.
 `./scripts/boot/boot.sh` is the boot sequence: llama.cpp, the model weights, both subscription sign-ins, the default stack config, and a final readiness check that prints the fixing command for anything missing.
-Windows runs `.\scripts\boot\boot.ps1` for the model stack and the runtime under WSL2.
+macOS is the supported platform; Linux is expected to work and is not exercised on a schedule.
+Windows is not supported yet.
 
 The whole path, start to finish, is [docs/onboarding/ONBOARDING.md](docs/onboarding/ONBOARDING.md), drawn as a DAG in [docs/diagrams/aidashos-onboarding-dag.png](docs/diagrams/aidashos-onboarding-dag.png).
 Stuck at any point, `./scripts/first-run-check.sh` says what is missing and prints the command that fixes it.
@@ -172,7 +173,7 @@ If you want traces on a remote collector, `LOCAL_AGENT_OTEL_TRACES_ENDPOINT` and
 
 ## Quick start
 
-Requirements are macOS or Linux (Windows via WSL2), Git, Python 3.13, Node 22.19+, Docker, and a local model you can serve.
+Requirements are macOS or Linux, Git, Python 3.13, Node 22.19+, Docker, and a local model you can serve.
 The two commands at the top of this file are the whole install; the steps below are what they run, for when you would rather drive each one yourself.
 
 ```bash

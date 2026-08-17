@@ -164,7 +164,20 @@ def normalize_paths(paths: Iterable[str]) -> list[str]:
 # the driver that writes them, which is milestone 3, and a table shaped before
 # its writer exists is the unconsulted-mechanism defect this design was written
 # to avoid.
-SCHEMA_VERSION = 18
+#
+# 19: monotonic `consumed_tokens` counters on sagas and pow-wows. These are the
+# authoritative budget-accounting counters; the legacy `tokens_used` field is
+# not. A budget is a limit, not mutable usage state, so extending it cannot
+# erase spend history. The aggregate deliberately combines measured and
+# estimated usage; source and estimation provenance remain ledger-event detail.
+#
+# The columns reached the shared ledger ahead of this constant, from a dispatched
+# agent's worktree, and every checkout on disk then refused to connect because
+# `_assert_supported_schema_version` saw database=19 against runtime=18. Only the
+# DDL and this number are taken here. The feature that reads these columns is
+# still on `agent/4ce002fa-...-dispatch_58b7b6b9_code-3e607727` and merges when
+# its staff review passes, not as part of restoring the runtime.
+SCHEMA_VERSION = 19
 
 # The DDL that `SCHEMA_VERSION` names, pinned by content.
 #
@@ -185,7 +198,7 @@ SCHEMA_VERSION = 18
 # - The edit changed only comments or whitespace. Update this hash alone.
 #
 # Recomputed with `shasum -a 256 agent_coordination_postgres_schema.sql`.
-SCHEMA_CONTENT_HASH = "b235efbb1386e89da7b75a0e012bde296faf25898584074dce6f31880b19ccc0"
+SCHEMA_CONTENT_HASH = "a61f1d46e516d1194d7db9ec649fa5281a5a2cf432c9d1391a31274d6cb54811"
 
 POSTGRES_SCHEMA_COMPONENT = "agent_coordination"
 # Stable, signed 64-bit key reserved for this component's schema migration.

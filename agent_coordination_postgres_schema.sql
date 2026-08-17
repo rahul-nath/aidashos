@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS sagas (
     current_stage TEXT NOT NULL DEFAULT 'IDEA_INTAKE',
     status TEXT NOT NULL DEFAULT 'PLANNING',
     budget_tokens BIGINT NOT NULL DEFAULT 1000000,
+    consumed_tokens BIGINT NOT NULL DEFAULT 0,
     budget_seconds INTEGER NOT NULL DEFAULT 86400,
     tokens_used BIGINT NOT NULL DEFAULT 0,
     created_at DOUBLE PRECISION NOT NULL,
@@ -81,6 +82,7 @@ CREATE TABLE IF NOT EXISTS sagas (
     completed_at DOUBLE PRECISION
 );
 CREATE INDEX IF NOT EXISTS idx_sagas_status ON sagas(status);
+ALTER TABLE sagas ADD COLUMN IF NOT EXISTS consumed_tokens BIGINT NOT NULL DEFAULT 0;
 
 -- Intake dedupe. A repeated ingest of one draft must replay onto the existing
 -- saga rather than create a second one; the unique index is what makes the
@@ -136,6 +138,7 @@ CREATE TABLE IF NOT EXISTS pow_wows (
     input_artifacts_json TEXT NOT NULL DEFAULT '[]',
     allowed_tools_json TEXT NOT NULL DEFAULT '[]',
     budget_tokens BIGINT NOT NULL DEFAULT 100000,
+    consumed_tokens BIGINT NOT NULL DEFAULT 0,
     exit_criteria TEXT NOT NULL DEFAULT '',
     required_outputs_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'FORMING',
@@ -147,6 +150,7 @@ CREATE TABLE IF NOT EXISTS pow_wows (
 );
 CREATE INDEX IF NOT EXISTS idx_pow_wows_saga ON pow_wows(saga_id);
 CREATE INDEX IF NOT EXISTS idx_pow_wows_status ON pow_wows(status);
+ALTER TABLE pow_wows ADD COLUMN IF NOT EXISTS consumed_tokens BIGINT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS pow_wow_agents (
     id BIGSERIAL PRIMARY KEY,

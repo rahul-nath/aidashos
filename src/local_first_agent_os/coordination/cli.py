@@ -18,7 +18,7 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -29,6 +29,11 @@ from local_first_agent_os.constants import (
 
 from ..refinery.loop import run_refinery
 from ..work_units import commands as work_unit_commands
+from ..work_units.next_commands import (
+    NextCommandSet,
+    NextCommandStatus,
+    next_commands_for,
+)
 from .approvals import (
     list_approval_requests,
     resolve_approval_request,
@@ -138,6 +143,107 @@ from .store import (
 
 def print_json(x: Any) -> None:
     print(json.dumps(x, indent=2, sort_keys=True))
+
+
+# The width of the rule above the suggestions. Narrow enough to survive an
+# 80-column terminal, which is what a laptop running the watch loop beside a
+# cockpit actually has.
+_NEXT_COMMAND_RULE_WIDTH: Final = 72
+
+
+def render_next_commands(result: NextCommandSet) -> str:
+    """The suggestions as an operator reads them: what works, then what does not.
+
+    Grouped by status rather than listed flat, because the grouping *is* the
+    message. A flat list asks the operator to read every precondition to find the
+    runnable command; these headings answer that before they read a single line.
+
+    The refused group is not noise. It exists because the recovery verbs read
+    alike, and an operator who does not see `adopt_settled_work_unit_dispatch`
+    ruled out here will reach for it themselves and spend a command learning what
+    this already knows.
+
+    **The whole block is valid shell.** Every explanatory line is a `#` comment,
+    and a command that is not READY is itself commented out. Indentation alone
+    used to carry that distinction, and it does not survive a long command
+    wrapping in an 80-column terminal: the first reader of this output asked
+    whether a command and the `but` line under it were one command. Now the
+    question cannot arise, and pasting a whole group runs only what was runnable
+    - a refused verb pasted by accident is a comment rather than a failed call.
+    """
+
+    lines = [
+        "",
+        "# ── next commands " + "─" * (_NEXT_COMMAND_RULE_WIDTH - 18),
+        f"# {result.headline}",
+    ]
+    if result.detail:
+        lines.append(f"#   {result.detail}")
+
+    groups = (
+        (NextCommandStatus.READY, "ready - runnable exactly as printed"),
+        (NextCommandStatus.REFUSED, "refused in this state - commented out"),
+        (NextCommandStatus.UNPROVED, "needs a fact you supply - commented out"),
+    )
+    for status, heading in groups:
+        members = [item for item in result.commands if item.status is status]
+        if not members:
+            continue
+        lines.append("")
+        lines.append(f"# {heading}")
+        for item in members:
+            lines.append("")
+            lines.append(f"  # {item.intent}")
+            if item.precondition and status is not NextCommandStatus.READY:
+                lines.append(f"  #   needs  {item.precondition}")
+            if item.reason:
+                code = f"  ->  {item.refusal_code}" if item.refusal_code else ""
+                lines.append(f"  #   but    {item.reason}{code}")
+            # The command last, directly above the next blank line, so the thing
+            # to copy is the final line of its block rather than buried above
+            # three lines of prose.
+            prefix = "  " if status is NextCommandStatus.READY else "  # "
+            lines.append(f"{prefix}{item.command}")
+    return "\n".join(lines)
+
+
+def print_next_commands(cmd: str, payload: Mapping[str, Any]) -> None:
+    """Print the follow-up commands to stderr, or nothing when there are none.
+
+    Stderr rather than stdout, and deliberately so. Every documented way of
+    watching this system pipes stdout into a JSON parser - the handoff's own
+    watch loop is `get_work_unit ... | python3 -c 'json.load(sys.stdin)'` - and
+    text on stdout would break all of them. Stderr puts the commands on the
+    operator's terminal, beside the JSON, while leaving the document they piped
+    exactly as it was.
+
+    It is also why this lives in `main` rather than in the payload. The
+    in-process transport serves resident loops and dispatched agents, which do
+    not copy and paste and do pay for every token; a field in the envelope would
+    charge them for an affordance only a human at a terminal can use.
+
+    A failure here must never take down the command that succeeded. The result is
+    already on stdout and already correct; a defect in a convenience is not
+    grounds for a non-zero exit, and the traceback goes to stderr where an
+    operator will see it.
+    """
+
+    try:
+        result = next_commands_for(cmd, payload)
+        if result is None:
+            return
+        # The JSON is already written but not necessarily flushed, and stdout is
+        # block-buffered whenever it is not a terminal. Without this the two
+        # streams interleave backwards under `2>&1` - suggestions first, then the
+        # result they are about - which is exactly how an operator redirecting to
+        # a log file would read them.
+        sys.stdout.flush()
+        print(render_next_commands(result), file=sys.stderr)
+    except Exception as failure:  # pragma: no cover - defensive
+        print(
+            f"(next commands unavailable: {type(failure).__name__}: {failure})",
+            file=sys.stderr,
+        )
 
 
 # What a dispatched agent may ask the ledger, and nothing else.
@@ -426,6 +532,21 @@ def build_parser() -> argparse.ArgumentParser:
         description="Durable repo-local MCP coordination server (file + work-unit layers)."
     )
     p.add_argument("--root", default=None, help="repo root; otherwise auto-detect .git or cwd")
+    p.add_argument(
+        "--no-next-commands",
+        action="store_true",
+        # Defaulted from the environment because, like every option on this
+        # parser, the flag only parses before the subcommand. An operator who
+        # wants the suggestions off for good should not have to remember argparse
+        # ordering on every invocation. Read at parse time rather than captured,
+        # for the reason the docstring above gives about `--session`.
+        default=os.environ.get("LOCAL_AGENT_NO_NEXT_COMMANDS", "").strip().lower()
+        in {"1", "true", "yes"},
+        help=(
+            "suppress the follow-up commands printed to stderr after a result; "
+            "LOCAL_AGENT_NO_NEXT_COMMANDS=1 does the same for a whole shell"
+        ),
+    )
     sub = p.add_subparsers(dest="cmd", required=True)
 
     sess = argparse.ArgumentParser(add_help=False)
@@ -1462,6 +1583,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_json({"ok": False, "error": type(e).__name__, "message": str(e)})
         return _exit_code_through_dbos_shutdown(1)
     print_json(out)
+    if not args.no_next_commands:
+        print_next_commands(args.cmd, out)
     return _exit_code_through_dbos_shutdown(0 if out.get("ok", False) else 2)
 
 

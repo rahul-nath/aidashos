@@ -147,6 +147,28 @@ agent-ledger compile_design_doc docs/examples/work_unit_acceptance_design_doc.md
 
 Returns the DesignDoc revision, the compiled plan revision, the plan hash, the diagnostics, and any execution blockers.
 
+It also prints the command that consumes them, on stderr, below the JSON:
+
+```
+── next commands ────────────────────────────────────────────────────────
+VALID  the plan is runnable
+
+  ready
+    agent-ledger start_work_unit cpr_a0ce58277a14a9a9a4df3802 --approved-plan-hash 6f1e...
+        start this exact plan; the hash is what approval binds to. Add --title "..." to name the run yourself
+```
+
+Every command that prints a WorkUnit or a plan does this.
+The ids are already substituted, so driving the system does not require copying a `cpr_` or a `plan_hash` between two commands by hand.
+
+Stdout is unchanged and still parses as one JSON document, which is what keeps `agent-ledger get_work_unit <id> | python3 ...` working.
+The suggestions go to stderr because they are for a person at a terminal, and the in-process transport that serves resident loops and dispatched agents never produces them at all.
+`--no-next-commands` turns them off for one command, and it has to come before the subcommand like every other option on this parser; `LOCAL_AGENT_NO_NEXT_COMMANDS=1` turns them off for a whole shell with no ordering rule to remember.
+
+A suggestion is only ever printed under `ready` when it runs exactly as printed.
+Commands whose preconditions provably fail are printed under `refused in this state` with the code the verb would raise, and commands needing a fact the ledger does not hold - a commit sha, an acceptance rationale - under `needs a fact you supply`.
+Section 6 shows why that distinction earns its screen space.
+
 ```bash
 agent-ledger start_work_unit cpr_a0ce58277a14a9a9a4df3802
 ```
@@ -237,12 +259,56 @@ The cockpit shows the pending request; so does the CLI.
 agent-ledger get_work_unit cddf8ddb3cf998ff2ac5937f40dc7111
 ```
 
+`get_work_unit` prints the answer to that request as a runnable command, one per verdict the request kind accepts:
+
+```
+  ready
+    agent-ledger submit_work_unit_decision cddf8ddb3cf998ff2ac5937f40dc7111 wud_3a748a11bf8fe4db92ff4d77 APPROVED decision-wud_3a748a11bf8fe4db92ff4d77-approved
+        approved: merge the reviewed commit?
+    agent-ledger submit_work_unit_decision cddf8ddb3cf998ff2ac5937f40dc7111 wud_3a748a11bf8fe4db92ff4d77 DENIED decision-wud_3a748a11bf8fe4db92ff4d77-denied
+        denied: merge the reviewed commit?
+```
+
+The last argument is the idempotency key, and it is derived rather than typed for a reason.
+There is a partial unique index on `work_unit_decision_requests.response_idempotency_key`, so a habitual string like `idem-1` collides on its second use anywhere in the system.
+Deriving it from the request id makes it unique by construction, and including the verdict keeps `APPROVED` and `DENIED` on one request from colliding with each other.
+Duplicate-submission protection does not use this string at all: `events.py` derives its own key from the workflow, phase, milestone, attempt, and transition.
+
+Only the verdicts a request kind actually accepts are offered.
+An `APPROVAL` takes `APPROVED` or `DENIED`, a `CLARIFICATION` takes `ANSWERED`, and `events.decision_outcome` is the authority that says so.
+
 ```bash
-agent-ledger submit_work_unit_decision cddf8ddb3cf998ff2ac5937f40dc7111 wud_3a748a11bf8fe4db92ff4d77 APPROVED idem-1 --decided-by rahul
+agent-ledger submit_work_unit_decision cddf8ddb3cf998ff2ac5937f40dc7111 wud_3a748a11bf8fe4db92ff4d77 APPROVED decision-wud_3a748a11bf8fe4db92ff4d77-approved --decided-by rahul
 ```
 
 The decision must name the request.
 A decision for an unknown request, for another WorkUnit's request, or with an unrecognized value is rejected, and a second delivery of the same decision returns `applied: false` without writing a second event.
+
+### When a milestone blocks instead
+
+A blocked milestone has more than one plausible recovery, and they read alike.
+The suggestions rule out the ones that cannot work here, so the operator does not spend a command learning it:
+
+```
+BLOCKED  a correctable failure parked this work for you
+   a milestone stopped without finishing and needs recovery: milestone 1 "The outcome and the probe" · dispatch_wait_elapsed
+
+  ready
+    agent-ledger resume_work_unit 67122ee7d6a58521766062637ceafe0f
+        re-drive the parked work; this spends another attempt from its budget
+
+  refused in this state
+    agent-ledger adopt_settled_work_unit_dispatch 67122ee7d6a58521766062637ceafe0f 1
+        needs  the milestone's own dispatch intent settled DONE
+        but    intent 9f75e62a is FAILED, not DONE  →  settled_adoption_dispatch_not_done
+    agent-ledger recover_unparsed_staff_review 9f75e62a
+        needs  a review_result artifact whose verdict is UNCLASSIFIED
+        but    milestone 1 produced dispatch_failure_evidence; there is no staff review to reparse  →  staff_review_missing
+```
+
+Both refusals are decided from the view that was just printed, so neither costs a query.
+`dispatch_wait_elapsed` reads exactly like the condition `adopt_settled_work_unit_dispatch` exists for, and it is not: that verb wants a dispatch that finished late, not one that failed.
+A review that never ran has nothing to reparse, which used to mean checking `list_work_unit_artifacts` by hand.
 
 ```bash
 agent-ledger resume_work_unit cddf8ddb3cf998ff2ac5937f40dc7111

@@ -47,6 +47,10 @@ uv run agent-ledger compile_design_doc <path>   # compile a doc by path
 
 The ledger MCP tools mirror `agent-ledger`'s subcommands one for one; prefer the tools for reads and structured writes, and the pi commands for the governed workflows.
 
+One difference worth knowing: run from a shell, the commands that print a WorkUnit or a plan also print the follow-up commands to stderr, with every id substituted and the unusable ones marked with the code they would fail on.
+The MCP tools return the payload only.
+When you are telling a human what to run next, either run the shell command and quote what it printed, or compose the argv from the payload yourself; do not tell them a verb is available without checking its preconditions against the same payload.
+
 ## Boundaries that are not yours to cross
 
 - Approval gates (`CODE_MERGE`, `PURCHASE`, `EXTERNAL_COMMS`, `MODEL_ESCALATION`) are resolved by the human operator.

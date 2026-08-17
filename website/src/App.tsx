@@ -81,7 +81,7 @@ const FAQS = [
   },
   {
     q: "What do I need to run it?",
-    a: "macOS or Linux (Windows via WSL2), Git, Python 3.13 via uv, Node, Docker, and one local model you can serve. Budget tens of GB of disk for the model weights; the boot check measures the exact figure from the pinned files. One local model with every tier staffed locally also works; the frontier seats are your own subscriptions.",
+    a: "macOS or Linux, Git, Python 3.13 via uv, Node, Docker, and one local model you can serve. Budget tens of GB of disk for the model weights; the boot check measures the exact figure from the pinned files. One local model with every tier staffed locally also works; the frontier seats are your own subscriptions.",
   },
   {
     q: "Is there telemetry?",

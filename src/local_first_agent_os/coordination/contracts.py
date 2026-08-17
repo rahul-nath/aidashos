@@ -159,6 +159,7 @@ class CoordinationFlag(StrEnum):
     MAX_TOKENS = "--max-tokens"
     MILESTONE_ID = "--milestone-id"
     MODEL_ROLE = "--model-role"
+    NO_NEXT_COMMANDS = "--no-next-commands"
     NO_SUBMIT_RESULT = "--no-submit-result"
     PARENT_INTENT_ID = "--parent-intent-id"
     PAYLOAD = "--payload"

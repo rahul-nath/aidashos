@@ -12,11 +12,8 @@ The full picture is drawn in [docs/diagrams/aidashos-onboarding-dag.png](../../d
 ./scripts/boot/boot.sh
 ```
 
-Windows (native PowerShell):
-
-```powershell
-.\scripts\boot\boot.ps1
-```
+macOS is the supported platform; Linux is expected to work and is not exercised on a schedule.
+Windows is not supported, and `potential-directions/README.md` says why.
 
 Or paste [docs/onboarding/BOOT_PROMPT.md](../../docs/onboarding/BOOT_PROMPT.md) into any local AI agent and let it drive the same stages.
 
@@ -38,18 +35,10 @@ The number prefix is the execution order.
 | `60-verify-boot` | Runs `scripts/first-run-check.sh`; non-zero exit when the machine is not ready. |
 
 Model sources and file names are pinned once, in [scripts/download-models.sh](../download-models.sh).
-The PowerShell mirror of that table lives in `_boot_lib.ps1` and must stay in step with it.
 
 ## Flags
 
 `boot.sh` accepts `--with-glimmer`, `--skip-models`, `--skip-logins`, and `--force-models`.
-`boot.ps1` accepts the same as `-WithGlimmer`, `-SkipModels`, `-SkipLogins`, and `-ForceModels`.
-
-## Windows
-
-Native Windows runs the model stack and the sign-ins: llama.cpp (winget `ggml.llamacpp`), the GGUF downloads, Claude Code, and Codex.
-The orchestration runtime itself targets macOS and Linux, so run it inside WSL2 and either point `LOCAL_AGENT_LLAMA_MODELS_DIR` at the native model directory or refetch inside WSL.
-`60-verify-boot.ps1` prints the exact steps.
 
 ## After boot
 

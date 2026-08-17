@@ -63,11 +63,14 @@ uv run pi /ledger
 
 Or from your own AI tool over MCP: Claude Code picks up the repo's `.mcp.json` automatically, and [skills/operate-agent-os/SKILL.md](../../skills/operate-agent-os/SKILL.md) carries the Codex config block plus the operating ritual for any agent.
 
-## Windows
+## Platforms
 
-Native PowerShell runs the model stack and the sign-ins: `.\scripts\boot\boot.ps1` installs llama.cpp via winget (`ggml.llamacpp`), fetches the same GGUF files, and signs both CLIs in.
-The orchestration runtime targets macOS and Linux, so run steps 1 through 4 inside WSL2 (Ubuntu).
-`60-verify-boot.ps1` prints the exact handoff, including how to reuse natively downloaded models via `LOCAL_AGENT_LLAMA_MODELS_DIR`.
+macOS is the supported platform today, and it is the one this is developed and run on daily.
+Linux is expected to work, since every boot stage is POSIX shell and the runtime has no macOS-specific dependency, but it is not exercised on a schedule.
+
+Windows is not supported.
+PowerShell twins of every boot stage are written and kept at `potential-directions/windows-boot/`, and they have never been executed or parsed, so nothing here claims they work.
+`potential-directions/README.md` says what would have to be true to bring them back.
 
 ## When something blocks
 
