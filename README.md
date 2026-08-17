@@ -1,7 +1,7 @@
 # aidashos
 
 Durable orchestration of coding agents on your own machine.
-The site is [aidashos.com](https://www.aidashos.com); this repository is the whole product.
+This repository is the whole product.
 
 ## Start here
 

@@ -179,6 +179,29 @@ path = "docs/work_unit_operator_walkthrough.md"
 kind = "file"
 overwrite = true
 
+# The load-bearing decisions, each with what it buys and what it costs, including
+# the debt taken on deliberately. It travels because it is the document a reader
+# evaluating the project wants when reading 30k lines of source is not the right
+# use of their time, which is the criterion this manifest uses everywhere else:
+# a document travels because a public reader wants it, never because a test
+# named it. Scanned against docs/public_release_checklist.md's denylist on
+# 2026-08-17, clean.
+[[allow]]
+path = "docs/design_tradeoffs.md"
+kind = "file"
+overwrite = true
+
+# The package-level map design_tradeoffs.md sends its reader to on line 5. It
+# travels because that link would otherwise be broken on the first screen of the
+# document an evaluating reader is most likely to open, which is the docs/ travel
+# asymmetry that docs/public_release_checklist.md exists to warn about. Clean
+# against the denylist on 2026-08-17, and it has no relative links of its own, so
+# publishing it drags nothing further behind it.
+[[allow]]
+path = "docs/code_structure.md"
+kind = "file"
+overwrite = true
+
 # The agent-facing manual. It travels for the same reason the onboarding lane
 # does: this system has a hard requirement that an AI agent with local disk
 # access is the primary way a person uses it, and a public clone whose agent has
