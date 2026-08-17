@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -177,7 +177,11 @@ def normalize_paths(paths: Iterable[str]) -> list[str]:
 # DDL and this number are taken here. The feature that reads these columns is
 # still on `agent/4ce002fa-...-dispatch_58b7b6b9_code-3e607727` and merges when
 # its staff review passes, not as part of restoring the runtime.
-SCHEMA_VERSION = 19
+#
+# 20: normalized frontier usage and Codex continuation projections. The event
+# ledger remains the immutable evidence, while these tables make budget reads
+# and compatible thread lookup indexed operations on the execution hot path.
+SCHEMA_VERSION = 20
 
 # The DDL that `SCHEMA_VERSION` names, pinned by content.
 #
@@ -198,7 +202,7 @@ SCHEMA_VERSION = 19
 # - The edit changed only comments or whitespace. Update this hash alone.
 #
 # Recomputed with `shasum -a 256 agent_coordination_postgres_schema.sql`.
-SCHEMA_CONTENT_HASH = "a61f1d46e516d1194d7db9ec649fa5281a5a2cf432c9d1391a31274d6cb54811"
+SCHEMA_CONTENT_HASH = "563e6e76c614f1e5116f68ad9e4c1857a9efbc72e9a64a4c7c228aeaddbf1651"
 
 POSTGRES_SCHEMA_COMPONENT = "agent_coordination"
 # Stable, signed 64-bit key reserved for this component's schema migration.
@@ -1072,7 +1076,7 @@ def emit(event_type: str, payload: dict[str, Any]) -> None:
         f.write(json.dumps(rec, sort_keys=True) + "\n")
 
 
-def rowdict(r: dict[str, Any]) -> dict[str, Any]:
+def rowdict(r: Mapping[str, Any]) -> dict[str, Any]:
     """Copy a row into a plain dict.
 
     Rows arrive as a psycopg `dict_row`, which is already a mapping; the copy is

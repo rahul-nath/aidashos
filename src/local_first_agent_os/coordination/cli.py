@@ -83,6 +83,10 @@ from .execution import (
     request_execution_cancel,
 )
 from .execution_ledger import read_execution_ledger
+from .frontier_usage import (
+    find_compatible_agent_continuation,
+    list_frontier_usage_records,
+)
 from .integration_queue import list_integration_requests
 from .machine_readiness import run_first_run_check
 from .milestones import (
@@ -456,6 +460,8 @@ def build_mcp_server():
     mcp.tool(name="list_execution_leases")(list_execution_leases)
     mcp.tool(name="append_execution_event")(append_execution_event)
     mcp.tool(name="list_execution_events")(list_execution_events)
+    mcp.tool(name="find_agent_continuation")(find_compatible_agent_continuation)
+    mcp.tool(name="list_frontier_usage_records")(list_frontier_usage_records)
     mcp.tool(name="attach_execution_artifact")(attach_execution_artifact)
     mcp.tool(name="list_execution_artifacts")(list_execution_artifacts)
     mcp.tool(name="create_execution_checkpoint")(create_execution_checkpoint)
@@ -937,6 +943,13 @@ def build_parser() -> argparse.ArgumentParser:
     oel.add_argument("--task-id")
     oel.add_argument("--agent-tier")
     oel.add_argument("--agent-name")
+    oel.add_argument("--task-role")
+    oel.add_argument("--model")
+    oel.add_argument("--target-project-id")
+    oel.add_argument("--planning-phase")
+    oel.add_argument("--source-revision")
+    oel.add_argument("--permission-envelope-sha256")
+    oel.add_argument("--resumed-thread-id")
     oel.add_argument("--worktree-path")
     oel.add_argument("--command-json")
     oel.add_argument("--compensation-json")
@@ -976,6 +989,17 @@ def build_parser() -> argparse.ArgumentParser:
     lee.add_argument("lease_id")
     lee.add_argument("--after-sequence", type=int, default=0)
     lee.add_argument("--limit", type=int, default=200)
+
+    fac = sub.add_parser("find_agent_continuation")
+    fac.add_argument("source_task_id")
+    fac.add_argument("--pow-wow-id", required=True)
+    fac.add_argument("--agent-name", required=True)
+    fac.add_argument("--model")
+    fac.add_argument("--target-project-id", required=True)
+    fac.add_argument("--source-revision", required=True)
+
+    lfur = sub.add_parser("list_frontier_usage_records")
+    lfur.add_argument("lease_id")
 
     aea = sub.add_parser("attach_execution_artifact")
     aea.add_argument("lease_id")
@@ -1438,6 +1462,13 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             task_id=args.task_id,
             agent_tier=args.agent_tier,
             agent_name=args.agent_name,
+            task_role=args.task_role,
+            model=args.model,
+            target_project_id=args.target_project_id,
+            planning_phase=args.planning_phase,
+            source_revision=args.source_revision,
+            permission_envelope_sha256=args.permission_envelope_sha256,
+            resumed_thread_id=args.resumed_thread_id,
             worktree_path=args.worktree_path,
             command_json=args.command_json,
             compensation_json=args.compensation_json,
@@ -1479,6 +1510,17 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             after_sequence=args.after_sequence,
             limit=args.limit,
         )
+    elif cmd == "find_agent_continuation":
+        out = find_compatible_agent_continuation(
+            args.source_task_id,
+            pow_wow_id=args.pow_wow_id,
+            harness=args.agent_name,
+            source_model=args.model,
+            target_project_id=args.target_project_id,
+            source_revision=args.source_revision,
+        )
+    elif cmd == "list_frontier_usage_records":
+        out = list_frontier_usage_records(args.lease_id)
     elif cmd == "attach_execution_artifact":
         out = attach_execution_artifact(
             args.lease_id,

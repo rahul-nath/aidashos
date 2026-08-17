@@ -7,8 +7,12 @@ docs/onboarding/prompts.json is that place. The landing page renders it, the
 BOOT_PROMPT doc quotes it, and the prompts name scripts by path. Each of those
 is a copy that drifts silently unless something pins it, so this module pins
 all three: the doc must quote the JSON verbatim, every script a prompt names
-must exist in both shell dialects, and the clone command must appear where the
+must exist and be executable, and the clone command must appear where the
 walkthrough tells a human to type it.
+
+It also pins the platform claim to the platform evidence. The PowerShell stages
+are parked in `potential_directions/windows-boot/` because nothing has ever run
+them, and no shipped document may advertise Windows while they sit there.
 """
 
 from __future__ import annotations
@@ -62,13 +66,13 @@ def test_every_script_a_prompt_names_exists_and_runs(prompts_document: dict) -> 
     """Every boot stage a prompt names is on disk and executable.
 
     This asked for a `.ps1` twin next to every `.sh` until the PowerShell stages
-    moved to `potential-directions/windows-boot/`. They were never executed and
+    moved to `potential_directions/windows-boot/`. They were never executed and
     never parsed, and the docs asserted Windows support on the strength of their
     existing, which is what this assertion was quietly underwriting: it proved
     the files were present and nothing else.
 
     Restoring Windows means restoring the `.ps1` half of this loop as well as the
-    files, which `potential-directions/README.md` says. Until then a shell-only
+    files, which `potential_directions/windows-boot/README.md` says. Until then a shell-only
     check is the honest one, because shell is the only dialect anything has run.
     """
 
@@ -90,7 +94,7 @@ def test_the_parked_windows_stages_are_not_advertised() -> None:
     without the docs being reconsidered, and it fails if the docs re-advertise
     Windows while the stages are still parked.
 
-    The parked directory is checked only where it exists. `potential-directions/`
+    The parked directory is checked only where it exists. `potential_directions/`
     is absent from `public_import.toml` on purpose, so the public snapshot has the
     docs and the shell stages but not the parked twins, and `tests/` travels whole
     while that directory does not. Asserting its presence unconditionally failed
@@ -101,15 +105,15 @@ def test_the_parked_windows_stages_are_not_advertised() -> None:
     `scripts/boot/`, and no document pointing at one.
     """
 
-    parked = REPO_ROOT / "potential-directions" / "windows-boot"
+    parked = REPO_ROOT / "potential_directions" / "windows-boot"
     if parked.is_dir():
         assert list(parked.glob("*.ps1")), (
-            "potential-directions/windows-boot/ exists but holds no PowerShell stages; "
+            "potential_directions/windows-boot/ exists but holds no PowerShell stages; "
             "restoring Windows means moving them back, not emptying the parking spot"
         )
     assert not list((REPO_ROOT / "scripts" / "boot").glob("*.ps1")), (
         "a PowerShell stage is back under scripts/boot/; "
-        "see potential-directions/README.md before re-advertising Windows"
+        "see potential_directions/windows-boot/README.md before re-advertising Windows"
     )
     for relative in ("docs/onboarding/ONBOARDING.md", "scripts/boot/README.md"):
         text = (REPO_ROOT / relative).read_text(encoding="utf-8")

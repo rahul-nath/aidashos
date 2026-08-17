@@ -40,6 +40,13 @@ class ExternalAgentLeaseBoundaryRequest(BaseModel):
     task_id: str | None = None
     agent_tier: str | None = None
     agent_name: str | None = None
+    task_role: str | None = None
+    model: str | None = None
+    target_project_id: str | None = None
+    planning_phase: str | None = None
+    source_revision: str | None = None
+    permission_envelope_sha256: str | None = None
+    resumed_thread_id: str | None = None
     worktree_path: str | None = None
     command: list[str] = Field(default_factory=list)
     compensation: dict[str, Any] = Field(default_factory=dict)
@@ -130,6 +137,13 @@ def open_external_agent_execution_lease_step(payload: dict[str, Any]) -> dict[st
             task_id=request.task_id,
             agent_tier=request.agent_tier,
             agent_name=request.agent_name,
+            task_role=request.task_role,
+            model=request.model,
+            target_project_id=request.target_project_id,
+            planning_phase=request.planning_phase,
+            source_revision=request.source_revision,
+            permission_envelope_sha256=request.permission_envelope_sha256,
+            resumed_thread_id=request.resumed_thread_id,
             worktree_path=request.worktree_path,
             command=tuple(request.command),
             compensation=request.compensation or None,

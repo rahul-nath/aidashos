@@ -69,8 +69,8 @@ macOS is the supported platform today, and it is the one this is developed and r
 Linux is expected to work, since every boot stage is POSIX shell and the runtime has no macOS-specific dependency, but it is not exercised on a schedule.
 
 Windows is not supported.
-PowerShell twins of every boot stage are written and kept at `potential-directions/windows-boot/`, and they have never been executed or parsed, so nothing here claims they work.
-`potential-directions/README.md` says what would have to be true to bring them back.
+PowerShell twins of every boot stage are written and kept at `potential_directions/windows-boot/`, and they have never been executed or parsed, so nothing here claims they work.
+`potential_directions/windows-boot/README.md` says what would have to be true to bring them back.
 
 ## When something blocks
 

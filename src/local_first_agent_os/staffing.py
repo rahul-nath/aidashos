@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import assert_never
@@ -63,6 +63,13 @@ class FrontierHarness(StrEnum):
 
     CLAUDE = "claude"
     CODEX = "codex"
+
+
+class JudgmentWorkload(StrEnum):
+    """Why a judgment model is being launched, independent of seniority."""
+
+    STANDARD = "standard"
+    INDEPENDENT_READING = "independent_reading"
 
 
 @dataclass(frozen=True)
@@ -108,6 +115,21 @@ def classify_harness(harness: Harness) -> HarnessKind:
 
 
 @dataclass(frozen=True)
+class WorkloadModelProfile:
+    """A bounded model override for one workload within a tier's seat."""
+
+    workload: JudgmentWorkload
+    model: str
+    reasoning_effort: str | None = None
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "model": self.model,
+            "reasoning_effort": self.reasoning_effort,
+        }
+
+
+@dataclass(frozen=True)
 class BenchSlot:
     """Who is available at one tier: a harness, an optional model, a capacity."""
 
@@ -116,6 +138,14 @@ class BenchSlot:
     capacity: int = 1  # max concurrent instances of this tier
     backup_models: tuple[str, ...] = ()  # alternates for the same tier (e.g. eval comparison)
     reasoning_effort: str | None = None  # harness-specific effort knob (e.g. codex high)
+    workload_profiles: tuple[WorkloadModelProfile, ...] = ()
+
+    def __post_init__(self) -> None:
+        workloads = [profile.workload for profile in self.workload_profiles]
+        if len(workloads) != len(set(workloads)):
+            raise ValueError("a bench slot cannot define the same workload profile twice")
+        if JudgmentWorkload.STANDARD in workloads:
+            raise ValueError("the standard workload is the bench slot itself, not an override")
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -124,6 +154,10 @@ class BenchSlot:
             "capacity": self.capacity,
             "reasoning_effort": self.reasoning_effort,
             "backup_models": list(self.backup_models),
+            "workload_profiles": {
+                profile.workload.value: profile.to_payload()
+                for profile in self.workload_profiles
+            },
         }
 
 
@@ -245,6 +279,29 @@ def resolve_bench(tier: Tier, bench: Bench | None = None) -> BenchSlot:
         raise KeyError(f"no bench slot configured for tier {tier!r}") from exc
 
 
+def resolve_bench_for_workload(
+    tier: Tier,
+    workload: JudgmentWorkload,
+    bench: Bench | None = None,
+) -> BenchSlot:
+    """Resolve a tier, then apply the exact model profile for its workload."""
+
+    slot = resolve_bench(tier, bench)
+    if workload is JudgmentWorkload.STANDARD:
+        return slot
+    profile = next(
+        (profile for profile in slot.workload_profiles if profile.workload is workload),
+        None,
+    )
+    if profile is None:
+        return slot
+    return replace(
+        slot,
+        model=profile.model,
+        reasoning_effort=profile.reasoning_effort,
+    )
+
+
 def dispatch_seat_counts(bench: Bench | None = None) -> dict[str, int]:
     """Per-tier concurrent dispatch seats: a tier's seat count IS its capacity.
 
@@ -273,12 +330,22 @@ def load_bench(config_path: Path) -> Bench:
     bench: Bench = {}
     for tier_name, slot in bench_table.items():
         tier = Tier(tier_name)
+        workload_table = slot.get("workloads", {})
+        workload_profiles = tuple(
+            WorkloadModelProfile(
+                workload=JudgmentWorkload(workload_name),
+                model=str(profile["model"]),
+                reasoning_effort=profile.get("reasoning_effort"),
+            )
+            for workload_name, profile in workload_table.items()
+        )
         bench[tier] = BenchSlot(
             harness=Harness(slot["harness"]),
             model=slot.get("model"),
             capacity=int(slot.get("capacity", 1)),
             backup_models=tuple(slot.get("backup_models", [])),
             reasoning_effort=slot.get("reasoning_effort"),
+            workload_profiles=workload_profiles,
         )
     resolved = bench or dict(DEFAULT_BENCH)
     _warn_when_review_is_self_review(resolved)

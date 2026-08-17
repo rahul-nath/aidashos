@@ -111,6 +111,13 @@ def open_execution_lease(
     task_id: str | None = None,
     agent_tier: str | None = None,
     agent_name: str | None = None,
+    task_role: str | None = None,
+    model: str | None = None,
+    target_project_id: str | None = None,
+    planning_phase: str | None = None,
+    source_revision: str | None = None,
+    permission_envelope_sha256: str | None = None,
+    resumed_thread_id: str | None = None,
     worktree_path: str | None = None,
     command_json: str | None = None,
     compensation_json: str | None = None,
@@ -142,10 +149,13 @@ def open_execution_lease(
                 f"""
                 INSERT INTO agent_execution_leases(
                     lease_id, idempotency_key, intent_id, task_id, worker_id,
-                    agent_tier, agent_name, worktree_path, command_json, status,
+                    agent_tier, agent_name, task_role, model, target_project_id,
+                    planning_phase, source_revision, permission_envelope_sha256,
+                    resumed_thread_id, worktree_path, command_json, status,
                     timeout_seconds, lease_expires_at, compensation_json,
                     created_at, heartbeat_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '{LeaseStatus.ACTIVE}', ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          '{LeaseStatus.ACTIVE}', ?, ?, ?, ?, ?)
                 """,
                 (
                     lease_id,
@@ -155,6 +165,13 @@ def open_execution_lease(
                     worker_id,
                     agent_tier,
                     agent_name,
+                    task_role,
+                    model,
+                    target_project_id,
+                    planning_phase,
+                    source_revision,
+                    permission_envelope_sha256,
+                    resumed_thread_id,
                     worktree_path,
                     command,
                     timeout_seconds,

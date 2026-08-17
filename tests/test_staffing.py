@@ -9,6 +9,9 @@ from typing import Any, cast
 
 import pytest
 
+from local_first_agent_os.pow_wow import CliPowWowExecutor
+from local_first_agent_os.pow_wow.protocol import PlanningPhase, TaskPurpose
+from local_first_agent_os.pow_wow.types import PowWowTaskSpec
 from local_first_agent_os.spawn_authority import ReadOnlyInspection, UnattendedImplementation
 from local_first_agent_os.staffing import (
     DEFAULT_BENCH,
@@ -18,11 +21,14 @@ from local_first_agent_os.staffing import (
     FrontierHarness,
     Harness,
     JudgmentRole,
+    JudgmentWorkload,
     Roster,
     Tier,
+    WorkloadModelProfile,
     dispatch_seat_counts,
     load_bench,
     resolve_bench,
+    resolve_bench_for_workload,
 )
 
 
@@ -103,6 +109,10 @@ def test_load_bench_reads_toml(tmp_path: Path) -> None:
 harness = "claude"
 capacity = 2
 
+[bench.staff.workloads.independent_reading]
+model = "claude-sonnet-5"
+reasoning_effort = "medium"
+
 [bench.junior]
 harness = "pi"
 model = "gemma4"
@@ -111,8 +121,88 @@ capacity = 8
         encoding="utf-8",
     )
     bench = load_bench(cfg)
-    assert bench[Tier.STAFF] == BenchSlot(harness=Harness.CLAUDE, model=None, capacity=2)
+    assert bench[Tier.STAFF] == BenchSlot(
+        harness=Harness.CLAUDE,
+        model=None,
+        capacity=2,
+        workload_profiles=(
+            WorkloadModelProfile(
+                workload=JudgmentWorkload.INDEPENDENT_READING,
+                model="claude-sonnet-5",
+                reasoning_effort="medium",
+            ),
+        ),
+    )
     assert bench[Tier.JUNIOR] == BenchSlot(harness=Harness.PI, model="gemma4", capacity=8)
+
+
+def test_workload_profile_changes_model_not_seniority_or_capacity(tmp_path: Path) -> None:
+    repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
+    bench = load_bench(repo_cfg)
+
+    standard = resolve_bench_for_workload(
+        Tier.SENIOR,
+        JudgmentWorkload.STANDARD,
+        bench,
+    )
+    reading = resolve_bench_for_workload(
+        Tier.SENIOR,
+        JudgmentWorkload.INDEPENDENT_READING,
+        bench,
+    )
+
+    assert (standard.harness, standard.model, standard.reasoning_effort) == (
+        Harness.CODEX,
+        "gpt-5.6-sol",
+        "high",
+    )
+    assert (reading.harness, reading.model, reading.reasoning_effort) == (
+        Harness.CODEX,
+        "gpt-5.6-terra",
+        "medium",
+    )
+    assert reading.capacity == standard.capacity == 2
+
+
+def test_executor_routes_only_independent_reading_to_its_workload_profile(
+    tmp_path: Path,
+) -> None:
+    repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
+    executor = CliPowWowExecutor(
+        worktree_root=tmp_path / "worktrees",
+        bench=load_bench(repo_cfg),
+    )
+    role = JudgmentRole(name="implementer", tier=Tier.SENIOR)
+    reading = PowWowTaskSpec(
+        task_name="read",
+        role="senior independent reader",
+        description="inspect the repository",
+        purpose=TaskPurpose.ADVISORY,
+        judgment=role,
+        dispatch_kind="advisory",
+        planning_phase=PlanningPhase.SENIOR_INDEPENDENT_READING,
+    )
+    implementation = PowWowTaskSpec(
+        task_name="implement",
+        role="senior implementer",
+        description="implement the accepted plan",
+        purpose=TaskPurpose.IMPLEMENTATION,
+        judgment=role,
+        dispatch_kind="code",
+        planning_phase=PlanningPhase.SENIOR_OWNED_PLAN,
+    )
+
+    reading_slot = executor._task_bench_slot(reading)
+    implementation_slot = executor._task_bench_slot(implementation)
+    assert reading_slot is not None and implementation_slot is not None
+    assert (reading_slot.model, reading_slot.reasoning_effort) == (
+        "gpt-5.6-terra",
+        "medium",
+    )
+    assert (implementation_slot.model, implementation_slot.reasoning_effort) == (
+        "gpt-5.6-sol",
+        "high",
+    )
 
 
 def test_a_bench_whose_reviewer_wrote_the_change_warns(

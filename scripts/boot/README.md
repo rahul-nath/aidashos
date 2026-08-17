@@ -13,7 +13,7 @@ The full picture is drawn in [docs/diagrams/aidashos-onboarding-dag.png](../../d
 ```
 
 macOS is the supported platform; Linux is expected to work and is not exercised on a schedule.
-Windows is not supported, and `potential-directions/README.md` says why.
+Windows is not supported, and `potential_directions/windows-boot/README.md` says why.
 
 Or paste [docs/onboarding/BOOT_PROMPT.md](../../docs/onboarding/BOOT_PROMPT.md) into any local AI agent and let it drive the same stages.
 

@@ -341,6 +341,13 @@ CREATE TABLE IF NOT EXISTS agent_execution_leases (
     worker_id TEXT NOT NULL,
     agent_tier TEXT,
     agent_name TEXT,
+    task_role TEXT,
+    model TEXT,
+    target_project_id TEXT,
+    planning_phase TEXT,
+    source_revision TEXT,
+    permission_envelope_sha256 TEXT,
+    resumed_thread_id TEXT,
     worktree_path TEXT,
     command_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'ACTIVE',
@@ -386,6 +393,13 @@ ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS progress_assessment_
 ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS progress_assessment_decision_json TEXT;
 ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS progress_assessment_error TEXT;
 ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS progress_assessed_at DOUBLE PRECISION;
+ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS task_role TEXT;
+ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS model TEXT;
+ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS target_project_id TEXT;
+ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS planning_phase TEXT;
+ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS source_revision TEXT;
+ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS permission_envelope_sha256 TEXT;
+ALTER TABLE agent_execution_leases ADD COLUMN IF NOT EXISTS resumed_thread_id TEXT;
 CREATE INDEX IF NOT EXISTS idx_agent_execution_leases_status
     ON agent_execution_leases(status, lease_expires_at);
 CREATE INDEX IF NOT EXISTS idx_agent_execution_leases_intent
@@ -405,6 +419,61 @@ CREATE TABLE IF NOT EXISTS agent_execution_events (
 );
 CREATE INDEX IF NOT EXISTS idx_agent_execution_events_lease
     ON agent_execution_events(lease_id, sequence);
+
+-- Codex process lifetime and Codex conversation lifetime are different things.
+-- This projection promotes the thread.started event into the durable identity
+-- that a later compatible process may resume without replaying its transcript.
+CREATE TABLE IF NOT EXISTS agent_continuations (
+    thread_id TEXT PRIMARY KEY,
+    latest_lease_id TEXT NOT NULL REFERENCES agent_execution_leases(lease_id),
+    latest_task_id TEXT REFERENCES saga_tasks(task_id),
+    pow_wow_id TEXT REFERENCES pow_wows(pow_wow_id),
+    harness TEXT NOT NULL,
+    model TEXT,
+    task_role TEXT,
+    agent_tier TEXT,
+    target_project_id TEXT,
+    planning_phase TEXT,
+    source_revision TEXT,
+    permission_envelope_sha256 TEXT,
+    source_sequence INTEGER NOT NULL,
+    resume_count INTEGER NOT NULL DEFAULT 0,
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_agent_continuations_task
+    ON agent_continuations(latest_task_id, harness, model);
+
+-- One normalized row per provider turn. The append-only event remains the
+-- evidence; this is the indexed hot-path projection used for budgets and
+-- attribution without parsing retained transcripts.
+CREATE TABLE IF NOT EXISTS frontier_usage_records (
+    usage_record_id TEXT PRIMARY KEY,
+    lease_id TEXT NOT NULL REFERENCES agent_execution_leases(lease_id),
+    event_sequence INTEGER NOT NULL,
+    thread_id TEXT,
+    task_id TEXT REFERENCES saga_tasks(task_id),
+    pow_wow_id TEXT REFERENCES pow_wows(pow_wow_id),
+    saga_id TEXT REFERENCES sagas(saga_id),
+    task_role TEXT,
+    agent_tier TEXT,
+    harness TEXT NOT NULL,
+    model TEXT,
+    input_tokens BIGINT NOT NULL,
+    cached_input_tokens BIGINT NOT NULL,
+    uncached_input_tokens BIGINT NOT NULL,
+    cache_write_tokens BIGINT NOT NULL,
+    output_tokens BIGINT NOT NULL,
+    effective_units_milli BIGINT NOT NULL,
+    weight_policy TEXT NOT NULL,
+    measured BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DOUBLE PRECISION NOT NULL,
+    UNIQUE(lease_id, event_sequence)
+);
+CREATE INDEX IF NOT EXISTS idx_frontier_usage_pow_wow
+    ON frontier_usage_records(pow_wow_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_frontier_usage_lease
+    ON frontier_usage_records(lease_id, event_sequence);
 
 CREATE TABLE IF NOT EXISTS agent_execution_artifacts (
     execution_artifact_id TEXT PRIMARY KEY,

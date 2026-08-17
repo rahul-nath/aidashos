@@ -78,6 +78,13 @@ capacity = 2
 # skipped rather than applied and the tier lands on the peer's slot unchanged.
 backup_models = ["claude-sonnet-5"]
 
+# Independent reading is still senior-owned work, but it does not need the
+# implementation seat's most expensive model and effort profile. The executor
+# selects this override only for the typed independent-reading planning phase.
+[bench.senior.workloads.independent_reading]
+model = "gpt-5.6-terra"
+reasoning_effort = "medium"
+
 [bench.junior]
 harness = "pi"
 model = "gemma4"

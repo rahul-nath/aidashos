@@ -61,6 +61,7 @@ from ..coordination.contracts import (
     CreateExecutionCheckpoint,
     EntityResult,
     ExecutionLeaseTerminalStatus,
+    FindAgentContinuation,
     LatestRepoAudit,
     OpenExecutionLease,
     SubmitArtifact,
@@ -84,8 +85,10 @@ from ..observability import profiled_step
 from ..progress_events import emit_progress
 from ..project_center import LinkedProject
 from ..spawn_authority import (
+    ReadOnlyInspection,
     SpawnAuthority,
     SpawnPosture,
+    UnattendedImplementation,
     authority_for_purpose,
     describe_posture,
 )
@@ -94,11 +97,14 @@ from ..staffing import (
     Bench,
     BenchSlot,
     FrontierHarness,
+    Harness,
     HarnessKind,
+    JudgmentWorkload,
     LocalHarness,
     Tier,
     classify_harness,
     resolve_bench,
+    resolve_bench_for_workload,
 )
 from ..toolchains import project_environment
 from .dry_run import DryRunPowWowExecutor
@@ -136,8 +142,10 @@ from .prompts import (
     build_agent_task_prompt,
     build_assigned_worktree_context,
     build_assigned_worktree_environment,
+    build_resumed_senior_implementation_prompt,
 )
 from .protocol import (
+    PlanningPhase,
     ReferencePack,
     ReviewCompletionStatus,
     ReviewDisposition,
@@ -329,6 +337,81 @@ class _CodeWorktreeLease:
     allocation: WorktreeAllocation
 
 
+@dataclass(frozen=True)
+class ResumeExisting:
+    thread_id: str
+    source_task_name: str
+    source_task_id: str
+    authority_transition: ReadOnlyToImplementation
+    model_transition: ReaderToImplementationModelTransition
+
+
+@dataclass(frozen=True)
+class ReadOnlyToImplementation:
+    """The sole permitted authority widening for an existing Codex thread."""
+
+    source_permission_envelope_sha256: str
+    target_permission_envelope_sha256: str
+
+
+@dataclass(frozen=True)
+class ReaderToImplementationModelTransition:
+    """The staffing-declared model change across the resumed planning boundary."""
+
+    source_model: str | None
+    target_model: str | None
+
+
+@dataclass(frozen=True)
+class StartFreshBounded:
+    reason: str
+
+
+@dataclass(frozen=True)
+class StartFreshIndependent:
+    reason: str
+
+
+type FrontierLaunchDecision = ResumeExisting | StartFreshBounded | StartFreshIndependent
+
+
+def _launch_decision_payload(decision: FrontierLaunchDecision) -> dict[str, object]:
+    match decision:
+        case ResumeExisting(
+            thread_id=thread_id,
+            source_task_name=source_task_name,
+            source_task_id=source_task_id,
+            authority_transition=authority_transition,
+            model_transition=model_transition,
+        ):
+            return {
+                "kind": "resume_existing",
+                "thread_id": thread_id,
+                "source_task_name": source_task_name,
+                "source_task_id": source_task_id,
+                "authority_transition": {
+                    "kind": "read_only_to_implementation",
+                    "source_permission_envelope_sha256": (
+                        authority_transition.source_permission_envelope_sha256
+                    ),
+                    "target_permission_envelope_sha256": (
+                        authority_transition.target_permission_envelope_sha256
+                    ),
+                },
+                "model_transition": {
+                    "kind": "reader_to_implementation",
+                    "source_model": model_transition.source_model,
+                    "target_model": model_transition.target_model,
+                },
+            }
+        case StartFreshBounded(reason=reason):
+            return {"kind": "start_fresh_bounded", "reason": reason}
+        case StartFreshIndependent(reason=reason):
+            return {"kind": "start_fresh_independent", "reason": reason}
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
 def _slugify_path_component(value: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", value.strip()).strip("-")
     return slug[:80] or "task"
@@ -488,11 +571,34 @@ class _WorktreePowWowExecutorBase:
         asked by scheduling predicates about every task, and an unstaffed tier is
         a question for the path that actually needs the slot. ``resolve_bench``
         still raises there, with its own message.
+
+        The staffed check happens before the resolve, not around it, because
+        ``resolve_bench_for_workload`` raises on an unstaffed tier where the
+        ``self.bench.get`` this replaced returned ``None``. Catching the
+        ``KeyError`` instead would also swallow one raised deeper in the profile
+        lookup, which is a real defect rather than an unstaffed bench.
         """
 
         if task.judgment is None:
             return None
-        return self.bench.get(task.judgment.tier)
+        if task.judgment.tier not in self.bench:
+            return None
+        return resolve_bench_for_workload(
+            task.judgment.tier,
+            self._judgment_workload(task),
+            self.bench,
+        )
+
+    @staticmethod
+    def _judgment_workload(task: PowWowTaskSpec) -> JudgmentWorkload:
+        match task.planning_phase:
+            case (
+                PlanningPhase.SENIOR_INDEPENDENT_READING
+                | PlanningPhase.STAFF_INDEPENDENT_READING
+            ):
+                return JudgmentWorkload.INDEPENDENT_READING
+            case _:
+                return JudgmentWorkload.STANDARD
 
     def _local_harness_for(self, task: PowWowTaskSpec) -> LocalHarness | None:
         """The local harness this task belongs to, or ``None`` if it needs a CLI.
@@ -656,7 +762,8 @@ class _WorktreePowWowExecutorBase:
         tiers: through the durable ledger, not process IPC."""
         assert self.delegate_fn is not None  # guarded by _is_junior_delegate
         assert task.judgment is not None
-        slot = resolve_bench(task.judgment.tier, self.bench)
+        slot = self._task_bench_slot(task)
+        assert slot is not None
         # The local lane is gated too. Its capabilities are ungated today, so
         # this passes, and that is the point: the check belongs at every way in,
         # not only at the ways that happen to spawn an external process. A local
@@ -1267,6 +1374,8 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         cwd: Path,
         worktree: WorktreeAllocation | None,
         is_review: bool,
+        source_revision: str | None = None,
+        resumed_thread_id: str | None = None,
     ) -> ExecutionAttemptLease | None:
         if self.coordination_command is None:
             return None
@@ -1308,12 +1417,25 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         marketing_provenance = _build_marketing_site_doctrine_provenance(task)
         if marketing_provenance is not None:
             compensation["marketing_site_doctrine"] = marketing_provenance
+        if source_revision is None:
+            source_revision = (
+                worktree.head_sha
+                if worktree is not None
+                else run_git_command_for_output(cwd, ("rev-parse", "HEAD")).strip()
+            )
         open_command = OpenExecutionLease(
             idempotency_key=idempotency_key,
             worker_id=worker_id,
             timeout_seconds=self.timeout_seconds,
             agent_tier=task.judgment.tier.value if task.judgment else "unknown",
             agent_name=harness,
+            task_role=task.role,
+            model=model,
+            target_project_id=target_project.id,
+            planning_phase=task.planning_phase.value if task.planning_phase else None,
+            source_revision=source_revision,
+            permission_envelope_sha256=self._permission_envelope_sha256(task),
+            resumed_thread_id=resumed_thread_id,
             intent_id=context.dispatch_intent_id,
             task_id=task_id,
             worktree_path=worktree.worktree_path if worktree else None,
@@ -1572,6 +1694,122 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             ),
         )
 
+    @staticmethod
+    def _planning_phase_of_result(result: PowWowTaskResult) -> PlanningPhase | None:
+        for artifact in result.artifacts:
+            task_payload = artifact.content.get("task")
+            if not isinstance(task_payload, Mapping):
+                continue
+            raw_phase = task_payload.get("planning_phase")
+            if isinstance(raw_phase, str):
+                return PlanningPhase(raw_phase)
+        return None
+
+    @staticmethod
+    def _authority_sha256(authority: SpawnAuthority) -> str:
+        payload = {
+            "capabilities": list(authority.to_names()),
+            "posture": describe_posture(authority.posture()),
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _permission_envelope_sha256(self, task: PowWowTaskSpec) -> str:
+        return self._authority_sha256(self._task_spawn_authority(task))
+
+    def _frontier_launch_decision(
+        self,
+        *,
+        pow_wow_id: str,
+        target_project: LinkedProject,
+        task: PowWowTaskSpec,
+        context: PowWowExecutionContext,
+        dependency_results: Sequence[PowWowTaskResult],
+        harness: FrontierHarness,
+        model: str | None,
+        source_revision: str,
+    ) -> FrontierLaunchDecision:
+        if task.planning_phase in {
+            PlanningPhase.STAFF_INDEPENDENT_READING,
+            PlanningPhase.STAFF_FINAL_REVIEW,
+        }:
+            return StartFreshIndependent("staff planning phases require independent judgment")
+        if harness is not FrontierHarness.CODEX:
+            return StartFreshBounded("the selected harness cannot resume Codex threads")
+        if task.planning_phase is not PlanningPhase.SENIOR_OWNED_PLAN:
+            return StartFreshBounded("task is not the senior reading-to-implementation boundary")
+        source_result = next(
+            (
+                result
+                for result in dependency_results
+                if self._planning_phase_of_result(result)
+                is PlanningPhase.SENIOR_INDEPENDENT_READING
+            ),
+            None,
+        )
+        if source_result is None:
+            return StartFreshBounded("senior independent reading dependency is unavailable")
+        source_task_id = (context.task_ids_by_name or {}).get(source_result.task_name)
+        if not source_task_id:
+            return StartFreshBounded("senior independent reading has no durable task id")
+        if self.coordination_command is None:
+            return StartFreshBounded("coordination ledger is unavailable")
+        reader_slot = resolve_bench_for_workload(
+            Tier.SENIOR,
+            JudgmentWorkload.INDEPENDENT_READING,
+            self.bench,
+        )
+        if reader_slot.harness is not Harness.CODEX:
+            return StartFreshBounded("the configured senior reader is not a Codex thread")
+        command = FindAgentContinuation(
+            source_task_id=source_task_id,
+            pow_wow_id=pow_wow_id,
+            harness=harness.value,
+            source_model=reader_slot.model,
+            target_project_id=target_project.id,
+            source_revision=source_revision,
+        )
+        try:
+            found = self.coordination_command(command)
+        except Exception as exc:  # noqa: BLE001 - a cold start remains valid
+            return StartFreshBounded(
+                f"continuation lookup failed: {type(exc).__name__}: {exc}"
+            )
+        if not isinstance(found, EntityResult) or found.field != "continuation":
+            return StartFreshBounded("continuation lookup returned a malformed result")
+        if found.metadata.values.get("compatible") is not True:
+            reason = str(found.metadata.values.get("reason") or "incompatible")
+            return StartFreshBounded(f"continuation {reason}")
+        thread_id = found.entity.values.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            raise ValueError("compatible continuation requires a non-empty thread_id")
+        source_permission = found.entity.values.get("permission_envelope_sha256")
+        source_authority = authority_for_purpose(TaskPurpose.ADVISORY).narrowed_to(
+            self.spawn_ceiling
+        )
+        target_authority = self._task_spawn_authority(task)
+        expected_source_permission = self._authority_sha256(source_authority)
+        target_permission = self._authority_sha256(target_authority)
+        if source_permission != expected_source_permission:
+            return StartFreshBounded("continuation source permission envelope mismatch")
+        if not isinstance(source_authority.posture(), ReadOnlyInspection):
+            return StartFreshBounded("continuation source is not read-only inspection")
+        if not isinstance(target_authority.posture(), UnattendedImplementation):
+            return StartFreshBounded("continuation target is not unattended implementation")
+        return ResumeExisting(
+            thread_id=thread_id,
+            source_task_name=source_result.task_name,
+            source_task_id=source_task_id,
+            authority_transition=ReadOnlyToImplementation(
+                source_permission_envelope_sha256=expected_source_permission,
+                target_permission_envelope_sha256=target_permission,
+            ),
+            model_transition=ReaderToImplementationModelTransition(
+                source_model=reader_slot.model,
+                target_model=model,
+            ),
+        )
+
     def _build_agent_cli_command(
         self,
         harness: FrontierHarness,
@@ -1579,6 +1817,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         prompt: str,
         posture: SpawnPosture,
         reasoning_effort: str | None = None,
+        continuation_thread_id: str | None = None,
     ) -> tuple[str, ...]:
         """The argv for one frontier agent run.
 
@@ -1598,9 +1837,15 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         given an implementer's.
         """
 
+        if continuation_thread_id is not None and harness is not FrontierHarness.CODEX:
+            raise ValueError("only the Codex harness can resume a Codex thread")
+
         match harness:
             case FrontierHarness.CODEX:
-                cmd = [self.codex_bin, "exec", "--skip-git-repo-check", "--json"]
+                cmd = [self.codex_bin, "exec"]
+                if continuation_thread_id is not None:
+                    cmd.append("resume")
+                cmd += ["--skip-git-repo-check", "--json"]
                 cmd += _CODEX_SANDBOX_ARGS[describe_posture(posture)]
                 if model:
                     cmd += ["--model", model]
@@ -1608,6 +1853,8 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     cmd += ["-c", f"model_reasoning_effort={reasoning_effort}"]
                 if self.agent_ledger_root is not None:
                     cmd += codex_mcp_args(self.agent_ledger_root)
+                if continuation_thread_id is not None:
+                    cmd.append(continuation_thread_id)
                 cmd.append(prompt)
                 return tuple(cmd)
             case FrontierHarness.CLAUDE:
@@ -2294,7 +2541,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         source_repo = target_project.expanded_path
         worktree_path = Path(worktree.worktree_path)
         worktree_context = build_assigned_worktree_context(context, worktree_path)
-        slot = resolve_bench(task.judgment.tier, self.bench) if task.judgment else None
+        slot = self._task_bench_slot(task)
         frontier = self._resolve_frontier_harness(slot)
         if isinstance(frontier, LocalHarness):
             return self._build_local_harness_refusal_result(
@@ -2359,23 +2606,45 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     ),
                 ),
             )
-        prompt = build_agent_task_prompt(
-            task,
-            worktree_context,
+        launch_decision = self._frontier_launch_decision(
+            pow_wow_id=pow_wow_id,
+            target_project=target_project,
+            task=task,
+            context=worktree_context,
             dependency_results=dependency_results,
-            dependency_compactor=self.dependency_compactor,
-            audit_context_block=self._audit_context_block_for(
-                task,
-                target_project=target_project,
-                repo_path=worktree_path,
-            ),
+            harness=frontier,
+            model=model,
+            source_revision=worktree.head_sha,
         )
+        continuation_thread_id: str | None = None
+        match launch_decision:
+            case ResumeExisting(thread_id=thread_id):
+                continuation_thread_id = thread_id
+                prompt = build_resumed_senior_implementation_prompt(
+                    task,
+                    worktree_context,
+                    dependency_results=dependency_results,
+                    dependency_compactor=self.dependency_compactor,
+                )
+            case StartFreshBounded() | StartFreshIndependent():
+                prompt = build_agent_task_prompt(
+                    task,
+                    worktree_context,
+                    dependency_results=dependency_results,
+                    dependency_compactor=self.dependency_compactor,
+                    audit_context_block=self._audit_context_block_for(
+                        task,
+                        target_project=target_project,
+                        repo_path=worktree_path,
+                    ),
+                )
         command = self._build_agent_cli_command(
             frontier,
             model,
             prompt,
             posture,
             reasoning_effort=slot.reasoning_effort if slot else None,
+            continuation_thread_id=continuation_thread_id,
         )
         cleanup_error: str | None = None
         command_capture: CommandRunCapture | None = None
@@ -2391,6 +2660,8 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             cwd=worktree_path,
             worktree=worktree,
             is_review=is_review,
+            source_revision=worktree.head_sha,
+            resumed_thread_id=continuation_thread_id,
         )
         verification_captures: tuple[CommandRunCapture, ...] = ()
         verification: VerificationOutcome = VerificationNotDeclared()
@@ -2567,6 +2838,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             "harness": harness,
             "model": model,
             "is_review": is_review,
+            "launch_decision": _launch_decision_payload(launch_decision),
             "spawn_posture": describe_posture(posture),
             "permitted_capabilities": list(self._task_spawn_authority(task).to_names()),
             "task": task.to_payload(),
@@ -2707,7 +2979,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         context: PowWowExecutionContext,
         dependency_results: Sequence[PowWowTaskResult] = (),
     ) -> PowWowTaskResult:
-        slot = resolve_bench(task.judgment.tier, self.bench) if task.judgment else None
+        slot = self._task_bench_slot(task)
         frontier = self._resolve_frontier_harness(slot)
         if isinstance(frontier, LocalHarness):
             return self._build_local_harness_refusal_result(

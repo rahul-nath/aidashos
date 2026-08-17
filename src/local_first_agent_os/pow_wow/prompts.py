@@ -261,6 +261,88 @@ def build_agent_task_prompt(
     return "\n".join(lines)
 
 
+def build_resumed_senior_implementation_prompt(
+    task: PowWowTaskSpec,
+    context: PowWowExecutionContext,
+    *,
+    dependency_results: Sequence[PowWowTaskResult] = (),
+    dependency_compactor: ViewCompactor | None = None,
+) -> str:
+    """The bounded next turn for a senior reader thread becoming implementer."""
+
+    if task.planning_phase is not PlanningPhase.SENIOR_OWNED_PLAN:
+        raise ValueError("only senior_owned_plan may resume the senior reading thread")
+    reading_results = tuple(
+        result
+        for result in dependency_results
+        if any(
+            artifact.schema_version == "planning_evidence.v1"
+            and artifact.artifact_type == "senior_independent_reading"
+            and artifact.persisted_artifact_id is not None
+            for artifact in result.artifacts
+        )
+    )
+    if len(reading_results) != 1:
+        raise ValueError(
+            "resumed senior implementation requires exactly one persisted "
+            "senior_independent_reading artifact"
+        )
+    reading_result = reading_results[0]
+    reading_artifact = next(
+        artifact
+        for artifact in reading_result.artifacts
+        if artifact.schema_version == "planning_evidence.v1"
+        and artifact.artifact_type == "senior_independent_reading"
+        and artifact.persisted_artifact_id is not None
+    )
+    reading_output = reading_artifact.content.get("model_output")
+    if not isinstance(reading_output, str) or not reading_output.strip():
+        raise ValueError("persisted senior reading evidence requires non-empty model_output")
+    lines = [
+        "Continuation transition: senior_independent_reading -> senior_owned_plan.",
+        (
+            "Your independent repository reading and its reasoning are already in this Codex "
+            "thread. Do not repeat that exploration. The persisted reading below remains typed, "
+            "disputable evidence rather than an assumed premise. Re-check and revise its claims "
+            "as needed while reconciling them with the new dependency evidence."
+        ),
+        (
+            "The host has rebound this process to the assigned implementation worktree at "
+            f"{context.target_project_path}. Treat that path and the current process sandbox as "
+            "authoritative; do not edit the earlier read-only checkout."
+        ),
+        _render_planning_phase_contract(PlanningPhase.SENIOR_OWNED_PLAN),
+        f"You are the {task.role} for pow-wow task '{task.task_name}'.",
+        "The saga goal and engineering doctrine are unchanged from the prior turn.",
+        "Task:",
+        task.description,
+        "Persisted senior independent-reading evidence (planning_evidence.v1):",
+        _render_dependency_text_view(
+            reading_output,
+            source=(
+                f"{reading_result.task_name}:planning_evidence.v1:"
+                f"{reading_artifact.persisted_artifact_id}"
+            ),
+        ),
+    ]
+    if task.success_criteria:
+        lines.append("Success criteria:")
+        lines.extend(f"- {criterion}" for criterion in task.success_criteria)
+    dependency_block = render_dependency_context_block(
+        tuple(result for result in dependency_results if result is not reading_result),
+        compactor=dependency_compactor,
+    )
+    if dependency_block:
+        lines.append(dependency_block)
+    lines.append(
+        "Constraints: work only inside the assigned worktree; make the minimal necessary "
+        "change. Do NOT merge, rebase, switch branches, push, or deploy. The control plane "
+        "creates a branch checkpoint commit after required verification passes. Stop when "
+        "the task is complete."
+    )
+    return "\n".join(lines)
+
+
 def _render_planning_phase_contract(phase: PlanningPhase) -> str:
     common = (
         f"Planning visibility contract: {phase.value}. This phase is host-validated and its "
@@ -319,5 +401,6 @@ __all__ = [
     "build_assigned_worktree_context",
     "build_assigned_worktree_environment",
     "build_agent_task_prompt",
+    "build_resumed_senior_implementation_prompt",
     "render_dependency_context_block",
 ]

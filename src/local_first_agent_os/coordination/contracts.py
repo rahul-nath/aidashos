@@ -60,6 +60,7 @@ class CoordinationCommandName(StrEnum):
     DECIDE_EXECUTION_CHECKPOINT = "decide_execution_checkpoint"
     FAIL_SAGA_MILESTONE = "fail_saga_milestone"
     FAIL_TASK = "fail_task"
+    FIND_AGENT_CONTINUATION = "find_agent_continuation"
     GC = "gc"
     GET_ARTIFACT = "get_artifact"
     GET_EXECUTION_CHECKPOINT = "get_execution_checkpoint"
@@ -77,6 +78,7 @@ class CoordinationCommandName(StrEnum):
     LIST_EXECUTION_CHECKPOINTS = "list_execution_checkpoints"
     LIST_EXECUTION_EVENTS = "list_execution_events"
     LIST_EXECUTION_ARTIFACTS = "list_execution_artifacts"
+    LIST_FRONTIER_USAGE_RECORDS = "list_frontier_usage_records"
     LIST_INTEGRATION_REQUESTS = "list_integration_requests"
     LIST_LEDGER_EVENTS = "list_ledger_events"
     LIST_POW_WOWS = "list_pow_wows"
@@ -159,12 +161,15 @@ class CoordinationFlag(StrEnum):
     MAX_TOKENS = "--max-tokens"
     MILESTONE_ID = "--milestone-id"
     MODEL_ROLE = "--model-role"
+    MODEL = "--model"
     NO_NEXT_COMMANDS = "--no-next-commands"
     NO_SUBMIT_RESULT = "--no-submit-result"
     PARENT_INTENT_ID = "--parent-intent-id"
     PAYLOAD = "--payload"
     PAYLOAD_FILE = "--payload-file"
     PAYLOAD_SHA256 = "--payload-sha256"
+    PERMISSION_ENVELOPE_SHA256 = "--permission-envelope-sha256"
+    PLANNING_PHASE = "--planning-phase"
     POW_WOW_ID = "--pow-wow-id"
     PROMPT = "--prompt"
     REASON = "--reason"
@@ -176,6 +181,7 @@ class CoordinationFlag(StrEnum):
     RESOLVED_BY = "--resolved-by"
     REVOKED_BY = "--revoked-by"
     RESULT = "--result"
+    RESUMED_THREAD_ID = "--resumed-thread-id"
     RESULT_FILE = "--result-file"
     RESULT_JSON = "--result-json"
     RETENTION_SECONDS = "--retention-seconds"
@@ -188,6 +194,7 @@ class CoordinationFlag(StrEnum):
     OUTCOME = "--outcome"
     SESSION = "--session"
     SOURCE = "--source"
+    SOURCE_REVISION = "--source-revision"
     SOURCE_REPO_PATH = "--source-repo-path"
     STATE = "--state"
     STATUS = "--status"
@@ -198,6 +205,7 @@ class CoordinationFlag(StrEnum):
     TARGET_PROJECT_ID = "--target-project-id"
     TASK_GRAPH_JSON = "--task-graph-json"
     TASK_ID = "--task-id"
+    TASK_ROLE = "--task-role"
     TIER = "--tier"
     TITLE = "--title"
     TIMEOUT_SECONDS = "--timeout-seconds"
@@ -788,6 +796,13 @@ class OpenExecutionLease:
     timeout_seconds: int
     agent_tier: str | None = None
     agent_name: str | None = None
+    task_role: str | None = None
+    model: str | None = None
+    target_project_id: str | None = None
+    planning_phase: str | None = None
+    source_revision: str | None = None
+    permission_envelope_sha256: str | None = None
+    resumed_thread_id: str | None = None
     intent_id: str | None = None
     task_id: str | None = None
     worktree_path: str | None = None
@@ -807,6 +822,13 @@ class OpenExecutionLease:
         for flag, value in (
             (CoordinationFlag.AGENT_TIER, self.agent_tier),
             (CoordinationFlag.AGENT_NAME, self.agent_name),
+            (CoordinationFlag.TASK_ROLE, self.task_role),
+            (CoordinationFlag.MODEL, self.model),
+            (CoordinationFlag.TARGET_PROJECT_ID, self.target_project_id),
+            (CoordinationFlag.PLANNING_PHASE, self.planning_phase),
+            (CoordinationFlag.SOURCE_REVISION, self.source_revision),
+            (CoordinationFlag.PERMISSION_ENVELOPE_SHA256, self.permission_envelope_sha256),
+            (CoordinationFlag.RESUMED_THREAD_ID, self.resumed_thread_id),
             (CoordinationFlag.INTENT_ID, self.intent_id),
             (CoordinationFlag.TASK_ID, self.task_id),
             (CoordinationFlag.WORKTREE_PATH, self.worktree_path),
@@ -926,6 +948,42 @@ class ListExecutionEvents:
             CoordinationFlag.LIMIT.value,
             str(self.limit),
         ]
+
+
+@dataclass(frozen=True)
+class FindAgentContinuation:
+    source_task_id: str
+    pow_wow_id: str
+    harness: str
+    source_model: str | None
+    target_project_id: str
+    source_revision: str
+    name: CoordinationCommandName = CoordinationCommandName.FIND_AGENT_CONTINUATION
+
+    def to_argv(self) -> list[str]:
+        argv = [
+            self.name.value,
+            self.source_task_id,
+            CoordinationFlag.POW_WOW_ID.value,
+            self.pow_wow_id,
+            CoordinationFlag.AGENT_NAME.value,
+            self.harness,
+            CoordinationFlag.TARGET_PROJECT_ID.value,
+            self.target_project_id,
+            CoordinationFlag.SOURCE_REVISION.value,
+            self.source_revision,
+        ]
+        _append_option(argv, CoordinationFlag.MODEL, self.source_model)
+        return argv
+
+
+@dataclass(frozen=True)
+class ListFrontierUsageRecords:
+    lease_id: str
+    name: CoordinationCommandName = CoordinationCommandName.LIST_FRONTIER_USAGE_RECORDS
+
+    def to_argv(self) -> list[str]:
+        return [self.name.value, self.lease_id]
 
 
 @dataclass(frozen=True)
@@ -1120,6 +1178,8 @@ type TypedCoordinationCommand = (
     | RequestExecutionCancel
     | AppendExecutionEvent
     | ListExecutionEvents
+    | FindAgentContinuation
+    | ListFrontierUsageRecords
     | AttachExecutionArtifact
     | ListExecutionArtifacts
     | CreateExecutionCheckpoint
@@ -1188,6 +1248,7 @@ _ENTITY_FIELDS: Mapping[CoordinationCommandName, str] = {
     CoordinationCommandName.HEARTBEAT_EXECUTION_LEASE: "lease",
     CoordinationCommandName.REQUEST_EXECUTION_CANCEL: "lease",
     CoordinationCommandName.APPEND_EXECUTION_EVENT: "event",
+    CoordinationCommandName.FIND_AGENT_CONTINUATION: "continuation",
     CoordinationCommandName.ATTACH_EXECUTION_ARTIFACT: "execution_artifact",
     CoordinationCommandName.CREATE_EXECUTION_CHECKPOINT: "checkpoint",
     CoordinationCommandName.GET_EXECUTION_CHECKPOINT: "checkpoint",
@@ -1209,6 +1270,7 @@ _COLLECTION_FIELDS: Mapping[CoordinationCommandName, str] = {
     CoordinationCommandName.LIST_EXECUTION_EVENTS: "events",
     CoordinationCommandName.LIST_EXECUTION_ARTIFACTS: "execution_artifacts",
     CoordinationCommandName.LIST_EXECUTION_CHECKPOINTS: "checkpoints",
+    CoordinationCommandName.LIST_FRONTIER_USAGE_RECORDS: "usage_records",
 }
 
 
@@ -1292,6 +1354,7 @@ __all__ = [
     "DispatchTier",
     "EntityResult",
     "FailTask",
+    "FindAgentContinuation",
     "ExecutionLeaseTerminalStatus",
     "DecideExecutionCheckpoint",
     "GetGawdDoc",
@@ -1303,6 +1366,7 @@ __all__ = [
     "ListExecutionCheckpoints",
     "ListExecutionLeases",
     "ListExecutionEvents",
+    "ListFrontierUsageRecords",
     "ListExecutionArtifacts",
     "ListSagaMilestones",
     "ListSagas",

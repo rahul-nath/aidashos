@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import uuid
 from typing import Any
@@ -18,6 +19,7 @@ from ..contracts import (
     ProgressAssessmentStatus,
 )
 from .dispatch import dispatch_intent_to_dict, notify_dispatch_status_change
+from .frontier_usage import project_frontier_event
 from .store import (
     connect,
     decode_json_object,
@@ -30,6 +32,8 @@ from .store import (
     sql_status_list,
     tx,
 )
+
+logger = logging.getLogger(__name__)
 
 _EVENT_SOURCES = {"stdout", "stderr", "lifecycle"}
 _LEASE_LIVE = sql_status_list(LeaseStatus.ACTIVE, LeaseStatus.CANCEL_REQUESTED)
@@ -93,7 +97,7 @@ def append_execution_event(
     t = now()
     with tx() as c:
         lease = c.execute(
-            "SELECT lease_id FROM agent_execution_leases WHERE lease_id=?", (lease_id,)
+            "SELECT * FROM agent_execution_leases WHERE lease_id=?", (lease_id,)
         ).fetchone()
         if not lease:
             return err("lease_not_found", lease_id=lease_id)
@@ -187,10 +191,42 @@ def append_execution_event(
                     """,
                     (str(payload.get("error") or "assessment failed"), occurred_at, lease_id),
                 )
-    data = ok(created=created, event=execution_event_to_dict(event))
+    projection_error: str | None = None
+    try:
+        # The raw event is the evidence and has already committed. Projections
+        # are idempotent derived state on a separate transaction so malformed
+        # provider metadata cannot erase the event that lets us repair it.
+        with tx() as c:
+            project_frontier_event(
+                c,
+                lease=lease,
+                sequence=sequence,
+                kind=kind,
+                payload=payload,
+                created_at=t,
+            )
+    except Exception as exc:  # noqa: BLE001 - evidence must survive a derived-view defect
+        projection_error = f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "frontier event projection failed for lease %s sequence %s: %s",
+            lease_id,
+            sequence,
+            projection_error,
+        )
+    data = ok(
+        created=created,
+        event=execution_event_to_dict(event),
+        projection_error=projection_error,
+    )
     emit(
         "append_execution_event",
-        {"event_id": event_id, "lease_id": lease_id, "sequence": sequence, "kind": kind},
+        {
+            "event_id": event_id,
+            "lease_id": lease_id,
+            "sequence": sequence,
+            "kind": kind,
+            "projection_error": projection_error,
+        },
     )
     return data
 
