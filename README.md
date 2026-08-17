@@ -3,6 +3,9 @@
 Durable orchestration of coding agents on your own machine.
 This repository is the whole product.
 
+You write a design document.
+The system compiles it into a fixed plan, runs coding agents against that plan in isolated git worktrees, verifies their output with your project's own test commands, has a different vendor's model review the diff, and stops at an approval gate before anything merges.
+
 ## Start here
 
 Two commands, in this order:
@@ -48,8 +51,6 @@ A dispatched agent inside the system gets a different, deliberately smaller surf
 
 The rest of this README is what the system actually does.
 
-You write a design document.
-The system compiles it into a fixed plan, runs coding agents against that plan in isolated git worktrees, verifies their output with your project's own test commands, has a different vendor's model review the diff, and stops at an approval gate before anything merges.
 Every step writes a row to a local Postgres ledger as it happens, which is what makes it survivable: close the laptop mid-run and the next dispatch picks up from what the ledger says.
 
 Frontier agents (Claude Code and Codex today, swappable in config) run through their own headless CLIs under your existing subscriptions.
@@ -105,6 +106,7 @@ Junior is a local model making the cheap judgment calls, senior is the frontier 
 A **cast** is the other shape a dispatch can take, and it varies stance instead of seniority.
 It runs several roles concurrently on one question, each told to hold its stance rather than pre-compromise, and reduces them with a synthesizer that names the disagreements before resolving them.
 A member's role is also its `POLICIES.md` principal, since the capability gate resolves a role to a policy section before falling back to the seat, so per-stance privileges are a markdown section rather than a code change.
+
 The default cast seats every stance on the junior tier today, which measures one model's prior three times rather than three architectures.
 A tier names a seat rather than a model: `configs/staffing.toml` decides which harness and which model sit in each seat, and swapping one is a one-line edit with no code change.
 As staffed today that is Codex implementing and Claude Code reviewing; `configs/staffing.toml` is the one place that says so, and swapping it is a one-line edit.
