@@ -81,8 +81,82 @@ def capabilities_for_actions(
     )
 
 
+# --------------------------------------------------------------------------- #
+# The baseline envelope
+# --------------------------------------------------------------------------- #
+#
+# What a document gets when it declares no Permission Envelope of its own.
+#
+# It lives here, once, because two readers need it and they must not disagree:
+# `new_project_intake.permission_envelope_for_draft` writes it into the
+# finalized draft an operator approves, and `work_units.compiler` compiles it
+# into the capability ceiling every milestone runs under. A second copy in
+# either place would let an operator approve one envelope and an agent run
+# under another.
+#
+# What no build needs a grant for. Reading, recording, asking, and preparing a
+# worktree change nothing outside the run.
+BASELINE_AUTONOMOUS_ACTIONS: Final[tuple[PermissionAction, ...]] = (
+    PermissionAction.READ_REPO_CONTEXT,
+    PermissionAction.WRITE_LEDGER_ARTIFACTS,
+    PermissionAction.RUN_LOCAL_MODEL_DELEGATES,
+    PermissionAction.PREPARE_ISOLATED_WORKTREES,
+    PermissionAction.REQUEST_OPERATOR_DECISIONS,
+)
+
+# Writing an isolated worktree and running the declared tests: what "build" means
+# here, and the two capabilities without which no implement or verify milestone
+# can act at all.
+#
+# The two intake paths read this tuple differently, and the difference is
+# deliberate rather than drift.
+#
+# `new_project_intake` puts these in *requested*, because that path ends at a
+# real operator review - `/start /approved-gawd` on a finalized draft - and
+# these two are the substance of what is being approved there.
+#
+# `compiler` grants them *autonomously* to a document that declared no envelope
+# at all. That is not a relaxation: an undeclared document used to compile with
+# no ceiling whatsoever and no start approval, so the baseline replaces
+# unlimited-and-ungated with these-and-nothing-else. Making them requested
+# instead would put a mandatory approval in front of every document ever
+# compiled, and a gate that appears on everything is one an operator learns to
+# clear without reading - the same reflex this whole change exists to stop.
+#
+# A document that says nothing is not asking for anything, so there is nothing
+# to approve. A document that writes "Requested permissions:" is asking, and
+# `requires_start_approval` gates it.
+#
+# Reasons travel with the actions rather than being written at each call site,
+# because the reason is what the operator reads when deciding whether to grant.
+BASELINE_BUILD_ACTIONS: Final[tuple[tuple[PermissionAction, str], ...]] = (
+    (
+        PermissionAction.CODE_WORKTREE_WRITE,
+        "Implementation agents need isolated write access to complete build tasks.",
+    ),
+    (
+        PermissionAction.TEST_COMMAND_EXECUTION,
+        "Agents need to run verification commands from the approved GAWD doc.",
+    ),
+)
+
+# Never available to a document that did not name them. Each one is either
+# irreversible or spends something outside the run.
+BASELINE_DENIED_ACTIONS: Final[tuple[PermissionAction, ...]] = (
+    PermissionAction.MERGE_TO_MAIN,
+    PermissionAction.DEPLOY,
+    PermissionAction.PURCHASE_OR_SPEND,
+    PermissionAction.EXTERNAL_COMMUNICATIONS,
+    PermissionAction.SECRET_OR_CREDENTIAL_ACCESS,
+    PermissionAction.DESTRUCTIVE_FILE_OPERATIONS,
+)
+
+
 __all__ = [
     "ACTION_CAPABILITIES",
+    "BASELINE_AUTONOMOUS_ACTIONS",
+    "BASELINE_BUILD_ACTIONS",
+    "BASELINE_DENIED_ACTIONS",
     "PermissionAction",
     "capabilities_for_actions",
 ]

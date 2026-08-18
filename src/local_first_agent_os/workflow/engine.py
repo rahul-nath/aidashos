@@ -72,7 +72,9 @@ from ..merge_review import (
     review_packet_for_approval,
 )
 from ..new_project_intake import (
+    SCHEMA_VERSION_PERMISSION_ENVELOPE,
     SparseGawdDraft,
+    append_required_artifacts_section,
     build_durable_workflow_plan,
     build_gawd_review_tasks,
     build_reviewable_gawd_draft,
@@ -81,6 +83,7 @@ from ..new_project_intake import (
     parse_sparse_gawd_draft,
     refine_durable_workflow_plan_from_run_result,
     render_execution_milestones_markdown,
+    render_required_artifacts_markdown,
     replace_execution_milestones_section,
     task_graph_payload,
     write_gawd_review_files,
@@ -1257,7 +1260,12 @@ class WorkflowEngine(
                         ),
                         required_outputs=(
                             "finalized_gawd_draft.v1",
-                            "permission_envelope.v1",
+                            # Named by the constant, because this is the version
+                            # the artifact is actually submitted under a few
+                            # lines below. Written out as a literal it stayed at
+                            # v1 while the envelope moved to v2, and the pow-wow
+                            # would have asked for an output nothing produced.
+                            SCHEMA_VERSION_PERMISSION_ENVELOPE,
                             "durable_workflow_plan.v1",
                             "staff_final_verdict",
                         ),
@@ -1341,6 +1349,14 @@ class WorkflowEngine(
                 final_markdown = replace_execution_milestones_section(
                     final_markdown,
                     render_execution_milestones_markdown(durable_workflow_plan),
+                )
+                # The milestones above declare IMPLEMENT work, and the compiler
+                # rejects a plan that changes the system without naming terminal
+                # evidence. Written here rather than in the template so it stays
+                # consistent with the milestones just rendered beside it.
+                final_markdown = append_required_artifacts_section(
+                    final_markdown,
+                    render_required_artifacts_markdown(durable_workflow_plan),
                 )
                 finalized_path.write_text(final_markdown, encoding="utf-8")
                 finalization_succeeded = finalized_merge["status"] != "finalization_failed"

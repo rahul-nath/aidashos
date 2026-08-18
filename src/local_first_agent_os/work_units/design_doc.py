@@ -551,7 +551,25 @@ _PERMISSION_CATEGORY_LABELS: Final = {
     "denied without explicit approval": "denied",
     "denied without approval": "denied",
     "risks": "risks",
+    # Named, not merely tolerated. The keyword scan in `new_project_intake`
+    # writes its guesses under this label, and a guess must never become a
+    # grant: giving it a category of its own is what stops the lines from
+    # inheriting whichever category happened to precede them.
+    "suggested by keyword scan": "suggestions",
+    "suggestions": "suggestions",
 }
+
+# Categories that carry prose rather than actions. Lines under them are read by
+# the operator and by nothing else, so an unrecognized word there is not an
+# error the way an unrecognized action is.
+_NON_GRANTING_PERMISSION_CATEGORIES: Final = frozenset({"risks", "suggestions"})
+
+# Removed before the section is read line by line, rather than skipped per line,
+# because a comment spans lines and its interior lines carry no marker of their
+# own. The template explains this section inside a comment; without this, the
+# explanation's own words would be parsed as action names and every one of them
+# would be an `unknown_permission_action` error.
+_HTML_COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 
 
 def _parse_permission_envelope(
@@ -583,7 +601,7 @@ def _parse_permission_envelope(
     denied: list[PermissionAction] = []
     diagnostics: list[Diagnostic] = []
     category: str | None = None
-    for raw_line in section.body.splitlines():
+    for raw_line in _HTML_COMMENT_RE.sub("", section.body).splitlines():
         stripped = raw_line.strip()
         if not stripped:
             continue
@@ -592,7 +610,7 @@ def _parse_permission_envelope(
         if label in _PERMISSION_CATEGORY_LABELS and not stripped.startswith(("-", "*", "+")):
             category = _PERMISSION_CATEGORY_LABELS[label]
             continue
-        if category in {None, "risks"}:
+        if category is None or category in _NON_GRANTING_PERMISSION_CATEGORIES:
             continue
         action_name, separator, reason = unmarked.partition(":")
         try:
@@ -642,6 +660,26 @@ def _parse_permission_envelope(
         ),
         tuple(diagnostics),
     )
+
+
+def parse_declared_permission_envelope(
+    raw_content: str,
+) -> tuple[ParsedPermissionEnvelope | None, tuple[Diagnostic, ...]]:
+    """Read only the Permission Envelope a document declares, from raw text.
+
+    The intake path needs the declaration before the document is a
+    ``ParsedDesignDoc``: a sparse GAWD draft is finalized, reviewed, and
+    approved well before anything compiles it. Exposing this rather than letting
+    the intake grow its own reader is the whole point. The section is an
+    authoring contract with a closed vocabulary, and a second implementation of
+    it would be a second opinion about what the operator granted.
+
+    ``None`` means the document declared no envelope, which is different from
+    declaring an empty one: the first takes the baseline, the second grants
+    nothing and blocks.
+    """
+
+    return _parse_permission_envelope(_split_sections(raw_content))
 
 
 _CUT_MARKER_RE = re.compile(r"^\**\s*(?:cut|out of scope|non[- ]goals?|not doing)\b", re.IGNORECASE)
@@ -1223,5 +1261,6 @@ __all__ = [
     "apply_phase_inference",
     "normalize_heading",
     "normalize_milestone_key",
+    "parse_declared_permission_envelope",
     "parse_design_doc",
 ]

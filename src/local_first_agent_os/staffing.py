@@ -302,6 +302,77 @@ def resolve_bench_for_workload(
     )
 
 
+@dataclass(frozen=True)
+class SpawnableModel:
+    """One model id a dispatch could actually hand to a CLI, and why.
+
+    A tier is not one model. `resolve_bench_for_workload` swaps in a workload
+    profile's id, so a seat with an `independent_reading` profile can spawn two
+    different models depending on the task, and a probe that reads `slot.model`
+    proves exactly one of them.
+    """
+
+    tier: Tier
+    workload: JudgmentWorkload
+    harness: Harness
+    model: str | None
+    reasoning_effort: str | None
+
+    @property
+    def label(self) -> str:
+        """Names the workload only when it is not the seat's ordinary one."""
+
+        seat = self.tier.value
+        if self.workload is not JudgmentWorkload.STANDARD:
+            seat = f"{seat}[{self.workload.value}]"
+        return f"{seat} ({self.harness.value} {self.model or 'CLI default'})"
+
+
+def spawnable_models(bench: Bench | None = None) -> tuple[SpawnableModel, ...]:
+    """Every distinct model a dispatch could launch, across tiers and workloads.
+
+    Both readiness probes ask this rather than reading the bench themselves. They
+    used to iterate `bench.items()` and probe `slot.model`, which meant workload
+    profiles were never proved: `gpt-5.6-terra` sat in `configs/staffing.toml`
+    from 2026-08-16 as the senior reader's model, and on 2026-08-17 nothing had
+    ever asked whether that id exists. Nothing validates ids at load either, so
+    the first thing to find out would have been a dispatch, mid-run, on the
+    operator's quota. That is the exact failure `frontier_probe.py` was written
+    to prevent, one level down from where it was looking.
+
+    Resolved *through* `resolve_bench_for_workload` on purpose, rather than by
+    reading `workload_profiles` directly. That function is what dispatch calls,
+    so enumerating any other way would be a second opinion about which model runs
+    - and a probe that proves a model dispatch would not have used is worth
+    nothing. A new `JudgmentWorkload` member is covered here the day it is added.
+
+    Duplicates are dropped by (harness, model): a profile that only changes
+    reasoning effort names the same id, and proving it twice buys nothing while
+    costing a completion.
+    """
+
+    bench = bench if bench is not None else DEFAULT_BENCH
+    found: list[SpawnableModel] = []
+    seen: set[tuple[Harness, str | None]] = set()
+    for tier in sorted(bench, key=lambda item: item.value):
+        for workload in JudgmentWorkload:
+            slot = resolve_bench_for_workload(tier, workload, bench)
+            key = (slot.harness, slot.model)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(
+                SpawnableModel(
+                    tier=tier,
+                    workload=workload,
+                    harness=slot.harness,
+                    model=slot.model,
+                    reasoning_effort=slot.reasoning_effort,
+                )
+            )
+    return tuple(found)
+
+
 def dispatch_seat_counts(bench: Bench | None = None) -> dict[str, int]:
     """Per-tier concurrent dispatch seats: a tier's seat count IS its capacity.
 

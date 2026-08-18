@@ -142,7 +142,12 @@ import os
 import subprocess
 
 from local_first_agent_os.settings import get_settings
-from local_first_agent_os.staffing import FrontierHarness, classify_harness, load_bench
+from local_first_agent_os.staffing import (
+    FrontierHarness,
+    classify_harness,
+    load_bench,
+    spawnable_models,
+)
 
 OK = "  \033[32mok\033[0m      "
 MISSING = "  \033[33mmissing\033[0m "
@@ -161,23 +166,26 @@ def nonce_command(kind: FrontierHarness, model: str | None) -> list[str]:
     return command
 
 
-for tier, slot in sorted(bench.items(), key=lambda item: item[0].value):
-    kind = classify_harness(slot.harness)
+# Every model a dispatch could spawn, which is more than one per tier: a seat
+# with a workload profile swaps its model for reading tasks, and walking the
+# bench proved only the standard one. See `staffing.spawnable_models`.
+for spawnable in spawnable_models(bench):
+    kind = classify_harness(spawnable.harness)
     if not isinstance(kind, FrontierHarness):
         continue
-    label = f"{tier.value}: {slot.harness.value} --model {slot.model or '(CLI default)'}"
+    label = f"{spawnable.label}"
     if not probe:
         print(f"           {label}  (unproved; --probe-frontier-models proves the id)")
         continue
     try:
         completed = subprocess.run(
-            nonce_command(kind, slot.model),
+            nonce_command(kind, spawnable.model),
             capture_output=True,
             text=True,
             timeout=180,
         )
     except FileNotFoundError:
-        print(f"{MISSING} {label}: the {slot.harness.value} CLI is not installed")
+        print(f"{MISSING} {label}: the {spawnable.harness.value} CLI is not installed")
         print("           fix: ./scripts/install-frontier-clis.sh --install")
         continue
     except subprocess.TimeoutExpired:

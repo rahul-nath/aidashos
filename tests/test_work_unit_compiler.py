@@ -651,3 +651,117 @@ def test_a_declared_target_is_not_blocked() -> None:
     assert not [
         item for item in outcome.execution_blockers if "target project" in item
     ]
+
+
+def test_a_document_that_declares_no_envelope_still_compiles_a_ceiling() -> None:
+    """Silence is not unlimited authority.
+
+    A document with no Permission Envelope used to compile to
+    ``permission_policy is None``, which meant no ceiling at all: every
+    executor kept every capability it declared, including the one that
+    publishes a deployment, in a document that never said the word.
+
+    The baseline replaces that with read, write an isolated worktree, run the
+    declared tests, record artifacts, and ask. It adds no start approval,
+    because a document that asked for nothing has given the operator nothing to
+    approve, and a gate on every document is a gate nobody reads.
+    """
+
+    outcome = _compile(ACCEPTANCE_DESIGN_DOC)
+
+    assert isinstance(outcome, CompiledPlanOutcome)
+    assert outcome.plan.permission_policy is not None
+    policy = outcome.plan.permission_policy
+    assert policy.capability_ceiling == (
+        "ask_operator",
+        "invoke_model",
+        "read_repository",
+        "run_command",
+        "write_artifact",
+        "write_repository",
+    )
+    assert "publish_deployment" in policy.denied_capabilities
+    assert "spend_money" in policy.denied_capabilities
+    assert "merge_to_main" in policy.denied_capabilities
+    assert not policy.requires_start_approval
+    assert outcome.execution_blockers == ()
+    assert outcome.runnable
+    # The implement milestone still has what it needs to act.
+    implement = outcome.plan.milestone("c")
+    assert "write_repository" in implement.tool_policy.permitted_tools
+    assert "run_command" in implement.tool_policy.permitted_tools
+
+
+def test_an_undeclared_document_cannot_compile_a_deployer_that_cannot_deploy() -> None:
+    """The `deliver.deployment` counterpart of the 2026-08-10 empty-diff bug.
+
+    `publish_deployment` is the one capability an undeclared document loses to
+    the baseline ceiling, and `deliver.deployment` declares nothing else it
+    could act with. Without this the milestone compiles clean, passes its
+    `ALWAYS` approval gate, runs, and delivers nothing - a gate opening onto an
+    executor that was already disarmed.
+    """
+
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+### Milestone G: publish the release
+
+Phase: DELIVER
+Executor: deliver.deployment
+Depends on: F
+Acceptance: the deployment is live
+Artifacts: deployment_record
+"""
+    )
+
+    outcome = _compile(document)
+
+    assert isinstance(outcome, CompiledPlanOutcome)
+    blockers = [item for item in outcome.execution_blockers if "'g'" in item]
+    assert blockers, "a deployer with no deploy capability must block execution"
+    assert any("publish_deployment" in item for item in blockers)
+    # The message carries its own fix in the envelope's vocabulary.
+    assert any("'deploy'" in item for item in blockers)
+    assert not outcome.runnable
+
+
+def test_declaring_deploy_lets_the_same_document_compile_runnable() -> None:
+    """The declared counterpart: the document says deploy, so it may deploy."""
+
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+### Milestone G: publish the release
+
+Phase: DELIVER
+Executor: deliver.deployment
+Depends on: F
+Acceptance: the deployment is live
+Artifacts: deployment_record
+
+## Permission Envelope
+
+Autonomous permissions:
+- read_repo_context
+- code_worktree_write
+- test_command_execution
+- write_ledger_artifacts
+- run_local_model_delegates
+- request_operator_decisions
+- deploy
+
+Denied without explicit approval:
+- merge_to_main
+- external_communications
+"""
+    )
+
+    outcome = _compile(document)
+
+    assert isinstance(outcome, CompiledPlanOutcome)
+    assert outcome.execution_blockers == ()
+    assert outcome.runnable
+    assert "publish_deployment" in outcome.plan.milestone("g").tool_policy.permitted_tools

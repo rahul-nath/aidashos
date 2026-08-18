@@ -26,7 +26,14 @@ import subprocess
 from dataclasses import dataclass
 
 from .settings import get_settings
-from .staffing import Bench, FrontierHarness, Tier, classify_harness, load_bench
+from .staffing import (
+    Bench,
+    FrontierHarness,
+    Tier,
+    classify_harness,
+    load_bench,
+    spawnable_models,
+)
 
 _NONCE = "Reply with exactly: ok"
 _TIMEOUT_SECONDS = 180
@@ -61,7 +68,15 @@ def nonce_command(kind: FrontierHarness, model: str | None) -> list[str]:
 
 
 def probe_bench(bench: Bench) -> tuple[TierProof, ...]:
-    """Ask every staffed frontier tier its one question.
+    """Ask every model a dispatch could spawn its one question.
+
+    Every model, not every tier. This used to walk `bench.items()` and probe
+    `slot.model`, which proved the standard workload and silently skipped the
+    rest: a seat with an `independent_reading` profile spawns a different id for
+    reading tasks, and that id was never asked anything. `gpt-5.6-terra` sat in
+    `configs/staffing.toml` unproved from the day it was configured. The
+    enumeration now comes from `staffing.spawnable_models`, which resolves
+    through the same function dispatch uses.
 
     Local tiers are skipped rather than reported as unproved: the junior tier
     answers its own readiness proof against the model server, and a harness with
@@ -69,21 +84,21 @@ def probe_bench(bench: Bench) -> tuple[TierProof, ...]:
     """
 
     proofs: list[TierProof] = []
-    for tier, slot in sorted(bench.items(), key=lambda item: item[0].value):
-        kind = classify_harness(slot.harness)
+    for spawnable in spawnable_models(bench):
+        kind = classify_harness(spawnable.harness)
         if not isinstance(kind, FrontierHarness):
             continue
-        label = f"{tier.value} ({slot.harness.value} {slot.model or 'CLI default'})"
+        tier, label = spawnable.tier, spawnable.label
         try:
             completed = subprocess.run(
-                nonce_command(kind, slot.model),
+                nonce_command(kind, spawnable.model),
                 capture_output=True,
                 text=True,
                 timeout=_TIMEOUT_SECONDS,
             )
         except FileNotFoundError:
             proofs.append(
-                TierProof(tier, label, False, f"the {slot.harness.value} CLI is not installed")
+                TierProof(tier, label, False, f"the {spawnable.harness.value} CLI is not installed")
             )
             continue
         except subprocess.TimeoutExpired:

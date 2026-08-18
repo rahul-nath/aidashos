@@ -50,6 +50,11 @@ Keep these boundaries straight:
 - `workflow/engine.py` owns Pi directive workflows and injects the junior delegate path.
 - `pi_daemon.py` and `session_memory.py` provide resident local services; the terminal client is thin.
 
+All four travel to the public snapshot, because this skill links to them and a
+link that resolves only for its author is worse than no link. `public_import.toml`
+names them individually and `tests/test_traveling_document_links.py` fails if that
+stops being true.
+
 Read [docs/decomposition_dispatch.md](../../docs/decomposition_dispatch.md)
 before changing planner, dispatcher, pow-wow scheduling, or subagent behavior.
 Read [docs/completed/role_model_and_staffing_design.md](../../docs/completed/role_model_and_staffing_design.md)

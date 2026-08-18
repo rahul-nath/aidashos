@@ -40,7 +40,13 @@ from .executors import (
     lookup_executor,
 )
 from .lifecycle import FailureClass, LifecyclePhase, phase_ordinal
-from .permissions import ACTION_CAPABILITIES, capabilities_for_actions
+from .permissions import (
+    ACTION_CAPABILITIES,
+    BASELINE_AUTONOMOUS_ACTIONS,
+    BASELINE_BUILD_ACTIONS,
+    BASELINE_DENIED_ACTIONS,
+    capabilities_for_actions,
+)
 from .plan import (
     COMPILER_VERSION,
     DEFAULT_AUTHORITY_POLICY,
@@ -68,7 +74,19 @@ _BLOCKING_QUESTION_RE: Final = re.compile(r"\bblocking\b", re.IGNORECASE)
 # spawn a process that changes nothing - observed live on 2026-08-10, when a
 # prose-only envelope compiled every implement milestone to an empty tool policy
 # and the failure surfaced as an empty diff two dispatches deep.
-_ACT_CAPABILITIES: Final = (Capability.WRITE_REPOSITORY, Capability.RUN_COMMAND)
+#
+# `publish_deployment` joined the list when the baseline envelope did. It is the
+# only capability an undeclared document loses to the baseline ceiling, and
+# `deliver.deployment` declares nothing else it could act with: without this
+# entry, a deploy milestone in a document that never wrote `deploy` compiles to
+# a read-only deployer, reports no blocker, and fails as a delivery that
+# silently delivered nothing. Its `ALWAYS` approval does not help, because the
+# gate opens onto an executor that already cannot deploy.
+_ACT_CAPABILITIES: Final = (
+    Capability.WRITE_REPOSITORY,
+    Capability.RUN_COMMAND,
+    Capability.PUBLISH_DEPLOYMENT,
+)
 
 
 def _narrowest_envelope_action(capability: Capability) -> str:
@@ -151,13 +169,48 @@ def _blocking_questions(parsed: ParsedDesignDoc) -> tuple[str, ...]:
     )
 
 
-def _permission_policy(parsed: ParsedDesignDoc) -> PermissionPolicy | None:
+def _permission_policy(parsed: ParsedDesignDoc) -> PermissionPolicy:
+    """The ceiling this plan runs under, declared or baseline, never absent.
+
+    A document that declares an envelope gets exactly what it declared. A
+    document that declares none gets the baseline from ``permissions``, which is
+    the same envelope the intake path writes into a finalized draft.
+
+    Returning a policy for every document, rather than ``None`` for the silent
+    ones, is the point. ``None`` meant no ceiling at all, so a document that
+    never mentioned deploying still compiled to milestones permitted to deploy.
+    The baseline replaces unlimited with read, write an isolated worktree, run
+    the declared tests, record artifacts, and ask - and nothing else. Everything
+    irreversible is outside the ceiling, where a milestone that needs it gets a
+    blocker naming the action to declare rather than a quietly disarmed
+    executor.
+
+    The baseline's build actions are autonomous, not requested, so silence adds
+    no start approval. See ``BASELINE_BUILD_ACTIONS`` for why: a gate that
+    appears on every document teaches the operator to clear it unread, which is
+    the failure this whole envelope exists to avoid.
+
+    It is also what lets a fully specified document reach execution without the
+    intake pow-wow. Producing the envelope was the pow-wow's remaining reason to
+    exist for such documents; a deterministic function that needs no model can
+    produce it here, offline and identically on every host, which is what the
+    plan hash requires.
+    """
+
     envelope = parsed.permission_envelope
     if envelope is None:
-        return None
-    autonomous = capabilities_for_actions(envelope.autonomous)
-    requested = capabilities_for_actions(tuple(item.action for item in envelope.requested))
-    denied = capabilities_for_actions(envelope.denied_without_approval)
+        autonomous = capabilities_for_actions(
+            (
+                *BASELINE_AUTONOMOUS_ACTIONS,
+                *(action for action, _reason in BASELINE_BUILD_ACTIONS),
+            )
+        )
+        requested = ()
+        denied = capabilities_for_actions(BASELINE_DENIED_ACTIONS)
+    else:
+        autonomous = capabilities_for_actions(envelope.autonomous)
+        requested = capabilities_for_actions(tuple(item.action for item in envelope.requested))
+        denied = capabilities_for_actions(envelope.denied_without_approval)
     return PermissionPolicy(
         autonomous_capabilities=tuple(item.value for item in autonomous),
         approval_required_capabilities=tuple(item.value for item in requested),
@@ -402,9 +455,7 @@ def compile_design_doc(
     spans: dict[str, SourceSpan] = {}
     declared_keys = {candidate.declared_key for candidate in parsed.milestone_candidates}
     permission_policy = _permission_policy(parsed)
-    capability_ceiling = (
-        frozenset(permission_policy.capability_ceiling) if permission_policy is not None else None
-    )
+    capability_ceiling = frozenset(permission_policy.capability_ceiling)
 
     for candidate in parsed.milestone_candidates:
         spans[candidate.declared_key] = candidate.span
@@ -470,7 +521,7 @@ def compile_design_doc(
         permitted = tuple(
             capability.value
             for capability in declaration.permitted_tools
-            if capability_ceiling is None or capability.value in capability_ceiling
+            if capability.value in capability_ceiling
         )
         stripped_act_capabilities = tuple(
             capability

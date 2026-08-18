@@ -22,6 +22,7 @@ import tomllib
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Final
 from uuid import uuid4
@@ -30,9 +31,24 @@ from .archetype_planners import ArchetypeMilestoneTemplate, plan_saas_archetype
 from .constants import CLI_AGENT_RUN_ARTIFACT_TYPE, DELEGATED_TASK_RUN_ARTIFACT_TYPE
 from .pow_wow import PowWowRunResult, PowWowTaskSpec
 from .staffing import JudgmentRole, Tier
+from .work_units.design_doc import parse_declared_permission_envelope
+from .work_units.permissions import (
+    ACTION_CAPABILITIES,
+    BASELINE_AUTONOMOUS_ACTIONS,
+    BASELINE_BUILD_ACTIONS,
+    BASELINE_DENIED_ACTIONS,
+    PermissionAction,
+    capabilities_for_actions,
+)
 
 SCHEMA_VERSION_SPARSE_GAWD_DRAFT = "sparse_gawd_draft.v1"
-SCHEMA_VERSION_PERMISSION_ENVELOPE = "permission_envelope.v1"
+# v2 because the payload gained `source` and `suggestions`, and because the two
+# together change what the old `risks` note meant. Under v1 every envelope was
+# heuristic and the note said so. Under v2 a declared envelope is not heuristic
+# at all, the keyword scan's guesses are carried separately from what was
+# granted, and a reader that assumed v1's "requested_permissions came from a
+# substring scan" would now be wrong about the one field that matters most.
+SCHEMA_VERSION_PERMISSION_ENVELOPE = "permission_envelope.v2"
 SCHEMA_VERSION_FINALIZED_GAWD_DRAFT = "finalized_gawd_draft.v1"
 SCHEMA_VERSION_DURABLE_WORKFLOW_PLAN = "durable_workflow_plan.v1"
 
@@ -112,11 +128,53 @@ class PermissionRequest:
 
 
 @dataclass(frozen=True)
+class PermissionSuggestion:
+    """Something the keyword scan noticed, which nobody has granted.
+
+    Separate from `PermissionRequest` because the difference is the whole point.
+    A request is in the envelope an operator approves; a suggestion is a note
+    saying the draft's prose contains a word that sometimes means this action.
+
+    `matched_terms` exists so the operator can dismiss a wrong guess without
+    rereading the draft. The scan once requested `spend_money` for an offline
+    iOS app because the phrase "paid Apple Developer Program membership"
+    contains "paid", and `deploy` because "Deploy is an Xcode build-and-run".
+    Neither was visible as a substring collision until the matched term was
+    printed next to the guess.
+    """
+
+    permission: str
+    reason: str
+    matched_terms: tuple[str, ...]
+
+    def to_payload(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class PermissionEnvelopeSource(StrEnum):
+    """Where the granted half of an envelope came from.
+
+    Recorded rather than inferred, because the reader that matters is a human
+    deciding whether to approve. "The draft asked for this" and "nobody said, so
+    this is the safe default" are different decisions, and an envelope that
+    cannot tell them apart teaches the operator to skim.
+    """
+
+    DECLARED = "declared"
+    """Read from the document's own `## Permission Envelope` section."""
+
+    BASELINE = "baseline"
+    """The document declared none, so it received the shared safe default."""
+
+
+@dataclass(frozen=True)
 class PermissionEnvelope:
     autonomous_permissions: tuple[str, ...]
     requested_permissions: tuple[PermissionRequest, ...]
     denied_without_approval: tuple[str, ...]
     risks: tuple[str, ...]
+    source: PermissionEnvelopeSource = PermissionEnvelopeSource.BASELINE
+    suggestions: tuple[PermissionSuggestion, ...] = ()
     schema_version: str = SCHEMA_VERSION_PERMISSION_ENVELOPE
 
     def to_payload(self) -> dict[str, Any]:
@@ -124,6 +182,8 @@ class PermissionEnvelope:
         payload["requested_permissions"] = [
             permission.to_payload() for permission in self.requested_permissions
         ]
+        payload["suggestions"] = [suggestion.to_payload() for suggestion in self.suggestions]
+        payload["source"] = self.source.value
         return payload
 
 
@@ -502,7 +562,6 @@ def build_durable_workflow_plan(
                 approval_keywords,
             ),
             evidence_to_record=_workflow_evidence(
-                draft,
                 milestone,
                 archetype_templates_by_id.get(milestone.milestone_id),
             ),
@@ -685,6 +744,58 @@ _ARTIFACT_FOR_PHASE: Final = {
 }
 
 
+_REQUIRED_ARTIFACTS_HEADING = "## Required Artifacts"
+
+
+def render_required_artifacts_markdown(plan: DurableWorkflowPlan) -> str:
+    """The document-level delivery contract, derived from the plan's own phases.
+
+    The compiler refuses any plan that declares an IMPLEMENT milestone and names
+    no terminal evidence, either as a DELIVER milestone or as this section
+    (`work_units/compiler`, `missing_delivery_contract`). Intake emitted neither,
+    so every finalized document failed to compile on a document it had itself
+    just written - the last of the reasons a fully specified draft still needed a
+    human to retype it before `compile_design_doc` would take it.
+
+    Derived rather than guessed. The artifact kinds are exactly the ones the
+    milestones already promise through `_ARTIFACT_FOR_PHASE`, so this section
+    restates the plan's own outputs and cannot ask for evidence no executor in
+    the plan produces. A DELIVER milestone is deliberately not invented here:
+    whether work ships is the operator's call, and a plan that quietly grew a
+    deployment step would be the compiler enforcing a decision nobody made.
+    """
+
+    ordered_phases = ("PLAN", "IMPLEMENT", "VERIFY", "REVIEW", "DELIVER")
+    present = {step.phase for step in plan.steps}
+    artifacts = [_ARTIFACT_FOR_PHASE[phase] for phase in ordered_phases if phase in present]
+    if not artifacts:
+        return ""
+    # Body is bullets and nothing else. `_bullet_lines` keeps every non-empty
+    # line that is not a heading, so a sentence explaining the section becomes an
+    # entry in it: the first draft of this function put one line of prose here and
+    # the compiler dutifully required an artifact called "Terminal evidence for
+    # this plan, derived from the phases its milestones declare." The explanation
+    # belongs in this docstring, where no parser will mistake it for a promise.
+    lines = [
+        _REQUIRED_ARTIFACTS_HEADING,
+        "",
+        *(f"- {artifact}" for artifact in artifacts),
+    ]
+    return "\n".join(lines)
+
+
+def append_required_artifacts_section(markdown: str, rendered: str) -> str:
+    """Add the delivery contract, unless the document already states one.
+
+    An operator who wrote the section themselves outranks the derivation, and a
+    second heading would be a duplicate section rather than a stronger promise.
+    """
+
+    if not rendered.strip() or _REQUIRED_ARTIFACTS_HEADING in markdown:
+        return markdown
+    return f"{markdown.rstrip()}\n\n{rendered}\n"
+
+
 def replace_execution_milestones_section(markdown: str, rendered: str) -> str:
     """Put the rendered milestones under section 8, replacing what was there.
 
@@ -756,6 +867,31 @@ _STAFF_VERDICT_PLACEHOLDER = (
 _TOML_FENCE_RE = re.compile(r"```toml\n.*?```", re.DOTALL)
 
 
+def _as_quoted_transcript(body: str) -> str:
+    """Blockquote model output so it reads as evidence and parses as nothing.
+
+    The senior and staff turns return free markdown, and the merge step pastes it
+    into the document the compiler reads. A model asked to expand a spec restates
+    that spec's headings, so `## Permission Envelope` appeared twice and
+    `compile_design_doc` rejected the finalized document with
+    `duplicate_permission_envelope` - a spec made uncompilable by the transcript
+    of how it was written.
+
+    Quoting rather than deleting, because the staff verdict is what an operator
+    approves against and a sidecar they have to open separately is a verdict they
+    will not read. Quoting rather than fencing, because `_HEADING_RE` scans with
+    `re.MULTILINE` and no fence awareness: a `##` inside a code block is still a
+    heading to it.
+
+    A `>` prefix is enough for both readers. `_HEADING_RE` and `_FIELD_RE` are
+    anchored at line start, so no quoted line can become a section, a milestone,
+    or a typed field, and every markdown renderer shows the block as the quotation
+    it is.
+    """
+
+    return "\n".join(f"> {line}" if line.strip() else ">" for line in body.splitlines())
+
+
 def _model_output_for_task(run_result: PowWowRunResult, task_name: str) -> str | None:
     for task in run_result.tasks:
         if task.task_name != task_name:
@@ -821,7 +957,10 @@ def merge_pow_wow_result_into_gawd_review_markdown(
             "(durable workflow plan rendered into the Execution Milestones section)",
             senior_text,
         ).strip()
-        senior_section = f"## Senior Spec Completion (Model Output)\n{senior_body}\n\n"
+        senior_section = (
+            "## Senior Spec Completion (Model Output)\n"
+            f"{_as_quoted_transcript(senior_body)}\n\n"
+        )
         markdown = markdown.replace(
             "## Permission Envelope", f"{senior_section}## Permission Envelope", 1
         )
@@ -832,7 +971,7 @@ def merge_pow_wow_result_into_gawd_review_markdown(
         ).strip()
         markdown = markdown.replace(
             _STAFF_VERDICT_PLACEHOLDER,
-            f"## Staff Verdict\n{staff_body}",
+            f"## Staff Verdict\n{_as_quoted_transcript(staff_body)}",
             1,
         )
     if senior_text is None and staff_text is None:
@@ -997,84 +1136,212 @@ def task_graph_payload(
     return payload
 
 
-def permission_envelope_for_draft(draft: SparseGawdDraft) -> PermissionEnvelope:
-    raw = draft.raw_text.lower()
-    requested: list[PermissionRequest] = [
-        PermissionRequest(
-            permission="code_worktree_write",
-            reason="Implementation agents need isolated write access to complete build tasks.",
-        ),
-        PermissionRequest(
-            permission="test_command_execution",
-            reason="Agents need to run verification commands from the approved GAWD doc.",
-        ),
-    ]
-    if _mentions_any(raw, ("install", "package", "dependency", "npm", "pnpm", "pip", "uv ")):
-        requested.append(
-            PermissionRequest(
-                permission="dependency_install",
-                reason="Draft mentions package/dependency work.",
-            )
-        )
-    if _mentions_any(raw, ("http", "api", "web", "download", "github", "network")):
-        requested.append(
-            PermissionRequest(
-                permission="network_access",
-                reason="Draft appears to require external lookup or networked services.",
-            )
-        )
-    if _mentions_any(raw, ("deploy", "production", "release", "ship")):
-        requested.append(
-            PermissionRequest(
-                permission="deploy",
-                reason="Draft mentions deployment or release activity.",
-            )
-        )
-    if _mentions_any(raw, ("email", "slack", "message customer", "post ", "send ")):
-        requested.append(
-            PermissionRequest(
-                permission="external_communications",
-                reason="Draft may involve outbound communication.",
-            )
-        )
-    if _mentions_any(raw, ("buy", "purchase", "paid", "stripe", "billing", "credit card")):
-        requested.append(
-            PermissionRequest(
-                permission="spend_money",
-                reason="Draft may involve paid services or purchases.",
-            )
-        )
+# What the keyword scan looks for, and what it would mean if the word were used
+# in the sense the scan assumes. Data rather than a chain of `if` statements so
+# that the matched term can be reported next to the guess: the terms are the
+# evidence, and a guess that cannot show its evidence cannot be dismissed
+# without rereading the draft.
+#
+# Every entry here is a substring test over lowercased prose, which is a weak
+# instrument and is meant to stay one. It runs over the whole document, so it
+# cannot tell "deploy the build" from "Deploy is an Xcode build-and-run", and it
+# has no way to notice that the same draft says "no API spend". That is
+# tolerable for a suggestion and was not tolerable for a grant.
+_PERMISSION_SCAN_TERMS: Final[tuple[tuple[PermissionAction, str, tuple[str, ...]], ...]] = (
+    (
+        PermissionAction.DEPENDENCY_INSTALL,
+        "Draft mentions package/dependency work.",
+        ("install", "package", "dependency", "npm", "pnpm", "pip", "uv "),
+    ),
+    (
+        PermissionAction.NETWORK_ACCESS,
+        "Draft appears to require external lookup or networked services.",
+        ("http", "api", "web", "download", "github", "network"),
+    ),
+    (
+        PermissionAction.DEPLOY,
+        "Draft mentions deployment or release activity.",
+        ("deploy", "production", "release", "ship"),
+    ),
+    (
+        PermissionAction.EXTERNAL_COMMUNICATIONS,
+        "Draft may involve outbound communication.",
+        ("email", "slack", "message customer", "post ", "send "),
+    ),
+    (
+        PermissionAction.SPEND_MONEY,
+        "Draft may involve paid services or purchases.",
+        ("buy", "purchase", "paid", "stripe", "billing", "credit card"),
+    ),
+)
 
-    denied = (
-        "merge_to_main",
-        "deploy",
-        "purchase_or_spend",
-        "external_communications",
-        "secret_or_credential_access",
-        "destructive_file_operations",
+
+_HTML_COMMENT_RE: Final = re.compile(r"<!--.*?-->", re.DOTALL)
+_PERMISSION_SECTION_RE: Final = re.compile(
+    r"^##\s+[^\n]*permission envelope[^\n]*$.*?(?=^##\s|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+
+
+def _scannable_prose(raw_text: str) -> str:
+    """The part of a draft that describes the project, lowercased.
+
+    Two things are removed first, and both would otherwise make the scan report
+    its own furniture as findings about the build.
+
+    The Permission Envelope section is a declaration, not a description. It
+    names actions in the closed vocabulary, and several of those names contain
+    the scan's own terms - `dependency_install` contains "install",
+    `network_access` contains "network" - so scanning it made every draft
+    suggest the permissions the template happened to list, including a blank
+    one nobody had written a word into yet.
+
+    HTML comments are instructions to the operator about how to fill the
+    template in. They are not claims about the project, and the template's
+    comments talk about registries, APIs, and installs purely as explanation.
+    """
+
+    without_comments = _HTML_COMMENT_RE.sub(" ", raw_text)
+    return _PERMISSION_SECTION_RE.sub(" ", without_comments).lower()
+
+
+def permission_scan_suggestions(
+    draft: SparseGawdDraft,
+    *,
+    already_decided: tuple[PermissionAction, ...],
+) -> tuple[PermissionSuggestion, ...]:
+    """Read the draft's prose for permissions nobody declared.
+
+    Advisory by construction. The result never reaches
+    `PermissionEnvelope.requested_permissions`; it reaches `suggestions`, which
+    grants nothing and compiles to no capability. An action the envelope already
+    settles - granted, requested, or denied - is dropped rather than repeated,
+    because a suggestion to consider something already decided is noise at the
+    exact moment attention is scarce.
+
+    "Already settled" is measured in capabilities, not action names. The
+    vocabulary has two names for spending - `spend_money` and
+    `purchase_or_spend` - and the baseline denies the second, so an envelope
+    that has already refused to spend would otherwise print a suggestion to
+    consider spending. Read as a contradiction, it is really the same capability
+    twice.
+    """
+
+    decided = set(capabilities_for_actions(already_decided))
+    raw = _scannable_prose(draft.raw_text)
+    suggestions: list[PermissionSuggestion] = []
+    for action, reason, terms in _PERMISSION_SCAN_TERMS:
+        if set(ACTION_CAPABILITIES[action]) <= decided:
+            continue
+        matched = tuple(term for term in terms if term in raw)
+        if matched:
+            suggestions.append(
+                PermissionSuggestion(
+                    permission=action.value,
+                    reason=reason,
+                    matched_terms=matched,
+                )
+            )
+    return tuple(suggestions)
+
+
+def permission_envelope_for_draft(draft: SparseGawdDraft) -> PermissionEnvelope:
+    """The envelope this draft carries into operator review.
+
+    Declaration first, exactly as milestones work. `compile_design_doc` finds a
+    milestone by its `### Milestone N:` heading and typed fields and by nothing
+    else, because inferring them from punctuation once turned a GAWD doc's
+    fourteen ordinary sections into fourteen fake milestones. Permissions were
+    still inferred, from substrings, and produced the same class of result:
+    a real offline iOS app draft requested `dependency_install` because "app
+    installs on the physical iPhone" contains "install", `deploy` because
+    "Deploy is an Xcode build-and-run" contains "deploy", and `spend_money`
+    because "paid Apple Developer Program membership" contains "paid" - in a
+    document that says in its own words that there is no API spend and no
+    network dependency at runtime.
+
+    Over-requesting is not a harmless default. These are the permissions that
+    decide whether an agent may spend money or deploy, and an envelope that asks
+    for them on every document teaches the operator that the answer is always
+    yes. The scan therefore survives only as `suggestions`.
+
+    A draft that declares the section gets what it declared. A draft that
+    declares none gets the baseline from `work_units.permissions`, which is the
+    same baseline `compile_design_doc` applies, so the envelope an operator
+    approves and the ceiling a milestone runs under cannot differ.
+    """
+
+    declared, diagnostics = parse_declared_permission_envelope(draft.raw_text)
+
+    if declared is None:
+        source = PermissionEnvelopeSource.BASELINE
+        autonomous_actions = BASELINE_AUTONOMOUS_ACTIONS
+        requested_actions = BASELINE_BUILD_ACTIONS
+        denied_actions = BASELINE_DENIED_ACTIONS
+    else:
+        source = PermissionEnvelopeSource.DECLARED
+        autonomous_actions = declared.autonomous
+        requested_actions = tuple(
+            (item.action, item.reason or "Declared in the draft's Permission Envelope.")
+            for item in declared.requested
+        )
+        denied_actions = declared.denied_without_approval
+
+    autonomous = tuple(action.value for action in autonomous_actions)
+    requested = tuple(
+        PermissionRequest(permission=action.value, reason=reason)
+        for action, reason in requested_actions
     )
+    denied = tuple(action.value for action in denied_actions)
+
+    suggestions = permission_scan_suggestions(
+        draft,
+        already_decided=(
+            *autonomous_actions,
+            *(action for action, _reason in requested_actions),
+            *denied_actions,
+        ),
+    )
+
     risks = tuple(
         item
         for item in (
             "Sparse draft still has unresolved sections; keep execution blocked until reviewed."
             if draft.unresolved_questions
             else "",
-            "Permission envelope is heuristic and must be operator-approved before execution.",
+            (
+                "Permission envelope is declared by the draft; approve it against what the "
+                "draft actually says it does."
+                if source is PermissionEnvelopeSource.DECLARED
+                else "Draft declares no Permission Envelope, so this is the shared baseline. "
+                "Anything beyond it must be declared in the draft, not inferred."
+            ),
+            # Named as a risk because the parser reports it and nothing else
+            # would. A misspelled action is an error at compile time; saying so
+            # here is what lets the operator fix the draft before then.
+            (
+                "Declared Permission Envelope has parse errors: "
+                + "; ".join(item.message for item in diagnostics)
+                if diagnostics
+                else ""
+            ),
+            (
+                "Keyword scan suggests unrequested permissions; they are suggestions, not "
+                "grants, and each names the term that triggered it."
+                if suggestions
+                else ""
+            ),
             "Finalized draft preserves non-goals to reduce intent drift.",
         )
         if item
     )
     return PermissionEnvelope(
-        autonomous_permissions=(
-            "read_repo_context",
-            "write_ledger_artifacts",
-            "run_local_model_delegates",
-            "prepare_isolated_worktrees",
-            "request_operator_decisions",
-        ),
-        requested_permissions=tuple(requested),
+        autonomous_permissions=autonomous,
+        requested_permissions=requested,
         denied_without_approval=denied,
         risks=risks,
+        source=source,
+        suggestions=suggestions,
     )
 
 
@@ -1230,6 +1497,12 @@ def render_gawd_review_markdown(draft: SparseGawdDraft, envelope: PermissionEnve
         _bullets(draft.deferred or ("Richer TUI form for drafting the same file contract.",)),
         "",
         "## Permission Envelope",
+        # Stated in the document, because the document is what an operator reads
+        # and later what `compile_design_doc` parses. An envelope that does not
+        # say where it came from reads identically whether the author chose it
+        # or nobody did.
+        f"Source: {envelope.source.value}",
+        "",
         "Autonomous permissions:",
         _bullets(envelope.autonomous_permissions),
         "",
@@ -1246,6 +1519,20 @@ def render_gawd_review_markdown(draft: SparseGawdDraft, envelope: PermissionEnve
         "",
         "Risks:",
         _bullets(envelope.risks),
+        "",
+        # Last, and under a label the parser knows is non-granting. If this
+        # block ever landed under one of the three category labels above, a
+        # substring guess would compile into a capability, which is the bug this
+        # whole section exists to end.
+        "Suggested by keyword scan:",
+        _bullets(
+            tuple(
+                f"{suggestion.permission}: {suggestion.reason} "
+                f"(matched: {', '.join(suggestion.matched_terms)})"
+                for suggestion in envelope.suggestions
+            )
+            or ("none",)
+        ),
         "",
         "## Staff Verdict",
         "FINALIZED_DRAFT. Ready for operator review; execution remains blocked until approval.",
@@ -1393,7 +1680,61 @@ wrong: `REVIEW` defaults to `review.agent`, which cannot produce an
 ## 13. If I Had 2 More Weeks
 
 - Write deferred work here.
+
+## 14. Permission Envelope
+
+<!-- Declared, not inferred. The three labels below are an authoring contract:
+     `compile_design_doc` reads the lines under them as permission actions and
+     nothing else in this document grants anything. An unrecognized action name
+     is a compile error rather than a line that gets skipped, because ignoring a
+     grant and ignoring a denial are both changes to what an agent may do.
+
+     The list ships filled in with the safe default, and the default is the
+     answer for most builds: read the repo, write an isolated worktree, run the
+     tests, ask the operator. Deleting this section entirely is allowed and
+     means the same thing - the compiler applies the same baseline - so edit it
+     only when this project genuinely needs more or less.
+
+     Add an action only when this project needs it, and write the reason next to
+     it; the reason is what the operator reads when deciding. Moving an action
+     from "Denied" to "Requested" is how a project that really does deploy or
+     really does spend money says so, and it is meant to take a deliberate edit.
+
+     The vocabulary is closed. Valid actions: read_repo_context,
+     write_ledger_artifacts, run_local_model_delegates,
+     prepare_isolated_worktrees, request_operator_decisions,
+     code_worktree_write, test_command_execution, dependency_install,
+     network_access, deploy, external_communications, spend_money,
+     merge_to_main, purchase_or_spend, secret_or_credential_access,
+     destructive_file_operations.
+
+     Intake also runs a keyword scan over this draft's prose and prints what it
+     found under "Suggested by keyword scan" in the finalized document. Those are
+     suggestions and grant nothing. Treat a suggestion as a prompt to edit the
+     lists below, and check the term it matched before believing it. -->
+
+{_baseline_envelope_markdown()}
 """
+
+
+def _baseline_envelope_markdown() -> str:
+    """The baseline envelope, written in the section's own authoring syntax.
+
+    Rendered from the constants rather than typed into the template beside them.
+    A hand-copied list would be a second statement of the safe default, and the
+    two would drift the first time one changed - with the template being the
+    half an operator reads and approves, and the constants being the half the
+    compiler applies to a document that deleted the section. They must agree,
+    so only one of them exists.
+    """
+
+    lines = ["Autonomous permissions:"]
+    lines.extend(f"- {action.value}" for action in BASELINE_AUTONOMOUS_ACTIONS)
+    lines.extend(["", "Requested permissions:"])
+    lines.extend(f"- {action.value}: {reason}" for action, reason in BASELINE_BUILD_ACTIONS)
+    lines.extend(["", "Denied without explicit approval:"])
+    lines.extend(f"- {action.value}" for action in BASELINE_DENIED_ACTIONS)
+    return "\n".join(lines)
 
 
 def render_sparse_gawd_draft(
@@ -1815,10 +2156,30 @@ def _workflow_compensation_policy(draft: SparseGawdDraft) -> str:
 
 
 def _workflow_evidence(
-    draft: SparseGawdDraft,
     milestone: DurableWorkflowMilestone,
     template: ArchetypeMilestoneTemplate | None = None,
 ) -> tuple[str, ...]:
+    """The evidence one milestone must produce, and only that milestone.
+
+    This used to append the draft's whole Verification, Observability, Service
+    Levels, and Risk Synthesis lists to every step, which made each milestone's
+    exit gate the entire document's. The first milestone of the LyricPlayer
+    intake was handed "play Book 4 on the phone and confirm the highlighted line
+    matches" as its own acceptance criterion, which a planning step cannot
+    satisfy and no run could honestly pass.
+
+    Dropping them loses nothing, because each of those sections already reaches
+    the compiler at document level through its own probe: `verification` maps to
+    `ACCEPTANCE_CRITERIA`, `operational contract` to `CONSTRAINTS`, and
+    `risk synthesis` to `FAILURE_MODES` (`work_units/design_doc._SECTION_PROBES`).
+    They were being carried twice, once correctly and once as an unsatisfiable
+    per-milestone gate.
+
+    `template.required_evidence` stays: an archetype states it per milestone,
+    which is the distinction that matters here - evidence about this step rather
+    than about the document.
+    """
+
     evidence = [
         f"milestone result artifact for {milestone.milestone_id}",
         "DBOS workflow or step status",
@@ -1826,10 +2187,6 @@ def _workflow_evidence(
     ]
     if template is not None:
         evidence.extend(template.required_evidence)
-    evidence.extend(f"verification: {item}" for item in draft.verification)
-    evidence.extend(f"observability: {item}" for item in draft.observability)
-    evidence.extend(f"service level: {item}" for item in draft.service_levels)
-    evidence.extend(f"risk gate: {item}" for item in draft.risk_synthesis)
     return tuple(dict.fromkeys(evidence))
 
 

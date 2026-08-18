@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
 from local_first_agent_os.new_project_intake import (
     DurableWorkflowPlan,
     PermissionEnvelope,
+    PermissionEnvelopeSource,
+    PermissionSuggestion,
+    _sparse_gawd_template,
     build_durable_workflow_plan,
     build_gawd_review_tasks,
     build_reviewable_gawd_draft,
@@ -17,6 +21,7 @@ from local_first_agent_os.new_project_intake import (
     merge_pow_wow_result_into_gawd_review_markdown,
     parse_durable_workflow_plan_payload,
     parse_sparse_gawd_draft,
+    permission_envelope_for_draft,
     refine_durable_workflow_plan_from_run_result,
 )
 from local_first_agent_os.pow_wow import (
@@ -26,6 +31,12 @@ from local_first_agent_os.pow_wow import (
     PowWowTaskResult,
 )
 from local_first_agent_os.staffing import Tier
+from local_first_agent_os.work_units.design_doc import parse_declared_permission_envelope
+from local_first_agent_os.work_units.permissions import (
+    BASELINE_AUTONOMOUS_ACTIONS,
+    BASELINE_BUILD_ACTIONS,
+    BASELINE_DENIED_ACTIONS,
+)
 
 
 def test_sparse_gawd_draft_file_parses_and_finalizes(tmp_path) -> None:
@@ -97,7 +108,7 @@ Agents deploy or merge without approval.
     assert draft.project == "Ledger Intake"
     assert draft.goal == "Start projects from explicit scope instead of raw prompts."
     assert "No deploy." in draft.non_goals
-    assert finalized.permission_envelope.schema_version == "permission_envelope.v1"
+    assert finalized.permission_envelope.schema_version == "permission_envelope.v2"
     assert "merge_to_main" in finalized.permission_envelope.denied_without_approval
     assert [milestone.happy_path_step for milestone in workflow_plan.milestones] == [
         "Draft the spec.",
@@ -310,12 +321,17 @@ Staging migration corrupts seeded test data.
         "security/access constraint: Staging database credential is brokered "
         "and never written to ledger."
     ) in second_step.side_effects
-    assert (
-        "observability: Record test log and staging smoke result." in second_step.evidence_to_record
-    )
-    assert (
-        "service level: Recovery from failed staging check under 15 minutes."
-        in second_step.evidence_to_record
+    # Document-wide observability and service levels reach a step as context, in
+    # `inputs` and `side_effects`, and deliberately not as `evidence_to_record`.
+    # Evidence becomes the milestone's `Acceptance:` lines, which are its exit
+    # gate: every step carrying the whole document's verification made each gate
+    # the document's rather than the step's, so a planning milestone was asked to
+    # satisfy an on-device check. Each of these sections already reaches the
+    # compiler at document level through its own probe.
+    assert second_step.evidence_to_record == (
+        "milestone result artifact for m02_m2_run_staging_migration_and_smoke_check",
+        "DBOS workflow or step status",
+        "coordination ledger artifact id",
     )
     assert "pre-migration snapshot" in second_step.compensation_or_rollback
     assert "saga_id plus milestone_id" in second_step.retry_policy
@@ -934,6 +950,112 @@ def test_finalized_intake_milestones_are_readable_by_the_compiler(tmp_path) -> N
     assert len(parsed.milestone_candidates) == len(plan.steps)
 
 
+def test_a_model_transcript_cannot_add_sections_or_milestones_to_the_spec() -> None:
+    """Quoted model output is evidence about the spec, never part of it.
+
+    The merge step pastes the senior and staff turns into the document the
+    compiler reads. A model asked to expand a spec restates that spec, so the
+    finalized document grew a second `## Permission Envelope` and was rejected
+    with `duplicate_permission_envelope` - uncompilable because of the transcript
+    of how it was written.
+
+    The duplicate envelope was the visible half. The worse half is asserted here:
+    a `### Milestone N:` block inside that prose parsed as a real milestone, so a
+    model could add executable steps to a plan by describing one.
+    """
+
+    from local_first_agent_os.new_project_intake import _as_quoted_transcript
+    from local_first_agent_os.work_units.design_doc import parse_design_doc
+
+    spec = (
+        "# Doc\n\nTarget project: local_first_agent_os\n\n"
+        "## Permission Envelope\n\nAutonomous: read_repo_context\n"
+    )
+    transcript = (
+        "## Permission Envelope\n"
+        "Autonomous: deploy\n\n"
+        "## 8. Execution Milestones\n"
+        "### Milestone 9: injected by a transcript\n"
+        "Phase: DELIVER\n"
+    )
+    header = "\n## Senior Spec Completion (Model Output)\n"
+
+    pasted = parse_design_doc(spec + header + transcript, design_doc_id="pasted")
+    quoted = parse_design_doc(
+        spec + header + _as_quoted_transcript(transcript), design_doc_id="quoted"
+    )
+
+    assert "duplicate_permission_envelope" in {item.code for item in pasted.diagnostics}
+    assert len(pasted.milestone_candidates) == 1
+
+    assert "duplicate_permission_envelope" not in {item.code for item in quoted.diagnostics}
+    assert quoted.milestone_candidates == ()
+
+
+def test_the_finalized_document_declares_its_own_delivery_contract(tmp_path) -> None:
+    """Intake writes the terminal evidence its milestones imply.
+
+    The compiler rejects any plan that declares an IMPLEMENT milestone and names
+    no terminal evidence. Intake emitted neither a DELIVER milestone nor a
+    `Required Artifacts` section, so every finalized document failed to compile
+    on a plan intake had itself just written, and a fully specified draft still
+    needed a human to retype it before `compile_design_doc` would take it.
+
+    The kinds are derived from the phases the milestones already declare, so this
+    section can only restate promises the plan is making.
+    """
+
+    from local_first_agent_os.new_project_intake import (
+        append_required_artifacts_section,
+        render_execution_milestones_markdown,
+        render_required_artifacts_markdown,
+        replace_execution_milestones_section,
+    )
+    from local_first_agent_os.work_units.design_doc import parse_design_doc
+
+    draft = parse_sparse_gawd_draft(create_sparse_gawd_draft_file(tmp_path).path)
+    finalized = build_reviewable_gawd_draft(draft)
+    plan = build_durable_workflow_plan(finalized)
+
+    document = replace_execution_milestones_section(
+        finalized.final_markdown,
+        render_execution_milestones_markdown(plan),
+    )
+    assert parse_design_doc(document, design_doc_id="before").required_artifacts == ()
+
+    document = append_required_artifacts_section(
+        document, render_required_artifacts_markdown(plan)
+    )
+    parsed = parse_design_doc(document, design_doc_id="after")
+
+    assert "source_patch" in parsed.required_artifacts
+    assert set(parsed.required_artifacts) <= {
+        "implementation_plan",
+        "source_patch",
+        "test_result",
+        "operator_approval",
+        "delivery_record",
+    }
+
+
+def test_a_document_that_states_its_own_delivery_contract_keeps_it(tmp_path) -> None:
+    """An operator who wrote the section outranks the derivation."""
+
+    from local_first_agent_os.new_project_intake import (
+        append_required_artifacts_section,
+        render_required_artifacts_markdown,
+    )
+
+    draft = parse_sparse_gawd_draft(create_sparse_gawd_draft_file(tmp_path).path)
+    plan = build_durable_workflow_plan(build_reviewable_gawd_draft(draft))
+    authored = "# Doc\n\n## Required Artifacts\n\n- operator_approval\n"
+
+    assert (
+        append_required_artifacts_section(authored, render_required_artifacts_markdown(plan))
+        == authored
+    )
+
+
 def test_a_scaffold_that_gates_every_step_still_describes_work(tmp_path) -> None:
     """An approval flag is a gate on the work, not a milestone instead of it.
 
@@ -1044,3 +1166,273 @@ def test_a_phase_that_does_not_exist_is_refused_not_coerced() -> None:
 
     with pytest.raises(ValueError, match="SHIPPING"):
         _parse_durable_workflow_step(payload)
+
+
+# --------------------------------------------------------------------------- #
+# Permission envelope: declared, not inferred
+# --------------------------------------------------------------------------- #
+
+
+def _draft_with(tmp_path, body: str):
+    """A minimal parseable sparse draft carrying `body` as its extra sections."""
+
+    draft_file = create_sparse_gawd_draft_file(tmp_path)
+    draft_file.path.write_text(
+        """# THE GAWD DOC - Mini
+
+**Draft ID:** test
+**Project:** Pocket Tracker | **Version:** v4-mini | **Status:** SPARSE_DRAFT
+**Date:** 2026-08-17
+
+## 1. Theory of the System
+
+A single-user iOS app with no server.
+
+## 2. Why This Exists
+
+Counting sets on paper is slow.
+
+## 3. Happy Path / Golden Flow
+
+1. Open the app.
+2. Log a set.
+3. See the history.
+
+## 4. This Version - Scope & Non-Goals
+
+**In scope.**
+- Local storage only.
+
+**Cut (non-goals).**
+- No accounts.
+
+## 5. Core Design
+
+**Unit of work.** One logged set.
+
+**Lifecycle.**
+- logged -> stored -> shown
+
+**Data model.**
+- SwiftData store on device.
+
+## 6. The Failure That Matters Most
+
+Losing a logged set.
+
+## 7. Verification
+
+- Unit tests pass.
+"""
+        + body,
+        encoding="utf-8",
+    )
+    return parse_sparse_gawd_draft(draft_file.path)
+
+
+# The exact word-sense collisions from the offline iOS GAWD doc that made this
+# change necessary. Every sentence here is the kind a real draft writes, and
+# each one contains a scan term used in a sense the scan cannot see.
+_OFFLINE_IOS_PROSE = """
+## 8. Operational Contract
+
+**Dependencies.**
+- The app installs on the physical iPhone over a cable.
+- Distribution needs a paid Apple Developer Program membership.
+- Deploy is an Xcode build-and-run, not a server deployment.
+
+**Interface contracts.**
+- The api between the store and the view is a Swift protocol.
+
+**Backpressure / cost.**
+- There is no API spend and no network dependency at app runtime.
+"""
+
+
+def test_word_sense_collisions_no_longer_request_money_or_deployment(tmp_path) -> None:
+    """The 2026-08-17 report, reproduced and refused.
+
+    A real offline iOS draft produced an envelope requesting
+    `dependency_install`, `network_access`, `deploy`, and `spend_money`, all
+    four from substrings: "install" inside "installs on the physical iPhone",
+    "paid" inside "paid Apple Developer Program membership", "deploy" inside
+    "Deploy is an Xcode build-and-run", "api" inside a protocol description.
+    The same document says in its own words that there is no API spend.
+
+    `deploy` and `spend_money` are the permissions that decide whether an agent
+    may ship or spend. Asking for them on a document that disclaims both is how
+    an operator learns that approving is the default answer.
+    """
+
+    draft = _draft_with(tmp_path, _OFFLINE_IOS_PROSE)
+    envelope = permission_envelope_for_draft(draft)
+
+    granted = {request.permission for request in envelope.requested_permissions}
+    assert granted == {"code_worktree_write", "test_command_execution"}
+    assert "deploy" in envelope.denied_without_approval
+    assert "purchase_or_spend" in envelope.denied_without_approval
+
+    # Neither survives even as a suggestion: both capabilities are already
+    # denied, and suggesting what the envelope has refused is noise.
+    suggested = {suggestion.permission for suggestion in envelope.suggestions}
+    assert "deploy" not in suggested
+    assert "spend_money" not in suggested
+
+
+def test_a_suggestion_carries_the_term_that_triggered_it(tmp_path) -> None:
+    """What makes a wrong guess dismissible without rereading the draft."""
+
+    draft = _draft_with(tmp_path, _OFFLINE_IOS_PROSE)
+    envelope = permission_envelope_for_draft(draft)
+
+    by_permission = {item.permission: item for item in envelope.suggestions}
+    assert "install" in by_permission["dependency_install"].matched_terms
+    assert "api" in by_permission["network_access"].matched_terms
+
+
+def test_a_draft_that_declares_nothing_gets_the_baseline(tmp_path) -> None:
+    draft = _draft_with(tmp_path, _OFFLINE_IOS_PROSE)
+    envelope = permission_envelope_for_draft(draft)
+
+    assert envelope.source is PermissionEnvelopeSource.BASELINE
+    assert envelope.autonomous_permissions == tuple(
+        action.value for action in BASELINE_AUTONOMOUS_ACTIONS
+    )
+    assert any("declares no Permission Envelope" in risk for risk in envelope.risks)
+
+
+def test_a_declared_envelope_is_the_contract_and_the_prose_cannot_widen_it(tmp_path) -> None:
+    """Declaration wins, which is the whole point of the section.
+
+    The prose below still contains "deploy", "paid", and "install". A declared
+    envelope means none of that is consulted for what was granted.
+    """
+
+    draft = _draft_with(
+        tmp_path,
+        _OFFLINE_IOS_PROSE
+        + """
+## 14. Permission Envelope
+
+Autonomous permissions:
+- read_repo_context
+- write_ledger_artifacts
+
+Requested permissions:
+- code_worktree_write: this build writes Swift sources
+
+Denied without explicit approval:
+- deploy
+- spend_money
+- network_access
+""",
+    )
+    envelope = permission_envelope_for_draft(draft)
+
+    assert envelope.source is PermissionEnvelopeSource.DECLARED
+    assert envelope.autonomous_permissions == ("read_repo_context", "write_ledger_artifacts")
+    assert [request.permission for request in envelope.requested_permissions] == [
+        "code_worktree_write"
+    ]
+    assert [request.reason for request in envelope.requested_permissions] == [
+        "this build writes Swift sources"
+    ]
+    assert envelope.denied_without_approval == ("deploy", "spend_money", "network_access")
+    # `test_command_execution` is in the baseline and not in this declaration.
+    # A declared envelope is not the baseline plus extras.
+    assert "test_command_execution" not in {
+        request.permission for request in envelope.requested_permissions
+    }
+
+
+def test_the_mini_gawd_template_declares_exactly_the_shared_baseline() -> None:
+    """The two-sided contract, checked.
+
+    The template is the half an operator reads and edits. The constants are the
+    half the compiler applies to a document that deleted the section. A drift
+    between them would mean an operator approving one safe default while an
+    agent ran under another.
+    """
+
+    template = _sparse_gawd_template("abc123", datetime(2026, 8, 17, tzinfo=UTC))
+    declared, diagnostics = parse_declared_permission_envelope(template)
+
+    assert diagnostics == (), "the shipped template must parse without diagnostics"
+    assert declared is not None
+    assert declared.autonomous == BASELINE_AUTONOMOUS_ACTIONS
+    declared_requested = tuple((item.action, item.reason) for item in declared.requested)
+    assert declared_requested == BASELINE_BUILD_ACTIONS
+    assert declared.denied_without_approval == BASELINE_DENIED_ACTIONS
+
+
+def test_the_template_explanation_is_not_read_as_a_declaration() -> None:
+    """The template's comment lists the whole action vocabulary as prose.
+
+    Parsed as declarations those words would be sixteen grants, and parsed as
+    prose by the keyword scan they would be a permanent suggestion to install
+    packages and reach the network on every blank draft.
+    """
+
+    template = _sparse_gawd_template("abc123", datetime(2026, 8, 17, tzinfo=UTC))
+
+    assert "destructive_file_operations" in template, "the comment must still list the vocabulary"
+    declared, _ = parse_declared_permission_envelope(template)
+    assert declared is not None
+    assert "destructive_file_operations" not in {item.value for item in declared.autonomous}
+
+
+def test_the_finalized_document_round_trips_without_promoting_a_suggestion(tmp_path) -> None:
+    """The finalized markdown is itself parsed later, so its shape is a contract.
+
+    The suggestion block sits in the same section as the grants. If it ever
+    landed under one of the three granting labels, a substring guess would
+    compile into a capability - the original bug, reintroduced one layer down.
+    """
+
+    draft = _draft_with(tmp_path, _OFFLINE_IOS_PROSE)
+    finalized = build_reviewable_gawd_draft(draft)
+
+    assert "Suggested by keyword scan:" in finalized.final_markdown
+    assert "dependency_install" in finalized.final_markdown
+
+    reparsed, diagnostics = parse_declared_permission_envelope(finalized.final_markdown)
+
+    assert diagnostics == ()
+    assert reparsed is not None
+    granted = (
+        {item.value for item in reparsed.autonomous}
+        | {item.action.value for item in reparsed.requested}
+        | {item.value for item in reparsed.denied_without_approval}
+    )
+    assert "dependency_install" not in granted
+    assert "network_access" not in granted
+
+
+def test_the_envelope_payload_names_its_source_and_keeps_suggestions_apart() -> None:
+    envelope = PermissionEnvelope(
+        autonomous_permissions=("read_repo_context",),
+        requested_permissions=(),
+        denied_without_approval=(),
+        risks=(),
+        source=PermissionEnvelopeSource.DECLARED,
+        suggestions=(
+            PermissionSuggestion(
+                permission="network_access",
+                reason="Draft appears to require external lookup or networked services.",
+                matched_terms=("api",),
+            ),
+        ),
+    )
+
+    payload = envelope.to_payload()
+
+    assert payload["schema_version"] == "permission_envelope.v2"
+    assert payload["source"] == "declared"
+    assert payload["requested_permissions"] == []
+    assert payload["suggestions"] == [
+        {
+            "permission": "network_access",
+            "reason": "Draft appears to require external lookup or networked services.",
+            "matched_terms": ("api",),
+        }
+    ]
