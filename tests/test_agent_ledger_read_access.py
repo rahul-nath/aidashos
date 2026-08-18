@@ -27,6 +27,7 @@ from local_first_agent_os.coordination.cli import (
     build_agent_read_mcp_server,
     build_mcp_server,
 )
+from local_first_agent_os.coordination.contracts import CoordinationCommandName
 
 # Resolved up front because the builders resolve: on macOS /tmp is a symlink to
 # /private/tmp, and a test comparing against the unresolved spelling would be
@@ -106,6 +107,28 @@ def test_the_agent_surface_is_a_fraction_of_the_operator_surface() -> None:
     agent_names = {tool.name for tool in agent}
     assert agent_names < operator_names
     assert len(agent_names) < len(operator_names) / 10
+
+
+def test_migrating_the_schema_is_not_offered_to_any_model() -> None:
+    """A CLI verb on purpose, and a tool on neither server.
+
+    On 2026-08-17 a dispatched agent migrated the shared production ledger from
+    an isolated worktree, twice in one day, and both times it did so by reading.
+    Removing the implicit path and then handing the explicit one to a model would
+    give back exactly what was taken away, with a nicer name on it.
+
+    The absence is asserted rather than left to the registration list, because
+    `build_mcp_server` names its tools one by one and a later reader completing
+    the set would look like tidying rather than a policy change.
+    """
+
+    operator = asyncio.run(build_mcp_server().list_tools())
+    agent = asyncio.run(build_agent_read_mcp_server().list_tools())
+    verb = CoordinationCommandName.MIGRATE_COORDINATION_SCHEMA.value
+
+    assert verb not in {tool.name for tool in operator}
+    assert verb not in {tool.name for tool in agent}
+    assert verb not in AGENT_READABLE_TOOLS
 
 
 def test_the_claim_verbs_are_not_offered() -> None:

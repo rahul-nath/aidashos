@@ -57,15 +57,37 @@ fi
 section "Durable ledger"
 # The ledger is the recovery and audit authority, so an unreachable one is not a
 # degraded mode: every dispatch, approval, and lease needs it.
-if uv run python -c "
-from local_first_agent_os.coordination.store import connect
-with connect(checkout_timeout_seconds=5) as c:
-    c.execute('SELECT 1')
-" >/dev/null 2>&1; then
-  ok "coordination Postgres is reachable"
-else
-  blocked "coordination Postgres is unreachable" "./scripts/start-docker-compose-infra.sh postgres"
-fi
+#
+# Reachable and usable are two questions, and this asks both. A checkout now
+# refuses when the runtime and the database disagree about the schema, so an
+# operator who has just pulled a schema bump would otherwise read "unreachable"
+# about a server that is up and answering, and go start a container that is
+# already running. The state is read without touching the schema: a readiness
+# check that migrated in order to report on migration would be its own worst
+# finding.
+LEDGER_STATE="$(uv run python -c "
+from local_first_agent_os.coordination.store import coordination_schema_state
+state = coordination_schema_state()
+print(f\"{state['state']} {state['applied_version']} {state['runtime_version']} {state['target']}\")
+" 2>/dev/null)" || LEDGER_STATE=""
+case "${LEDGER_STATE%% *}" in
+  CURRENT|ABSENT)
+    ok "coordination Postgres is reachable"
+    ;;
+  MIGRATION_REQUIRED)
+    read -r _ applied runtime target <<<"$LEDGER_STATE"
+    blocked "coordination database needs migration: $target is at schema $applied, this runtime is at $runtime" \
+      "agent-ledger migrate_coordination_schema"
+    ;;
+  NEWER_THAN_RUNTIME)
+    read -r _ applied runtime target <<<"$LEDGER_STATE"
+    blocked "coordination database is newer than this checkout: $target is at schema $applied, this runtime is at $runtime" \
+      "git pull (this checkout is behind the ledger; migrating is not the fix)"
+    ;;
+  *)
+    blocked "coordination Postgres is unreachable" "./scripts/start-docker-compose-infra.sh postgres"
+    ;;
+esac
 
 section "Local junior model (required)"
 # The one dependency the system will not run without. The junior tier decides

@@ -86,6 +86,7 @@ class CoordinationCommandName(StrEnum):
     LIST_SAGAS = "list_sagas"
     LIST_SESSIONS = "list_sessions"
     LIST_TASKS = "list_tasks"
+    MIGRATE_COORDINATION_SCHEMA = "migrate_coordination_schema"
     NEXT_READY_SAGA_MILESTONE = "next_ready_saga_milestone"
     OPEN_EXECUTION_LEASE = "open_execution_lease"
     READ_EXECUTION_LEDGER = "read_execution_ledger"

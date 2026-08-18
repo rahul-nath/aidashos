@@ -22,9 +22,12 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from urllib.parse import urlparse
 
 from .availability import LedgerUnavailable
-from .failures import expected_failure
+from .contracts import CoordinationCommandName
+from .failures import DurableFailureError, expected_failure
+from .outcomes import FailureCategory
 
 ROOT_OVERRIDE: Path | None = None
 
@@ -204,6 +207,12 @@ SCHEMA_VERSION = 20
 # Recomputed with `shasum -a 256 agent_coordination_postgres_schema.sql`.
 SCHEMA_CONTENT_HASH = "563e6e76c614f1e5116f68ad9e4c1857a9efbc72e9a64a4c7c228aeaddbf1651"
 
+# The two ways a runtime and a database can disagree about the schema, as stable
+# `failure.v1` codes. Both are operator conditions: the ledger is reachable and
+# answering, and what is wrong is that the two of them are at different versions.
+SCHEMA_MIGRATION_REQUIRED = "COORDINATION_SCHEMA_MIGRATION_REQUIRED"
+SCHEMA_NEWER_THAN_RUNTIME = "COORDINATION_SCHEMA_NEWER_THAN_RUNTIME"
+
 POSTGRES_SCHEMA_COMPONENT = "agent_coordination"
 # Stable, signed 64-bit key reserved for this component's schema migration.
 POSTGRES_SCHEMA_ADVISORY_LOCK_KEY = 5_861_874_679_801_903_697
@@ -293,6 +302,25 @@ def postgres_database_url() -> str:
             "or LOCAL_AGENT_DATABASE_URL"
         )
     return url.replace("postgresql+psycopg://", "postgresql://", 1)
+
+
+def postgres_target_description() -> str:
+    """Name the ledger this process points at, without its credentials.
+
+    Which database is being talked to is the question the 2026-08-17 outage
+    turned on, so every schema refusal answers it. The URL carries a password,
+    though, and these messages are printed to terminals, pasted into handoffs,
+    and now travel to a public repository, so the host, port, and database name
+    are taken and the userinfo is left behind.
+    """
+
+    with contextlib.suppress(Exception):
+        parsed = urlparse(postgres_database_url())
+        host = parsed.hostname or "localhost"
+        port = f":{parsed.port}" if parsed.port else ""
+        database = (parsed.path or "").lstrip("/") or "?"
+        return f"{host}{port}/{database} (schema {postgres_schema() or 'default'})"
+    return "the configured coordination ledger"
 
 
 class CursorLike(Protocol):
@@ -526,12 +554,68 @@ def _postgres_applied_schema_version(c: ConnectionLike) -> int | None:
     return int(row["version"]) if row else None
 
 
+def _schema_refusal(error_code: str, message: str) -> DurableFailureError:
+    """Refuse to touch the schema, as a classified condition rather than a defect.
+
+    The runtime and the database disagree about the schema, and no code can
+    settle that: either the database should move forward or the checkout should.
+    Only an operator knows which. So this is an expected rejection with a stable
+    code, the same shape every other operator-facing refusal in this package
+    carries, rather than the bare `RuntimeError` it used to be - which a caller
+    could only tell apart from a bug by reading its prose.
+
+    Never retryable. The next connection asks the identical question and gets the
+    identical answer, so a loop that retried would spin until somebody typed the
+    command the message already names.
+    """
+
+    return DurableFailureError(
+        expected_failure(
+            error_code,
+            operation="ensure_coordination_schema",
+            message=message,
+            category=FailureCategory.BUSINESS,
+            retryable=False,
+        )
+    )
+
+
 def _assert_supported_schema_version(applied_version: int | None) -> None:
     if applied_version is not None and applied_version > SCHEMA_VERSION:
-        raise RuntimeError(
-            "coordination schema is newer than this runtime: "
-            f"database={applied_version}, runtime={SCHEMA_VERSION}"
+        raise _schema_refusal(
+            SCHEMA_NEWER_THAN_RUNTIME,
+            f"coordination schema at {postgres_target_description()} is newer than "
+            f"this runtime: database={applied_version}, runtime={SCHEMA_VERSION}. "
+            "This checkout is behind the ledger; pull, or point at another database.",
         )
+
+
+def _assert_migration_was_asked_for(applied_version: int | None, *, allow_migration: bool) -> None:
+    """Never *upgrade* implicitly. Creating is still allowed.
+
+    Opening a connection used to run whatever DDL the file on disk described, so
+    a dispatched agent's worktree - which is isolated in files and not in
+    databases - migrated the shared production ledger on 2026-08-17 simply by
+    reading from it, twice in one day. Every other checkout then refused to
+    connect, because they were now the ones behind.
+
+    The distinction that keeps the fix small is between creating and upgrading. A
+    database with no schema at all belongs to whoever is booting it: a fresh
+    clone must still come up, and `tests/conftest.py` builds a schema per test
+    through exactly this path. A database that already has a schema belongs to
+    every process using it, and the decision to reshape it under them is an
+    operator's to make out loud.
+    """
+
+    if allow_migration or applied_version is None or applied_version >= SCHEMA_VERSION:
+        return
+    raise _schema_refusal(
+        SCHEMA_MIGRATION_REQUIRED,
+        f"coordination schema at {postgres_target_description()} needs migration: "
+        f"database={applied_version}, runtime={SCHEMA_VERSION}. Migrating a shared "
+        "ledger is an operator action, not a side effect of connecting. "
+        f"Run: agent-ledger {CoordinationCommandName.MIGRATE_COORDINATION_SCHEMA.value}",
+    )
 
 
 def _advisory_lock_key(schema: str | None) -> int:
@@ -548,18 +632,26 @@ def _advisory_lock_key(schema: str | None) -> int:
     return int.from_bytes(digest, "big", signed=True)
 
 
-def _ensure_postgres_schema(c: ConnectionLike) -> None:
+def _ensure_postgres_schema(c: ConnectionLike, *, allow_migration: bool) -> None:
     applied_version = _postgres_applied_schema_version(c)
     _assert_supported_schema_version(applied_version)
     if applied_version == SCHEMA_VERSION:
         c.commit()
         return
+    # Before the lock, so a refused connection costs one read and takes nothing
+    # out on the database other processes are using.
+    _assert_migration_was_asked_for(applied_version, allow_migration=allow_migration)
 
     # Every process checks the durable version before taking this lock. Only
     # the migration owner executes DDL; waiters recheck after the owner commits.
     c.execute("SELECT pg_advisory_xact_lock(?)", (_advisory_lock_key(postgres_schema()),))
     applied_version = _postgres_applied_schema_version(c)
     _assert_supported_schema_version(applied_version)
+    # Both checks again, on the version the lock made authoritative. The waiter
+    # that lost the race reads the owner's committed version here, and the two
+    # answers a fresh read can newly give - migrated past us, or migrated to a
+    # version we would still have to upgrade - are the two these refuse.
+    _assert_migration_was_asked_for(applied_version, allow_migration=allow_migration)
     if applied_version != SCHEMA_VERSION:
         c.executescript(load_postgres_schema_sql())
         _backfill_structured_outcomes(c)
@@ -575,19 +667,96 @@ def _ensure_postgres_schema(c: ConnectionLike) -> None:
     c.commit()
 
 
-def ensure_schema(c: ConnectionLike) -> None:
-    """Apply the schema only when a database actually needs it.
+def _schema_ready_key() -> str:
+    return f"postgres:{postgres_database_url()}:{postgres_schema() or 'default'}"
+
+
+def ensure_schema(c: ConnectionLike, *, allow_migration: bool = False) -> None:
+    """Agree with the database about the schema, or refuse to proceed.
 
     A process cache skips repeat connects. The database-persisted version skips
     DDL across processes. The rare migration path is serialized so concurrent
     short-lived coordination commands cannot deadlock while each tries to
     acquire relation locks in the schema script.
+
+    `allow_migration` is false for every caller except the operator command that
+    exists to say otherwise. Creating a schema where there is none is not a
+    migration and does not need it; see `_assert_migration_was_asked_for`.
+
+    A refusal deliberately leaves the cache untouched. The marker means "this
+    process has agreed with this database", and a refusal is the opposite of
+    agreement: caching it would make the first failed connection skip the check
+    forever, so the migration an operator then ran would never be noticed.
     """
-    key = f"postgres:{postgres_database_url()}:{postgres_schema() or 'default'}"
+    key = _schema_ready_key()
     if key in _SCHEMA_READY:
         return
-    _ensure_postgres_schema(c)
+    _ensure_postgres_schema(c, allow_migration=allow_migration)
     _SCHEMA_READY.add(key)
+
+
+def migrate_postgres_schema() -> dict[str, Any]:
+    """Apply pending coordination DDL, because an operator asked for it.
+
+    The one caller allowed to migrate, and the whole reason connecting no longer
+    can. It reports the version it found as well as the one it left, because
+    "already current" and "just moved your shared ledger" are answers an operator
+    needs to tell apart after the fact.
+    """
+
+    connection = _borrow(None)
+    try:
+        previous_version = _postgres_applied_schema_version(connection)
+        ensure_schema(connection, allow_migration=True)
+    finally:
+        # Harmless after the migration's own commit, and necessary without it:
+        # `ensure_schema` returns early on a database this process already
+        # agreed with, leaving the probe's read transaction open.
+        with contextlib.suppress(Exception):
+            connection.rollback()
+        connection.close()
+    return {
+        "component": POSTGRES_SCHEMA_COMPONENT,
+        "target": postgres_target_description(),
+        "previous_version": previous_version,
+        "version": SCHEMA_VERSION,
+        "migrated": previous_version != SCHEMA_VERSION,
+        "created": previous_version is None,
+    }
+
+
+def coordination_schema_state() -> dict[str, Any]:
+    """What the database says its schema is, without changing it.
+
+    Read-only by construction: it neither creates nor upgrades, so a reporting
+    surface can ask about a database it must not touch. `first-run-check.sh` is
+    the caller this exists for, and a readiness check that migrated in order to
+    report on migration would be its own worst finding.
+    """
+
+    connection = _borrow(None)
+    try:
+        applied_version = _postgres_applied_schema_version(connection)
+    finally:
+        # A read still opens a transaction, and this one is deliberately not
+        # committed: the point of the function is that it changed nothing.
+        with contextlib.suppress(Exception):
+            connection.rollback()
+        connection.close()
+    if applied_version is None:
+        state = "ABSENT"
+    elif applied_version == SCHEMA_VERSION:
+        state = "CURRENT"
+    elif applied_version < SCHEMA_VERSION:
+        state = "MIGRATION_REQUIRED"
+    else:
+        state = "NEWER_THAN_RUNTIME"
+    return {
+        "state": state,
+        "target": postgres_target_description(),
+        "applied_version": applied_version,
+        "runtime_version": SCHEMA_VERSION,
+    }
 
 
 # How many connections one process may hold against one ledger.
@@ -783,12 +952,23 @@ def _new_pool(database_url: str, schema: str | None) -> Any:
     if schema:
         kwargs["options"] = f"-c search_path={schema}"
 
-    def configure(raw: Any) -> None:
-        # Runs once per newly opened connection rather than once per checkout, so
-        # the schema check costs nothing on the hot path. `_SCHEMA_READY` makes it
-        # a set lookup after the first connection in the process anyway.
-        ensure_schema(PostgresConnection(raw))
-
+    # No `configure`, deliberately. The schema check used to live there, and
+    # psycopg_pool treats a raising `configure` as a connection that failed to
+    # open: it logs the exception, discards the socket, and has a background
+    # worker try again, while the caller waits out the full 30 second checkout
+    # timeout and is then handed `PoolTimeout`. `_diagnosed_checkout_failure`
+    # probes the server, finds it perfectly healthy, and reports pool exhaustion.
+    #
+    # That is not a hypothetical. It is consequence 3 of the 2026-08-17 outage:
+    # two agents spent an afternoon on a phantom "all 16 connections are checked
+    # out" that was really a schema disagreement, because the one message that
+    # said so had been swallowed. A refusal nobody can read is not a refusal.
+    #
+    # So the check moved to the checkout in `connect`, where the exception is on
+    # the caller's own stack. It also runs there once per process rather than
+    # once per socket, which is what `_SCHEMA_READY` always claimed and what
+    # `configure` could not deliver: a pool that already held open connections
+    # never re-ran it, so a cleared cache checked nothing.
     return ConnectionPool(
         database_url,
         kwargs=kwargs,
@@ -796,7 +976,6 @@ def _new_pool(database_url: str, schema: str | None) -> Any:
         # and would otherwise pay for a handful of eager connections it never uses.
         min_size=0,
         max_size=postgres_pool_max_size(),
-        configure=configure,
         # Wait for a free connection, then give up loudly. Blocking forever would
         # turn pool exhaustion into a hang with no stack pointing at the cause,
         # which is strictly worse than the error it replaces.
@@ -826,7 +1005,35 @@ def connect(*, checkout_timeout_seconds: float | None = None) -> ConnectionLike:
     caller that answers "empty" on failure anyway has no business queueing half
     a minute behind a saturated pool to earn that answer. Correctness paths
     should leave it unset and inherit the pool's own patience.
+
+    The schema check happens here, on the caller's stack, and costs a set lookup
+    after the first checkout in the process. `_new_pool` says why it cannot live
+    in the pool's `configure` instead.
     """
+
+    connection = _borrow(checkout_timeout_seconds)
+    try:
+        ensure_schema(connection)
+    except BaseException:
+        # Back to the pool rather than leaked. The connection itself is healthy;
+        # it is the database's shape this process declined, and holding a socket
+        # hostage to that would turn one refusal into pool exhaustion - the very
+        # misdiagnosis this arrangement exists to stop.
+        #
+        # Rolled back first because the version probe opened a transaction and
+        # the refusal left it open. psycopg_pool would clean that up itself and
+        # log a line about it to stderr for every refused connection, which puts
+        # driver noise between the operator and the one message that says what to
+        # do.
+        with contextlib.suppress(Exception):
+            connection.rollback()
+        connection.close()
+        raise
+    return connection
+
+
+def _borrow(checkout_timeout_seconds: float | None) -> ConnectionLike:
+    """Take a connection out of this ledger's pool, with no opinion about schema."""
 
     # Two attempts, because `reset_connections` closes pools across threads and
     # this is the window it leaves. A caller reads the pool out of `_pools` and

@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+from local_first_agent_os.coordination.contracts import CoordinationCommandName
+
 
 def _load_coordination_module() -> Any:
     from local_first_agent_os.coordination import store
@@ -271,11 +273,80 @@ def test_current_durable_version_skips_the_migration_entirely(postgres_schema_en
     assert connection.commits == 1
 
 
-def test_stale_database_migrates_under_the_advisory_lock(postgres_schema_env: Any) -> None:
+def test_connecting_to_a_stale_database_writes_no_ddl(postgres_schema_env: Any) -> None:
+    """The guard that would have failed on 2026-08-17, and did not exist then.
+
+    A dispatched agent's worktree held `SCHEMA_VERSION = 19` while every checkout
+    on disk and the shared production ledger were at 18. The agent had read-only
+    coordination tools and used one of them, and opening the connection to serve
+    that read applied its worktree's DDL to production. Every other process then
+    refused to connect, resident daemons died on invalidated query plans, and the
+    pool reported connection exhaustion instead of any of it.
+
+    Nothing in the suite could see that, and nothing could have: `tests/conftest.py`
+    deliberately keeps the suite away from the production URL, and every schema it
+    does build is fresh, so all 1133 green tests went through the create path and
+    none through the upgrade path. This is the assertion that separates them - not
+    "does the DDL still apply", but "who is allowed to apply it".
+
+    The trace matters as much as the refusal. Stopping before the advisory lock
+    means a refused process takes nothing out on a database other processes are
+    working in.
+    """
+
     module = postgres_schema_env
     connection = _FakePostgresConnection(module.SCHEMA_VERSION - 1)
 
-    module.ensure_schema(connection)
+    with pytest.raises(module.DurableFailureError) as refusal:
+        module.ensure_schema(connection)
+
+    assert connection.scripts == []
+    assert "run_schema_script" not in connection.trace
+    assert _RECORD_VERSION not in connection.trace
+    assert _TAKE_MIGRATION_LOCK not in connection.trace
+    assert refusal.value.failure.error_code == module.SCHEMA_MIGRATION_REQUIRED
+    assert not module._SCHEMA_READY
+
+
+def test_the_refusal_to_migrate_is_a_classified_operator_condition(
+    postgres_schema_env: Any,
+) -> None:
+    """An expected rejection, not a defect, and never worth retrying.
+
+    A resident loop separates weather it should wait out from bugs it must not,
+    and it does that by type and code rather than by reading prose. A schema
+    disagreement is neither: the ledger is up and answering, and what is missing
+    is a decision only a person can make. Marking it retryable would put a loop
+    into a spin that cannot end, because every attempt asks the same question.
+
+    The message carries the command that clears it, which is the same contract
+    every blocked line in `first-run-check.sh` keeps.
+    """
+
+    module = postgres_schema_env
+    connection = _FakePostgresConnection(module.SCHEMA_VERSION - 1)
+
+    with pytest.raises(module.DurableFailureError) as refusal:
+        module.ensure_schema(connection)
+
+    failure = refusal.value.failure
+    assert failure.category is module.FailureCategory.BUSINESS
+    assert failure.retryable is False
+    assert CoordinationCommandName.MIGRATE_COORDINATION_SCHEMA.value in failure.message
+
+
+def test_an_explicit_migration_upgrades_a_stale_database(postgres_schema_env: Any) -> None:
+    """The same DDL the connect path used to run, now behind one operator verb.
+
+    The protocol is unchanged: read the durable version, take the advisory lock
+    only when there is work, re-read under it, then apply and record. All that
+    moved is who may ask for it.
+    """
+
+    module = postgres_schema_env
+    connection = _FakePostgresConnection(module.SCHEMA_VERSION - 1)
+
+    module.ensure_schema(connection, allow_migration=True)
 
     assert connection.trace[:3] == [_PROBE_RELATION, _READ_VERSION, _TAKE_MIGRATION_LOCK]
     assert connection.trace.index("run_schema_script") > connection.trace.index(
@@ -287,6 +358,13 @@ def test_stale_database_migrates_under_the_advisory_lock(postgres_schema_env: An
 
 
 def test_empty_database_migrates_and_records_the_version(postgres_schema_env: Any) -> None:
+    """Creating is not upgrading, so a fresh clone still boots on its own.
+
+    The rule this change adds is "never upgrade implicitly", and reading it as
+    "never write DDL implicitly" would break the first `git clone` and every test
+    in the suite, which builds a schema per case through this path.
+    """
+
     module = postgres_schema_env
     connection = _FakePostgresConnection(None)
 

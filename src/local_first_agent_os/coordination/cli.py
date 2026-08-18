@@ -141,6 +141,8 @@ from .projects import (
 from .resident_loop import describe_resident_loops
 from .review_recovery import recover_unparsed_staff_review
 from .store import (
+    migrate_postgres_schema,
+    ok,
     set_root,
 )
 
@@ -715,6 +717,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("describe_resident_loops")
 
+    # The only command in this program that may reshape the ledger's schema.
+    # Everything else refuses, including connecting, which is the point: a
+    # migration is a decision about a database several processes share, so it
+    # gets typed on purpose rather than performed on the way past.
+    sub.add_parser(
+        "migrate_coordination_schema",
+        help="apply pending coordination DDL to the ledger this process points at",
+    )
+
     # ---- layer 2: saga milestones ----
     csm = sub.add_parser("create_saga_milestone")
     csm.add_argument("saga_id")
@@ -1218,6 +1229,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
     elif cmd == "describe_resident_loops":
         out = describe_resident_loops()
+    elif cmd == "migrate_coordination_schema":
+        out = ok(**migrate_postgres_schema())
 
     # layer 2 — saga milestones
     elif cmd == "create_saga_milestone":

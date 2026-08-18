@@ -212,6 +212,43 @@ path = "docs/AGENT_MANUAL.md"
 kind = "file"
 overwrite = true
 
+# The four architecture boundaries `skills/agent-startup/SKILL.md` sends a reader
+# to before touching the planner, the tiers, the executor, or intake. That skill
+# travels whole and `CLAUDE.md` names it as the thing to read first, so until
+# 2026-08-17 the public snapshot shipped the instruction with four dead links
+# under it - found by `tests/test_traveling_document_links.py` on the day it was
+# written, not by a reader, which is the only reason this is a manifest entry
+# rather than an apology.
+#
+# They travel because a public reader wants them: they are what the startup
+# ritual is for, and an agent told to read them cannot. De-linking was the other
+# option and it is worse, because the skill would then name four documents that
+# exist nowhere the reader can reach.
+#
+# Scanned against docs/public_release_checklist.md's denylist on 2026-08-17:
+# clean on both patterns, and the only path hits are `~/.local-agent/...`, which
+# is this tool's own directory and carries no username. None of the four has a
+# relative link of its own, so publishing them drags nothing further behind.
+[[allow]]
+path = "docs/decomposition_dispatch.md"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "docs/completed/role_model_and_staffing_design.md"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "docs/saga_executor_modes.md"
+kind = "file"
+overwrite = true
+
+[[allow]]
+path = "docs/new_project_intake.md"
+kind = "file"
+overwrite = true
+
 # Two files out of docs/diagrams/, not the directory. The rest of that folder is
 # working engineering diagrams (the DBOS boundary, the refinery map) which are
 # part of the log this manifest deliberately withholds. These two are the

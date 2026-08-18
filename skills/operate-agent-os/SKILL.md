@@ -26,6 +26,12 @@ args = ["run", "agent-ledger", "--root", "/absolute/path/to/aidashos", "serve"]
 The server needs the ledger's Postgres, which `./scripts/start-agent-runtime.sh` starts.
 If tools fail with connection errors, start the runtime first.
 
+One refusal reads like a connection error and is not one.
+When this checkout's `SCHEMA_VERSION` is ahead of the database, every connection is refused and the message says `needs migration` and names the database.
+That is a reachable ledger telling you the two of you disagree about its shape.
+Run `agent-ledger migrate_coordination_schema` after checking that the database is the one you meant to change.
+Connecting never migrates on its own, because a worktree that did exactly that took the shared ledger down twice on 2026-08-17.
+
 ## First moves in any session
 
 1. `run_first_run_check` (MCP) or `./scripts/first-run-check.sh` (shell): is this machine ready, and if not, what exact command fixes it.
@@ -45,7 +51,9 @@ uv run pi /ledger                  # inspect sagas, tasks, approvals
 uv run agent-ledger compile_design_doc <path>   # compile a doc by path
 ```
 
-The ledger MCP tools mirror `agent-ledger`'s subcommands one for one; prefer the tools for reads and structured writes, and the pi commands for the governed workflows.
+The ledger MCP tools mirror `agent-ledger`'s subcommands, with one deliberate exception; prefer the tools for reads and structured writes, and the pi commands for the governed workflows.
+`migrate_coordination_schema` is a shell verb only, on neither MCP server.
+Reshaping a database several processes share is a decision an operator types, not a tool a model can reach for.
 
 One difference worth knowing: run from a shell, the commands that print a WorkUnit or a plan also print the follow-up commands to stderr, with every id substituted and the unusable ones marked with the code they would fail on.
 The MCP tools return the payload only.
