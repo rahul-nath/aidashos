@@ -102,9 +102,7 @@ def test_verify_fails_loudly_on_a_broken_bundle(raw_transcript: Path, tmp_path: 
 def test_init_hydrates_context_and_enables_the_resolver(
     raw_transcript: Path, tmp_path: Path
 ) -> None:
-    result = runner.invoke(
-        app, ["handoff-init", "demo", str(raw_transcript), str(tmp_path / "ws")]
-    )
+    result = runner.invoke(app, ["handoff-init", "demo", str(raw_transcript), str(tmp_path / "ws")])
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)

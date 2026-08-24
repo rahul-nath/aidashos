@@ -52,6 +52,7 @@ from ..constants import (
     DISPATCH_RETRY_POLICY,
     FRONTIER_FALLBACK_RUN_ARTIFACT_TYPE,
 )
+from ..contracts import ApprovalRequestType
 from ..coordination.contracts import (
     AcknowledgementResult,
     AppendExecutionEvent,
@@ -64,6 +65,7 @@ from ..coordination.contracts import (
     FindAgentContinuation,
     LatestRepoAudit,
     OpenExecutionLease,
+    SubmitApprovalRequest,
     SubmitArtifact,
 )
 from ..coordination.outcomes import (
@@ -162,7 +164,7 @@ from .review import (
     is_agent_task,
     is_implementation_task,
     is_review_task,
-    review_verdict_requests_changes,
+    review_verdict_disposition,
 )
 from .revision import build_bounded_revision_context_from_review
 from .types import (
@@ -592,10 +594,7 @@ class _WorktreePowWowExecutorBase:
     @staticmethod
     def _judgment_workload(task: PowWowTaskSpec) -> JudgmentWorkload:
         match task.planning_phase:
-            case (
-                PlanningPhase.SENIOR_INDEPENDENT_READING
-                | PlanningPhase.STAFF_INDEPENDENT_READING
-            ):
+            case PlanningPhase.SENIOR_INDEPENDENT_READING | PlanningPhase.STAFF_INDEPENDENT_READING:
                 return JudgmentWorkload.INDEPENDENT_READING
             case _:
                 return JudgmentWorkload.STANDARD
@@ -903,9 +902,36 @@ class _WorktreePowWowExecutorBase:
         source_repo: Path,
         pow_wow_id: str,
         task_name: str,
+        base_commit_sha: str | None = None,
     ) -> WorktreeAllocation:
+        """One fresh worktree, branched from the seed the intent declared.
+
+        ``base_commit_sha`` is the dependency edge acting as a pipe: a chained
+        milestone branches from its dependency's settled commit rather than
+        from HEAD, which only moves at the CODE_MERGE gate. ``None`` branches
+        from HEAD, the historical behavior. A declared seed the repository
+        does not contain fails closed here, loudly, because branching from
+        HEAD instead would silently rebuild the predecessor's work.
+        """
+
         with self._worktree_lock:
             head_sha = run_git_command_for_output(source_repo, ["rev-parse", "HEAD"]).strip()
+            if base_commit_sha is not None:
+                commit_ref = f"{base_commit_sha}^{{commit}}"
+                probe = subprocess.run(
+                    ["git", "-C", str(source_repo), "cat-file", "-e", commit_ref],
+                    capture_output=True,
+                    text=True,
+                    timeout=DEFAULT_GIT_OPERATION_TIMEOUT_SECONDS,
+                    check=False,
+                )
+                if probe.returncode != 0:
+                    raise RuntimeError(
+                        f"declared base commit {base_commit_sha} is not in {source_repo}; "
+                        "the dependency's settled branch may have been pruned. Refusing to "
+                        "seed from HEAD, which would silently drop the dependency's work."
+                    )
+            head_sha = base_commit_sha or head_sha
             self.worktree_root.mkdir(parents=True, exist_ok=True)
             branch_suffix = "-".join(
                 (
@@ -1118,6 +1144,7 @@ class FakeProcessPowWowExecutor(_WorktreePowWowExecutorBase):
             source_repo=source_repo,
             pow_wow_id=pow_wow_id,
             task_name=task.task_name,
+            base_commit_sha=context.base_commit_sha,
         )
         worktree_path = Path(allocation.worktree_path)
         command_capture: CommandRunCapture | None = None
@@ -1772,9 +1799,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         try:
             found = self.coordination_command(command)
         except Exception as exc:  # noqa: BLE001 - a cold start remains valid
-            return StartFreshBounded(
-                f"continuation lookup failed: {type(exc).__name__}: {exc}"
-            )
+            return StartFreshBounded(f"continuation lookup failed: {type(exc).__name__}: {exc}")
         if not isinstance(found, EntityResult) or found.field != "continuation":
             return StartFreshBounded("continuation lookup returned a malformed result")
         if found.metadata.values.get("compatible") is not True:
@@ -3591,6 +3616,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                         source_repo=target_project.expanded_path,
                         pow_wow_id=pow_wow_id,
                         task_name=group,
+                        base_commit_sha=context.base_commit_sha,
                     )
                     self._apply_checkpoint_patch(
                         allocation=allocation,
@@ -3660,14 +3686,22 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     resolved_deps = [results[dep] for dep in task.blocked_by if dep in results]
                     if len(resolved_deps) < len(task.blocked_by):
                         continue
-                    failed_deps = [
-                        dep.task_name for dep in resolved_deps if dep.status != "completed"
-                    ]
+                    failed_deps = [dep for dep in resolved_deps if dep.status != "completed"]
                     if failed_deps:
+                        # Name the failing layer, not just the graph. "did not
+                        # complete" alone told an operator the schedule broke
+                        # when what actually broke was inside a dependency;
+                        # carrying each dependency's own summary is what lets
+                        # the settled row say why (LyricPlayer m3's empty
+                        # checkout surfaced only as this line's vagueness).
+                        detail = "; ".join(
+                            f"{dep.task_name} ({dep.status}): {dep.summary}".strip()
+                            for dep in failed_deps
+                        )
                         results[task.task_name] = self._build_blocked_task_result(
                             task,
                             target_project=target_project,
-                            reason=f"dependencies did not complete: {', '.join(failed_deps)}",
+                            reason=f"dependencies did not complete: {detail}",
                         )
                         pending.remove(task)
                         started = True
@@ -3794,8 +3828,8 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         tasks: Sequence[PowWowTaskSpec],
         results: Sequence[PowWowTaskResult],
         context: PowWowExecutionContext,
-    ) -> tuple[PowWowTaskSpec, PowWowTaskResult, str] | None:
-        """Return the code-kind review task whose verdict requests changes."""
+    ) -> tuple[PowWowTaskSpec, PowWowTaskResult, str, ReviewDisposition] | None:
+        """Return the code-kind review task whose verdict blocks or escalates."""
         results_by_name = {result.task_name: result for result in results}
         for task in tasks:
             if not is_agent_task(task) or self._local_harness_for(task) is not None:
@@ -3808,8 +3842,11 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             if result is None or result.status != "completed":
                 continue
             verdict = extract_review_verdict_text(result)
-            if verdict and review_verdict_requests_changes(verdict):
-                return task, result, verdict
+            if not verdict:
+                continue
+            disposition = review_verdict_disposition(verdict)
+            if disposition.requests_changes or disposition is ReviewDisposition.ESCALATE:
+                return task, result, verdict, disposition
         return None
 
     def _find_review_implementer(
@@ -4071,13 +4108,30 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         hard round cap, or a convergence classifier calling the exchange
         circling or a fundamental disagreement. An unresolved block fails the
         run visibly instead of completing with a buried objection.
+
+        An ESCALATE verdict is a request for the operator, not for another
+        revision round: it skips (or exits) the negotiation loop and is
+        surfaced as a REVIEW_ESCALATION approval request carrying the review
+        text.
         """
-        if self.max_review_rounds < 1:
-            return task_results
         blocked = self._find_blocked_review(tasks, task_results, context)
         if blocked is None:
             return task_results
-        review_task, blocked_review_result, verdict = blocked
+        review_task, blocked_review_result, verdict, disposition = blocked
+        if disposition is ReviewDisposition.ESCALATE:
+            return (
+                *task_results,
+                self._escalate_review_to_operator(
+                    pow_wow_id=pow_wow_id,
+                    context=context,
+                    review_task=review_task,
+                    review_result=blocked_review_result,
+                    verdict=verdict,
+                    rounds_run=0,
+                ),
+            )
+        if self.max_review_rounds < 1:
+            return task_results
         implementer_task = self._find_review_implementer(review_task, tasks, context)
         lease = code_worktrees.get(self._resolve_task_worktree_group(review_task))
         browser_task = next(
@@ -4236,7 +4290,28 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 stop_reason = f"re-review round {round_number} failed"
                 break
             new_verdict = extract_review_verdict_text(re_review_result) or ""
-            if not new_verdict or not review_verdict_requests_changes(new_verdict):
+            new_disposition = (
+                review_verdict_disposition(new_verdict)
+                if new_verdict
+                else ReviewDisposition.UNCLASSIFIED
+            )
+            if new_disposition is ReviewDisposition.ESCALATE:
+                # Not convergence: the reviewer asked for the operator, and
+                # recording it as converged would bury the escalation behind a
+                # generic merge-gate failure.
+                results.append(re_review_result)
+                results.append(
+                    self._escalate_review_to_operator(
+                        pow_wow_id=pow_wow_id,
+                        context=context,
+                        review_task=review_task,
+                        review_result=re_review_result,
+                        verdict=new_verdict,
+                        rounds_run=round_number,
+                    )
+                )
+                return tuple(results)
+            if not new_verdict or not new_disposition.requests_changes:
                 results.append(re_review_result)
                 converged = True
                 break
@@ -4291,6 +4366,121 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             )
         return tuple(results)
 
+    def _escalate_review_to_operator(
+        self,
+        *,
+        pow_wow_id: str,
+        context: PowWowExecutionContext,
+        review_task: PowWowTaskSpec,
+        review_result: PowWowTaskResult,
+        verdict: str,
+        rounds_run: int,
+    ) -> PowWowTaskResult:
+        """Surface an ESCALATE verdict as an operator decision, then fail closed.
+
+        The run still fails - nothing merges on an escalated review - but the
+        failure names the operator route instead of imitating an unparseable
+        verdict, and the review text travels on a REVIEW_ESCALATION approval
+        request so the decision can be made without exhuming the transcript.
+        A submission failure is recorded on the result rather than raised: the
+        escalation must still fail the run closed even when the ledger is down.
+        """
+
+        review_text = verdict
+        review_task_id: str | None = None
+        for artifact in review_result.artifacts:
+            if (
+                artifact.artifact_type != "review_result"
+                or artifact.schema_version != "review_result.v1"
+            ):
+                continue
+            text = artifact.content.get("review_text")
+            if isinstance(text, str) and text:
+                review_text = text
+            raw_task_id = artifact.content.get("task_id")
+            review_task_id = str(raw_task_id) if raw_task_id else None
+            break
+        approval_id: str | None = None
+        submission_error: str | None = None
+        if self.coordination_command is not None:
+            try:
+                submitted = self.coordination_command(
+                    SubmitApprovalRequest(
+                        saga_id=context.saga_id,
+                        request_type=ApprovalRequestType.REVIEW_ESCALATION.value,
+                        requested_by="pow_wow_executor",
+                        payload={
+                            "schema_version": "review_escalation.v1",
+                            "pow_wow_id": pow_wow_id,
+                            "dispatch_intent_id": context.dispatch_intent_id,
+                            "review_task_name": review_result.task_name,
+                            "review_task_id": review_task_id,
+                            "revision_rounds_run": rounds_run,
+                            "review_text": review_text,
+                        },
+                    )
+                )
+                if not isinstance(submitted, AcknowledgementResult):
+                    raise RuntimeError("review escalation submission returned malformed evidence")
+                raw_approval_id = submitted.payload.values.get("approval_id")
+                if not isinstance(raw_approval_id, str) or not raw_approval_id:
+                    raise RuntimeError("review escalation submission returned no approval_id")
+                approval_id = raw_approval_id
+            except Exception as exc:  # noqa: BLE001 - escalation must outlive a ledger failure
+                submission_error = f"{type(exc).__name__}: {exc}"
+        emit_progress(
+            (f"staff review escalated to the operator after {rounds_run} revision round(s)"),
+            phase="review_escalated",
+            pow_wow_id=pow_wow_id,
+            review_task=review_result.task_name,
+            rounds_run=rounds_run,
+            approval_id=approval_id,
+        )
+        if approval_id is not None:
+            route = (
+                f"approval request {approval_id} carries the review text "
+                "and awaits an operator decision"
+            )
+        elif submission_error is not None:
+            route = (
+                "the REVIEW_ESCALATION approval request could not be submitted "
+                f"({submission_error}); the review text is preserved on this "
+                "result's review_escalation artifact"
+            )
+        else:
+            route = (
+                "no coordination transport is configured, so the escalation is "
+                "recorded only on this result's review_escalation artifact"
+            )
+        summary = (
+            f"Staff review escalated to the operator after {rounds_run} revision round(s); {route}."
+        )
+        escalation_artifact = PowWowArtifact(
+            artifact_type="review_escalation",
+            schema_version="review_escalation.v1",
+            task_name=review_result.task_name,
+            content={
+                "schema_version": "review_escalation.v1",
+                "saga_id": context.saga_id,
+                "pow_wow_id": pow_wow_id,
+                "dispatch_intent_id": context.dispatch_intent_id,
+                "review_task_name": review_result.task_name,
+                "review_task_id": review_task_id,
+                "revision_rounds_run": rounds_run,
+                "approval_id": approval_id,
+                "submission_error": submission_error,
+                "review_text": review_text,
+            },
+        )
+        return PowWowTaskResult(
+            task_name=f"{review_task.task_name}_escalated",
+            role=review_task.role,
+            status="failed",
+            summary=summary,
+            risks=(summary,),
+            artifacts=(escalation_artifact,),
+        )
+
     def _build_unresolved_review_result(
         self,
         review_task: PowWowTaskSpec,
@@ -4333,11 +4523,15 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         ]
         if typed_reviews and typed_reviews[-1].get("verdict") == ReviewDisposition.APPROVE.value:
             return task_results
-        reason = (
-            "final typed staff review did not approve"
-            if typed_reviews
-            else self._missing_review_reason(review_tasks[-1], task_results)
-        )
+        if typed_reviews and typed_reviews[-1].get("verdict") == ReviewDisposition.ESCALATE.value:
+            reason = (
+                "final typed staff review escalated to the operator; "
+                "resolve the pending REVIEW_ESCALATION approval request"
+            )
+        elif typed_reviews:
+            reason = "final typed staff review did not approve"
+        else:
+            reason = self._missing_review_reason(review_tasks[-1], task_results)
         return (
             *task_results,
             self._build_unresolved_review_result(

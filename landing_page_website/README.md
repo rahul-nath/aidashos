@@ -11,7 +11,7 @@ The clone command and the prompt sequence are imported at build time from [../do
 ## Develop and build
 
 ```bash
-cd website
+cd landing_page_website
 npm install
 npm run dev        # local dev server
 npm run build      # client build + SSR build + prerender into dist/
@@ -25,7 +25,7 @@ The build prerenders the full page into `dist/index.html` (see `scripts/prerende
 
 Any static host works; Cloudflare Pages and Netlify are the obvious ones.
 
-- Build command: `npm run build`, output directory: `dist`, root directory: `website`.
+- Build command: `npm run build`, output directory: `dist`, root directory: `landing_page_website`.
 - Point `aidashos.com` and `www.aidashos.com` at the host and set the canonical to `https://www.aidashos.com/` (already in `index.html`).
 
 ## Telemetry

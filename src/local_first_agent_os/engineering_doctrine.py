@@ -13,6 +13,37 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import StrEnum
+
+
+class DoctrineProvenanceStatus(StrEnum):
+    """How one stamped doctrine provenance relates to this doctrine contract.
+
+    The version string and the content hash are stamped together, so the two
+    mismatches are different events with different remedies. A STALE_VERSION is
+    a deliberate doctrine bump: the review was judged under a contract that has
+    since been superseded, and a fresh review is the remedy. TEXT_DRIFT is the
+    programmer error the version rule exists to forbid: one version name is
+    claiming two different texts.
+    """
+
+    CURRENT = "CURRENT"
+    UNSTAMPED = "UNSTAMPED"
+    STALE_VERSION = "STALE_VERSION"
+    TEXT_DRIFT = "TEXT_DRIFT"
+
+
+@dataclass(frozen=True)
+class DoctrineProvenanceCheck:
+    """The classification plus the stamped facts the diagnostic message needs."""
+
+    status: DoctrineProvenanceStatus
+    stamped_version: str | None = None
+    stamped_sha256: str | None = None
+
+    @property
+    def matches(self) -> bool:
+        return self.status is DoctrineProvenanceStatus.CURRENT
 
 
 @dataclass(frozen=True)
@@ -41,12 +72,21 @@ class EngineeringDoctrine:
             f"{self.text}"
         )
 
+    def classify_provenance(self, value: object) -> DoctrineProvenanceCheck:
+        if not isinstance(value, Mapping) or value.get("contract_name") != "engineering_doctrine":
+            return DoctrineProvenanceCheck(DoctrineProvenanceStatus.UNSTAMPED)
+        raw_version = value.get("schema_version")
+        raw_sha = value.get("sha256")
+        version = raw_version if isinstance(raw_version, str) else None
+        sha256 = raw_sha if isinstance(raw_sha, str) else None
+        if version != self.schema_version:
+            return DoctrineProvenanceCheck(DoctrineProvenanceStatus.STALE_VERSION, version, sha256)
+        if sha256 != self.sha256:
+            return DoctrineProvenanceCheck(DoctrineProvenanceStatus.TEXT_DRIFT, version, sha256)
+        return DoctrineProvenanceCheck(DoctrineProvenanceStatus.CURRENT, version, sha256)
+
     def matches_provenance(self, value: object) -> bool:
-        if not isinstance(value, Mapping):
-            return False
-        return all(
-            value.get(key) == expected for key, expected in self.provenance_payload().items()
-        )
+        return self.classify_provenance(value).matches
 
 
 ENGINEERING_DOCTRINE_V1 = "\n".join(
@@ -176,5 +216,7 @@ __all__ = [
     "CURRENT_ENGINEERING_DOCTRINE",
     "ENGINEERING_DOCTRINE_V1",
     "ENGINEERING_DOCTRINE_V2",
+    "DoctrineProvenanceCheck",
+    "DoctrineProvenanceStatus",
     "EngineeringDoctrine",
 ]

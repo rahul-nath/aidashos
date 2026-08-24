@@ -315,3 +315,26 @@ def test_a_checkout_failure_that_is_not_a_closed_pool_is_not_retried(
 
     assert calls == [1], "a failure that is not a closed pool must not be retried"
     store.reset_connections()
+
+
+def test_a_bounded_checkout_does_not_start_a_second_reachability_wait(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The explicit timeout is the complete bound for latency-sensitive reads."""
+
+    from psycopg_pool import PoolTimeout
+
+    class _TimedOutPool:
+        def getconn(self, timeout: float | None = None) -> object:
+            assert timeout == 1.0
+            raise PoolTimeout("bounded checkout elapsed")
+
+    monkeypatch.setattr(store, "_pool", _TimedOutPool)
+    monkeypatch.setattr(
+        store,
+        "_diagnosed_checkout_failure",
+        lambda exc: pytest.fail(f"unexpected reachability diagnosis: {exc}"),
+    )
+
+    with pytest.raises(PoolTimeout, match="bounded checkout elapsed"):
+        store.connect(checkout_timeout_seconds=1.0)

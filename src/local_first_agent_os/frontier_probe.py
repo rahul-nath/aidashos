@@ -129,8 +129,7 @@ def report(proofs: tuple[TierProof, ...]) -> str:
     ]
     unproved = [proof for proof in proofs if not proof.proved]
     lines.extend(
-        f"WARNING: frontier tier did not answer its readiness proof - "
-        f"{proof.label}: {proof.detail}"
+        f"WARNING: frontier tier did not answer its readiness proof - {proof.label}: {proof.detail}"
         for proof in unproved
     )
     if unproved:

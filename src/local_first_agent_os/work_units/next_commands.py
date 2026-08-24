@@ -803,6 +803,145 @@ def _followup_commands(payload: Mapping[str, Any]) -> NextCommandSet:
     )
 
 
+def _doctrine_stale_commands(payload: Mapping[str, Any]) -> NextCommandSet:
+    """After the doctrine staleness scan, the moves that clear each stale review.
+
+    The scan is a query on purpose - re-reviewing spends staff seats, so the
+    spending stays behind commands an operator chooses to run. Three moves per
+    stale row, in remedy order: open the owning WorkUnit (whose own affordance
+    says how to re-drive it), request the checkpoint-keyed recovery staff
+    review where one can actually run, and retire the pending approval the
+    gate would refuse anyway. The recovery-review verb is printed REFUSED when
+    the dispatch completed cleanly, because it only accepts a PAUSED or FAILED
+    execution checkpoint - meeting that refusal here is cheaper than meeting it
+    from the failed command.
+    """
+
+    stale = _stale_rows(payload)
+    doctrine = payload.get("current_doctrine")
+    version = str(doctrine.get("schema_version")) if isinstance(doctrine, Mapping) else "unknown"
+    if not stale:
+        merge_pending = payload.get("merge_pending")
+        return NextCommandSet(
+            headline=(
+                f"every MERGE_PENDING review ({merge_pending} scanned) passes the "
+                f"merge gate under {version}"
+            ),
+        )
+
+    commands: list[NextCommand] = []
+    seen_work_units: set[str] = set()
+    for row in stale:
+        intent_id = str(row.get("intent_id") or "unknown-intent")
+        issue_code = str(row.get("issue_code") or "unknown")
+        work_unit_id = str(row.get("work_unit_id") or "")
+        if work_unit_id and work_unit_id not in seen_work_units:
+            seen_work_units.add(work_unit_id)
+            commands.append(
+                NextCommand(
+                    command=_cmd("get_work_unit", work_unit_id),
+                    intent=(
+                        f"open the WorkUnit that owns intent {intent_id}; its own "
+                        "next commands say how to re-drive the milestone so a fresh "
+                        "staff review runs under the current doctrine"
+                    ),
+                    status=NextCommandStatus.READY,
+                )
+            )
+        recovery = row.get("recovery_review")
+        precondition = (
+            "a PAUSED or FAILED execution checkpoint whose base and saga agree "
+            "with the retained commit"
+        )
+        if isinstance(recovery, Mapping):
+            commands.append(
+                NextCommand(
+                    command=_cmd(
+                        "request_recovery_staff_review",
+                        str(recovery.get("checkpoint_id") or ""),
+                        "--target-project-id",
+                        str(recovery.get("target_project_id") or ""),
+                        "--branch",
+                        str(recovery.get("branch") or ""),
+                        "--base-head-sha",
+                        str(recovery.get("base_sha") or ""),
+                        "--commit-sha",
+                        str(recovery.get("commit_sha") or ""),
+                    ),
+                    intent=(
+                        f"re-review intent {intent_id}'s exact retained commit under "
+                        "the current doctrine; this spends a staff seat"
+                    ),
+                    status=NextCommandStatus.READY,
+                    precondition=precondition,
+                )
+            )
+        else:
+            commands.append(
+                NextCommand(
+                    command=_cmd(
+                        "request_recovery_staff_review",
+                        "<checkpoint_id>",
+                        "--target-project-id",
+                        str(row.get("target_project_id") or "<target_project_id>"),
+                        "--branch",
+                        str(row.get("branch") or "<branch>"),
+                        "--base-head-sha",
+                        str(row.get("base_sha") or "<base_sha>"),
+                        "--commit-sha",
+                        str(row.get("commit_sha") or "<commit_sha>"),
+                    ),
+                    intent=(
+                        f"re-review intent {intent_id}'s exact retained commit under "
+                        "the current doctrine"
+                    ),
+                    status=NextCommandStatus.REFUSED,
+                    precondition=precondition,
+                    reason=(
+                        f"intent {intent_id} holds no such checkpoint; a dispatch "
+                        "that completed cleanly leaves none, so the milestone must "
+                        "be re-driven instead"
+                    ),
+                    refusal_code="recovery_staff_review_requires_paused_checkpoint",
+                )
+            )
+        approval_id = str(row.get("approval_id") or "")
+        if approval_id:
+            commands.append(
+                NextCommand(
+                    command=_cmd(
+                        "resolve_approval_request",
+                        approval_id,
+                        "deny",
+                        "--resolved-by",
+                        "operator",
+                    ),
+                    intent=(
+                        f"retire the pending approval for intent {intent_id}; the "
+                        f"merge gate refuses it with {issue_code}"
+                    ),
+                    status=NextCommandStatus.READY,
+                )
+            )
+    return NextCommandSet(
+        headline=(
+            f"{len(stale)} MERGE_PENDING review(s) cannot pass the merge gate under {version}"
+        ),
+        detail=(
+            "; ".join(f"intent {row.get('intent_id')}: {row.get('issue_code')}" for row in stale)
+            + ". The operator procedure is documented in docs/doctrine_bump_recovery.md."
+        ),
+        commands=tuple(commands),
+    )
+
+
+def _stale_rows(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    raw = payload.get("stale")
+    if not isinstance(raw, Sequence) or isinstance(raw, str | bytes):
+        return []
+    return [row for row in raw if isinstance(row, Mapping)]
+
+
 # Which builder each command's payload feeds. A command absent from this table
 # simply prints no suggestions, which is the right default: this is an
 # affordance, and a command nobody has taught it about should stay silent rather
@@ -817,6 +956,7 @@ _BUILDERS: Final[dict[str, Any]] = {
     "adopt_recovered_work_unit_dispatch": _followup_commands,
     "adopt_settled_work_unit_dispatch": _followup_commands,
     "adopt_integrated_work_unit_milestone": _followup_commands,
+    "list_doctrine_stale_reviews": _doctrine_stale_commands,
 }
 
 

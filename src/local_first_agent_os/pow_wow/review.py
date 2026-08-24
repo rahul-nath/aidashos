@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from .protocol import ReviewVerdict, TaskPurpose
+from .protocol import ReviewDisposition, ReviewVerdict, TaskPurpose
 from .types import PowWowTaskResult, PowWowTaskSpec
 
 
@@ -36,5 +36,9 @@ def extract_review_verdict_text(task_result: PowWowTaskResult) -> str | None:
     return None
 
 
+def review_verdict_disposition(verdict: str) -> ReviewDisposition:
+    return ReviewVerdict.parse(verdict).disposition
+
+
 def review_verdict_requests_changes(verdict: str) -> bool:
-    return ReviewVerdict.parse(verdict).disposition.requests_changes
+    return review_verdict_disposition(verdict).requests_changes

@@ -742,6 +742,12 @@ class DispatchIntentCreated:
     dispatch_intent_id: str
     tier: str
     kind: str
+    # The commit this intent's worktree branches from, resolved from the
+    # milestone's dependency's settled result. None means HEAD, which is both
+    # the no-dependency case and every event recorded before the field existed.
+    # Recorded so the operator at the CODE_MERGE gate can read the whole
+    # lineage from the ledger instead of reconstructing it from git.
+    base_commit_sha: str | None = None
 
     @property
     def event_type(self) -> WorkUnitEventType:
@@ -759,6 +765,7 @@ class DispatchIntentCreated:
             "dispatch_intent_id": self.dispatch_intent_id,
             "tier": self.tier,
             "kind": self.kind,
+            "base_commit_sha": self.base_commit_sha,
         }
 
 

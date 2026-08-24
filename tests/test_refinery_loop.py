@@ -3,15 +3,15 @@
 
 """The refinery as a running process: a real ledger, a real repository, real rows.
 
-Milestone 3 builds the stack and stops, so the thing most worth pinning here is
-what it does *not* do. The integrated branch is never advanced, and a suite that
-only checked returned values would not notice the day it starts being advanced by
-accident. Every case therefore ends by looking at the repository.
+The load-bearing proof is not the returned value. A green project gate advances
+the declared branch to the exact verified tip and records every request as
+integrated. A red gate, dirty target checkout, or undecidable Git operation does
+not advance it. Every case therefore ends by inspecting both Git and the durable
+queue.
 
-The one durable verdict this milestone produces is a parked merge conflict, and
-that is a real verdict rather than a placeholder: the requests ahead of a
-conflict applied cleanly by construction, so the culprit is attributable with no
-gate run at all. Everything else returns to the queue.
+A merge conflict is a durable verdict rather than a placeholder: the requests
+ahead of it applied cleanly by construction, so the culprit is attributable
+without interpreting Git's prose.
 
 Why the loop is driven rather than the driver
 =============================================
@@ -56,17 +56,23 @@ from local_first_agent_os.coordination.resident_loop import (
 from local_first_agent_os.coordination.store import connect
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject
-from local_first_agent_os.refinery.bisect import RunAbandoned, StackAbandonment
+from local_first_agent_os.refinery.bisect import RunAbandoned, RunCompleted, StackAbandonment
 from local_first_agent_os.refinery.loop import Drained, Idle, Refinery, run_refinery
 from local_first_agent_os.refinery.requests import (
     BisectedOut,
+    GateFailed,
     InFlight,
+    Integrated,
     IntegrationAttemptId,
     IntegrationBatchId,
     MergeConflict,
     Queued,
 )
-from local_first_agent_os.refinery.stack import StackBuilder
+from local_first_agent_os.refinery.stack import (
+    GitFailure,
+    SourceWorktreePreserved,
+    StackBuilder,
+)
 from local_first_agent_os.settings import get_settings
 
 _PROJECT = "target"
@@ -282,17 +288,11 @@ def test_the_poll_interval_defaults_to_the_setting(refinery: Refinery) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_a_clean_stack_is_built_and_deliberately_not_landed(
+def test_a_clean_stack_is_verified_landed_and_recorded(
     refinery: Refinery,
     repository: StackRepository,
 ) -> None:
-    """The milestone boundary, stated as an assertion rather than as a comment.
-
-    Milestone 4 replaces `INTEGRATED_BRANCH_ADVANCE_UNIMPLEMENTED` with the gate
-    and the fast-forward. Until then, a stack that builds and proves clean still
-    lands nothing, and its members go back to the queue rather than being parked:
-    nothing is wrong with them.
-    """
+    """A green combination advances once and makes every request durable."""
 
     _enqueue(repository, "alpha", "beta")
 
@@ -300,29 +300,26 @@ def test_a_clean_stack_is_built_and_deliberately_not_landed(
 
     assert isinstance(poll, Drained)
     outcome = poll.run.outcome
-    # `RunAbandoned` rather than `RunCompleted` is the assertion: a completed run
-    # has no reason and nothing returned, because it decided everybody.
-    assert isinstance(outcome, RunAbandoned)
-    assert outcome.integrated == ()
+    assert isinstance(outcome, RunCompleted)
+    assert outcome.integrated == ("req-alpha", "req-beta")
     assert outcome.isolated == ()
-    assert outcome.reason is StackAbandonment.INTEGRATED_BRANCH_ADVANCE_UNIMPLEMENTED
-    assert set(outcome.returned_to_queue) == {"req-alpha", "req-beta"}
 
-    assert all(isinstance(request, Queued) for request in _requests().values())
-    _assert_branch_never_advanced(repository)
+    rows = _requests()
+    assert all(isinstance(request, Integrated) for request in rows.values())
+    landed = git(repository.path, "rev-parse", "refs/heads/main")
+    assert landed != repository.base_sha
+    assert all(
+        git(repository.path, "merge-base", "--is-ancestor", repository.sha(name), landed) == ""
+        for name in ("alpha", "beta")
+    )
+    assert worktree_paths(repository.path) == (str(repository.path.resolve()),)
 
 
-def test_a_run_that_decided_nothing_sleeps_rather_than_spinning(
+def test_a_landed_run_drains_immediately_then_sleeps_on_empty(
     refinery: Refinery,
     repository: StackRepository,
 ) -> None:
-    """The hot-loop guard.
-
-    "Do not sleep after doing work" is the design's rule, and an abandoned run
-    did none: the batch went back to `Queued` unchanged and the next poll would
-    rebuild the identical stack. In milestone 3 every clean stack abandons, so
-    without this the loop would peg a core on a queue with one request in it.
-    """
+    """Work drains immediately; only the following empty poll sleeps."""
 
     _enqueue(repository, "alpha")
     sleep = _RecordingSleep()
@@ -330,8 +327,8 @@ def test_a_run_that_decided_nothing_sleeps_rather_than_spinning(
     polls = refinery.drain(interval_seconds=3.0, max_polls=3, sleep=sleep)
 
     assert len(polls) == 3
-    assert sleep.intervals == [3.0, 3.0]
-    _assert_branch_never_advanced(repository)
+    assert sleep.intervals == [3.0]
+    assert isinstance(_requests()["req-alpha"], Integrated)
 
 
 # ---------------------------------------------------------------------------
@@ -339,13 +336,11 @@ def test_a_run_that_decided_nothing_sleeps_rather_than_spinning(
 # ---------------------------------------------------------------------------
 
 
-def test_a_conflicting_request_is_parked_durably_and_the_rest_go_back(
+def test_a_conflicting_request_is_parked_durably_and_the_rest_land(
     refinery: Refinery,
     repository: StackRepository,
 ) -> None:
-    """One gate run is not spent, because no gate exists to spend yet.
-
-    The row keeps the branch, the commit, the base, the cause, and the
+    """The row keeps the branch, the commit, the base, the cause, and the
     combination that refused it, because the remedy an operator is offered is a
     bounded revision against that base and none of it is reconstructable from
     "did not land".
@@ -367,9 +362,9 @@ def test_a_conflicting_request_is_parked_durably_and_the_rest_go_back(
     assert parked.stack_beneath == ("req-alpha",)
     assert parked.subject.commit_sha == repository.sha("conflicting")
 
-    assert isinstance(rows["req-alpha"], Queued)
-    assert isinstance(rows["req-beta"], Queued)
-    _assert_branch_never_advanced(repository)
+    assert isinstance(rows["req-alpha"], Integrated)
+    assert isinstance(rows["req-beta"], Integrated)
+    assert git(repository.path, "rev-parse", "refs/heads/main") != repository.base_sha
 
 
 def test_a_run_that_parked_someone_polls_again_without_sleeping(
@@ -384,11 +379,10 @@ def test_a_run_that_parked_someone_polls_again_without_sleeping(
     polls = refinery.drain(interval_seconds=3.0, max_polls=2, sleep=sleep)
 
     assert len(polls) == 2
-    # The first poll parked the conflict and went straight round again; the
-    # second built a clean stack, decided nothing, and would have slept had it
-    # not been the last permitted poll.
+    # The first poll parks the conflict and lands the remainder, then the empty
+    # second poll is the final permitted poll.
     assert sleep.intervals == []
-    _assert_branch_never_advanced(repository)
+    assert isinstance(_requests()["req-alpha"], Integrated)
 
 
 def test_the_parked_request_stays_parked_across_later_polls(
@@ -403,7 +397,136 @@ def test_the_parked_request_stays_parked_across_later_polls(
     parked = _requests()["req-conflicting"]
 
     assert isinstance(parked, BisectedOut)
+    assert isinstance(_requests()["req-alpha"], Integrated)
+
+
+def test_a_red_project_gate_parks_the_request_and_leaves_main_unchanged(
+    repository: StackRepository,
+    tmp_path: Path,
+) -> None:
+    project = LinkedProject(
+        id=_PROJECT,
+        kind="test_repo",
+        path=repository.path,
+        status="active",
+        access=ProjectAccessPolicy(mode=AccessMode.READ_WRITE),
+        description="red gate fixture",
+        verification_commands=["printf 'combination refused' >&2; exit 7"],
+        integrated_branch="main",
+    )
+    refinery = Refinery(
+        _PROJECT,
+        project=project,
+        builder=StackBuilder(repository.path, tmp_path / "worktrees"),
+        clock=lambda: 1_700_000_000.0,
+    )
+    _enqueue(repository, "alpha")
+
+    poll = refinery.poll_once()
+
+    assert isinstance(poll, Drained)
+    parked = _requests()["req-alpha"]
+    assert isinstance(parked, BisectedOut)
+    assert isinstance(parked.cause, GateFailed)
+    assert parked.cause.exit_code == 7
+    assert "combination refused" in parked.cause.output_excerpt
     _assert_branch_never_advanced(repository)
+
+
+def test_a_dirty_target_checkout_refuses_fast_forward_and_requeues(
+    refinery: Refinery,
+    repository: StackRepository,
+) -> None:
+    _enqueue(repository, "alpha")
+    (repository.path / "README.md").write_text("operator edit\n", encoding="utf-8")
+
+    poll = refinery.poll_once()
+
+    assert isinstance(poll, Drained)
+    assert isinstance(poll.run.outcome, RunAbandoned)
+    assert poll.run.outcome.reason is StackAbandonment.FAST_FORWARD_REFUSED
+    assert isinstance(_requests()["req-alpha"], Queued)
+    assert git(repository.path, "rev-parse", "refs/heads/main") == repository.base_sha
+
+
+def test_a_green_merge_removes_the_clean_execution_worktree_but_keeps_its_branch(
+    refinery: Refinery,
+    repository: StackRepository,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "agent-alpha-worktree"
+    git(repository.path, "worktree", "add", str(source), "agent/alpha")
+    _enqueue(repository, "alpha")
+
+    poll = refinery.poll_once()
+
+    assert isinstance(poll, Drained)
+    assert not source.exists()
+    assert "agent/alpha" in branch_names(repository.path)
+    assert poll.run.source_worktree_cleanup
+    assert type(poll.run.source_worktree_cleanup[0][1]).__name__ == "SourceWorktreeRemoved"
+
+
+def test_source_worktree_inspection_failure_is_a_nonfatal_cleanup_report(
+    repository: StackRepository,
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    builder = StackBuilder(repository.path, tmp_path / "worktrees")
+    original_must = StackBuilder._must
+
+    def fail_listing(self, args, cwd):
+        if tuple(args) == ("worktree", "list", "--porcelain"):
+            raise GitFailure(tuple(args), 1, "simulated read failure")
+        return original_must(self, args, cwd)
+
+    monkeypatch.setattr(StackBuilder, "_must", fail_listing)
+
+    cleanup = builder.cleanup_source_worktree(
+        branch_name="agent/alpha",
+        approved_tip_sha=repository.sha("alpha"),
+    )
+
+    assert isinstance(cleanup, SourceWorktreePreserved)
+    assert "simulated read failure" in cleanup.detail
+
+
+def test_replay_after_git_lands_but_the_ledger_transaction_rolls_back(
+    refinery: Refinery,
+    repository: StackRepository,
+    monkeypatch,
+) -> None:
+    """The unavoidable Git/Postgres crash window is an idempotent replay.
+
+    Git cannot join the ledger transaction. If the process dies after the exact
+    fast-forward, Postgres rolls the claim back to QUEUED. Replaying sees the
+    approved commit already below main, verifies the unchanged combination, and
+    records it without creating a duplicate commit.
+    """
+
+    import local_first_agent_os.refinery.driver as driver_module
+
+    _enqueue(repository, "alpha")
+    original_record_integrated = driver_module.record_integrated
+
+    def simulate_process_death(*args, **kwargs):
+        raise RuntimeError("simulated death after fast-forward")
+
+    monkeypatch.setattr(driver_module, "record_integrated", simulate_process_death)
+
+    with pytest.raises(RuntimeError, match="simulated death after fast-forward"):
+        refinery.poll_once()
+
+    landed_before_replay = git(repository.path, "rev-parse", "refs/heads/main")
+    assert landed_before_replay == repository.sha("alpha")
+    assert isinstance(_requests()["req-alpha"], Queued)
+
+    monkeypatch.setattr(driver_module, "record_integrated", original_record_integrated)
+    replay = refinery.poll_once()
+
+    assert isinstance(replay, Drained)
+    assert isinstance(_requests()["req-alpha"], Integrated)
+    assert git(repository.path, "rev-parse", "refs/heads/main") == landed_before_replay
 
 
 # ---------------------------------------------------------------------------
@@ -496,7 +619,8 @@ def test_drain_recovers_before_it_selects(
 
     assert len(polls) == 1
     assert isinstance(polls[0], Drained)
-    _assert_branch_never_advanced(repository)
+    assert isinstance(_requests()["req-alpha"], Integrated)
+    assert git(repository.path, "rev-parse", "refs/heads/main") == repository.sha("alpha")
 
 
 # ---------------------------------------------------------------------------
@@ -568,30 +692,23 @@ def registered_project(
     get_settings.cache_clear()
 
 
-def test_the_command_reports_that_it_landed_nothing(
+def test_the_command_reports_the_actual_branch_advance(
     registered_project: StackRepository,
 ) -> None:
-    """An operator reading this must not conclude the merge is automatic now.
-
-    The queue's first milestone made `/approve-merge` say plainly that no run
-    drains the queue. This is the same obligation one step along: a run happened,
-    it verified the stack, and it still did not land anything.
-    """
+    """The coordination result reports the repository fact, not a static note."""
 
     _enqueue(registered_project, "alpha")
 
     result = run_refinery(_PROJECT, interval_seconds=0.0, max_polls=1)
 
     assert result["ok"] is True
-    assert result["advanced_the_integrated_branch"] is False
+    assert result["advanced_the_integrated_branch"] is True
     assert result["integrated_branch"] == "main"
-    assert "never advances the integrated branch" in result["note"]
     assert result["polls"][0]["outcome"] == "drained"
-    assert (
-        result["polls"][0]["abandoned_because"]
-        == StackAbandonment.INTEGRATED_BRANCH_ADVANCE_UNIMPLEMENTED.value
+    assert result["polls"][0]["integrated"] == ["req-alpha"]
+    assert git(registered_project.path, "rev-parse", "refs/heads/main") == registered_project.sha(
+        "alpha"
     )
-    _assert_branch_never_advanced(registered_project)
 
 
 def test_the_command_names_the_parked_request_and_what_refused_it(
@@ -609,4 +726,4 @@ def test_the_command_names_the_parked_request_and_what_refused_it(
             "stack_beneath": ["req-alpha"],
         }
     ]
-    _assert_branch_never_advanced(registered_project)
+    assert result["polls"][0]["integrated"] == ["req-alpha"]

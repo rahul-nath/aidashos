@@ -1,21 +1,35 @@
 # Staffing plan: which model plays which tier, and how many can run at once.
-# This is the ONE place that maps tier -> concrete omni harness. Swapping which
-# model plays "staff" is a one-line edit here; no code changes.
+# This is the ONE place that maps tier -> concrete omni harness.
 #
-# Locked mapping: codex = senior, claude = staff, gemma (via pi) = junior.
-# Swapped 2026-08-11, from codex-implements: the codex CLI reports its weekly
-# quota exhausted until 2026-08-17 7:58 PM, six days out, so both frontier
-# seats run on claude with two different models for the outage. That is the
-# sanctioned fallback `load_bench` already documents - review keeps a fresh
-# pass and a different model, and loses provider diversity - not a shared seat,
-# which `test_the_repo_bench_never_lets_the_reviewer_be_the_author` still
-# refuses. The 2026-08-09 assessment (codex the better coder, claude the better
-# critic) still stands; restoring codex to a seat when its quota returns is an
-# operator decision, not an automatic one.
+# The two frontier seats are declared TOGETHER, as a named pairing, and one
+# pairing is seated at a time. Implementer and reviewer are one decision - "who
+# reviews Opus" has no answer until you know what is implementing - and while
+# they were two independent tables an operator could change half of it. That is
+# not hypothetical here: the 2026-08-09 swap left four prose claims behind, and
+# POLICIES.md twice denied the implementer a write its own plan had granted,
+# because two declarations disagreed about who was seated. Swapping the seating
+# is now editing `seated_pairing` below, and the pair arrives whole.
 #
-# POLICIES.md is keyed on the seat, not the vendor, so swapping a harness here
-# needs no edit there and no hash re-pin. That coupling is what broke this file
-# twice: a swap left the implementer denied the write its own plan had granted.
+# `FrontierPairing` refuses a pairing that names one model for both seats,
+# unconditionally. There is no acknowledgement flag: claude and codex each
+# offer multiple model tiers and the local registry serves three models, so a
+# second model always exists, and a rule with an escape hatch decays into the
+# thing it guards against (operator's ruling, 2026-08-23).
+#
+# A pairing may name other pairings in `fallback`, in order. When any vendor
+# the seated pairing depends on reports a spent quota, restaffing moves BOTH
+# seats to the first fallback pairing that avoids every spent vendor - the
+# pair moves whole, so the reviewer is always one that was declared against
+# the implementer it is reviewing. One hop: a fallback's own fallback is not
+# followed.
+#
+# Locked mapping: codex = senior, claude = staff, and gemma (via pi) = junior.
+# Both frontier seats on one vendor is a sanctioned outage seating - review
+# keeps a fresh pass and a different model, and loses provider diversity - not
+# a shared seat, which will not load.
+#
+# POLICIES.md is keyed on the seat, not the vendor, so swapping a pairing here
+# needs no edit there and no hash re-pin.
 #
 # Model ids below are passed to their CLI verbatim; nothing validates them at
 # load, so a typo surfaces as a dispatch failure at spawn time. Before writing
@@ -24,72 +38,152 @@
 #   claude --model <id> --print "Reply with exactly: ok"
 #   codex exec --skip-git-repo-check --model <id> "Reply with exactly: ok"
 # ./scripts/first-run-check.sh --probe-frontier-models runs that probe against
-# every id staffed below.
+# every id in the SEATED pairing. It does not probe fallback pairings: a
+# fallback names the vendor the seating escapes to, which during the outage
+# that makes it matter is the vendor that is out of quota, so probing it at
+# every start would raise an alarm about a provider nobody is running yet.
+# Prove fallback ids by hand.
 
-# Restaffed 2026-08-13, operator's call. The two-vendor cross-check is BACK:
-# senior is codex, staff is claude, so the reviewer is no longer the same
-# provider as the author. That property was collapsed on 2026-08-11 only because
-# codex reported its weekly quota exhausted; `codex exec --model gpt-5.6-sol`
-# was probed live on 2026-08-13 and answered, so the outage that forced the
-# both-claude seating is over ahead of the 2026-08-17 date the handoff recorded.
+# The operator's matrix, 2026-08-23. Three declared seatings:
+#   cross-vendor (both vendors up):  senior gpt-5.6-sol/high, staff claude-opus-5/xhigh
+#   claude-only  (codex out):        senior claude-opus-5/high, staff claude-fable-5/high
+#   codex-only   (claude out):       senior gpt-5.6-terra/max, staff gpt-5.6-sol/high
+# Both vendors out: nothing declared avoids it, both seats queue. The intended
+# answer there is a local fallback pairing; the compilable plan is
+# docs/local_fallback_seating_gawd.md.
+#
+# Seated today: the normal cross-vendor pair. Both CLIs and every model id in
+# the two same-vendor fallbacks were proved live on 2026-08-23. A reported
+# single-vendor quota outage moves the whole pair to its declared fallback;
+# both vendors out leaves both frontier tiers queued.
+seated_pairing = "cross-vendor"
 
-[bench.staff]
+# ------------------------------------------------------------------ pairings
+
+# The normal seating once codex returns: codex implements, claude reviews, and
+# the strongest claude model sits in the critic seat at xhigh - review is the
+# safety net and stays expensive on purpose. Escapes: codex dies -> claude-only;
+# claude dies -> codex-only. The chain is walked in order and the first pairing
+# avoiding every spent vendor takes both seats, so the order only matters when
+# a pairing avoids nothing it needs to.
+[pairings.cross-vendor]
+fallback = ["claude-only", "codex-only"]
+
+[pairings.cross-vendor.senior]
+harness = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+capacity = 2
+
+# The senior reading workload keeps a cheaper codex id, restoring the
+# 2026-08-16 declaration this seat held before the outage moved everything to
+# claude. Reading the repository does not need the implementation seat's
+# profile.
+[pairings.cross-vendor.senior.workloads.independent_reading]
+model = "gpt-5.6-terra"
+reasoning_effort = "medium"
+
+[pairings.cross-vendor.staff]
 harness = "claude"
-# Opus on the dedicated review seat. Different vendor from senior now, which is
-# what makes this review rather than the author re-reading itself;
-# `_warn_when_review_is_self_review` compares `(harness, model)`, and these two
-# no longer share either.
 model = "claude-opus-5"
-# "xhigh". Review runs at capacity 1 on short turns, so this is the cheap dial:
-# the seat spends far less window than the implementer does, and catching a bad
-# change is worth more per token here than anywhere else on the bench.
+# xhigh: the critic seat runs at capacity 1, so the top of the effort range is
+# paid once per review, and this pairing is only seated when claude's window is
+# not shared with the implementer.
 reasoning_effort = "xhigh"
 capacity = 1
 
-[bench.senior]
-harness = "codex"
-# Pinned rather than left to the CLI default, so which model ran a milestone is a
-# fact in the compiled record instead of whatever the harness happened to pick
-# that week. Becomes `codex exec --model gpt-5.6-sol -c model_reasoning_effort=high`.
-#
-# The 2026-08-09 assessment that codex is the better coder and claude the better
-# critic is what this seating restores, now that codex answers again.
-model = "gpt-5.6-sol"
+[pairings.cross-vendor.staff.workloads.independent_reading]
+model = "claude-sonnet-5"
+reasoning_effort = "medium"
+
+# The codex-outage seating. Restaffed 2026-08-18 by the operator's call:
+# senior is claude-opus-5 (implementer), staff is claude-fable-5
+# (reviewer). Fable 5 is the Mythos-class tier above Opus, so the stronger
+# model holds the critic seat, which is the shape the 2026-08-09 assessment
+# (the better critic reviews) asks for within one vendor. All three ids in
+# this pairing were probed live on 2026-08-18 with the one-line nonce and
+# answered.
+[pairings.claude-only]
+fallback = ["codex-only"]
+
+[pairings.claude-only.senior]
+harness = "claude"
+# Pinned rather than left to the CLI default, so which model ran a milestone is
+# a fact in the compiled record instead of whatever the harness happened to
+# pick that week. Becomes `claude --model claude-opus-5` with high effort.
+model = "claude-opus-5"
 # "high" rather than the top of the range: effort is paid on every concurrent
 # senior turn at once, and this is the seat that runs at capacity 2 on long
 # implementation turns.
 reasoning_effort = "high"
-# 2 rather than the 3 codex ran at previously. The seats no longer share one
-# subscription, so this could go back up; it stays at 2 until a run shows the
-# window can take it.
+# 2, and both frontier seats share the one claude subscription while this
+# pairing is seated, so this must not go up until a run shows the window can
+# take it.
 capacity = 2
-# The fallback model if codex is spent again, and it is read now.
-#
-# It was inert until `_replacement_for` in `harness_availability.py` started
-# consulting it. That function answers two questions where it used to answer
-# one: `_unspent_frontier_peer` still decides which *harness* a spent tier moves
-# to, and the model comes from this list rather than from whatever the peer slot
-# happened to hold. Handing back the peer's whole slot is what used to put one
-# model on both seats and collapse the cross-check.
-#
-# A backup is taken only when it differs from every model another frontier tier
-# holds. Naming the peer's own model here buys nothing, since the entire point
-# is to restore variance between implementer and reviewer, so such an entry is
-# skipped rather than applied and the tier lands on the peer's slot unchanged.
-backup_models = ["claude-sonnet-5"]
 
 # Independent reading is still senior-owned work, but it does not need the
 # implementation seat's most expensive model and effort profile. The executor
 # selects this override only for the typed independent-reading planning phase.
-[bench.senior.workloads.independent_reading]
-model = "gpt-5.6-terra"
+[pairings.claude-only.senior.workloads.independent_reading]
+model = "claude-sonnet-5"
 reasoning_effort = "medium"
 
+[pairings.claude-only.staff]
+harness = "claude"
+# Fable on the dedicated review seat. Same vendor as senior during the codex
+# outage, but a different model, which is what keeps this review rather than
+# the author re-reading itself.
+model = "claude-fable-5"
+# "high", down from the xhigh this seat runs in cross-vendor: both frontier
+# seats spend one claude subscription window here, so the top of the effort
+# range is no longer a free dial; operator's call 2026-08-18.
+reasoning_effort = "high"
+capacity = 1
+
+# The staff reading phase routes through the same workload
+# (`_judgment_workload` sends both reading phases to INDEPENDENT_READING), so
+# it gets the same demotion: reading the repository does not need the review
+# seat's model. The staff FINAL review keeps the full Fable slot - that pass
+# is the safety net and stays expensive on purpose.
+[pairings.claude-only.staff.workloads.independent_reading]
+model = "claude-sonnet-5"
+reasoning_effort = "medium"
+
+# The claude-outage seating: everything on codex, terra implementing at max
+# and sol reviewing at high (operator's matrix, 2026-08-23). Both ids have been
+# staffed in this repository before - sol on the senior seat, terra on the
+# senior reading workload, both until 2026-08-18.
+#
+# Probed live on 2026-08-23: both ids answered the one-line nonce, and
+# gpt-5.6-terra answered it again under `-c model_reasoning_effort=max`, which
+# is what admits `max` to the codex effort vocabulary here (`xhigh` was proved
+# against claude on 2026-08-13; this is the codex analogue).
+[pairings.codex-only]
+fallback = ["claude-only"]
+
+[pairings.codex-only.senior]
+harness = "codex"
+model = "gpt-5.6-terra"
+reasoning_effort = "max"
+capacity = 2
+
+[pairings.codex-only.staff]
+harness = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+capacity = 1
+
+# ------------------------------------------------------------------ solo tiers
+
+# Junior is seated alone, so it stays in [bench]: it has no pair, because there
+# is no second local model checking the first one's work at this tier.
 [bench.junior]
 harness = "pi"
 model = "gemma4"
 capacity = 4
-# Backup junior model(s) — kept for a local comparison eval (gemma4 vs qwen3.8).
-# The Pi harness routes through the local pi-daemon -> llama-server, so these
-# are plain llama-server model ids (no omni gateway prefix).
-backup_models = ["qwen3.8-27b-mtp"]
+# Backup junior model(s) - kept for a local comparison eval (gemma4 vs qwen3.8).
+# The Pi harness routes through the local pi-daemon -> llama-server, so this is
+# a plain llama-server model id (no omni gateway prefix) and its harness is pi.
+# Restaffing never reaches it: a local harness has no quota to spend, and it is
+# refused as a replacement for a frontier seat.
+backup_models = [{ harness = "pi", model = "qwen3.8-27b-mtp" }]

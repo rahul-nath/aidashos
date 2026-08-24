@@ -648,9 +648,7 @@ def test_a_declared_target_is_not_blocked() -> None:
 
     assert isinstance(outcome, CompiledPlanOutcome)
     assert outcome.runnable is True
-    assert not [
-        item for item in outcome.execution_blockers if "target project" in item
-    ]
+    assert not [item for item in outcome.execution_blockers if "target project" in item]
 
 
 def test_a_document_that_declares_no_envelope_still_compiles_a_ceiling() -> None:

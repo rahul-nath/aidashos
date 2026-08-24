@@ -15,6 +15,7 @@ import { apiFetch, client, describeApiError } from '../api'
 import type {
   ActivityCursor,
   ExecutionEventEntry,
+  IntegrationTriggerResult,
   ProjectActionSnapshot,
   ProjectActivityPage,
 } from '../api'
@@ -114,6 +115,92 @@ export function useCurrentState(projectId: string): CurrentStateLane {
   usePolling(refresh, CURRENT_STATE_POLL_MS)
 
   return { data: snapshot, error, lastUpdatedAt: snapshot?.generated_at ?? null, refresh }
+}
+
+export type IntegrationTriggerLane = {
+  pending: boolean
+  result: IntegrationTriggerResult | null
+  error: string | null
+  trigger: (approvalId: string) => Promise<void>
+}
+
+/** A click asks the durable queue to drain once; approval remains a separate gate. */
+export function useIntegrationTrigger(
+  refresh: () => Promise<void>,
+  scope: string,
+): IntegrationTriggerLane {
+  const [pending, setPending] = useState(false)
+  const [result, setResult] = useState<IntegrationTriggerResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const inFlight = useRef(false)
+
+  useEffect(() => {
+    if (
+      !result ||
+      result.target_project_id !== scope ||
+      (result.state !== 'accepted' && result.state !== 'running')
+    )
+      return
+    let cancelled = false
+    let timer: number | undefined
+
+    const poll = async () => {
+      try {
+        const { data, error: apiError, response } = await client.GET(
+          '/approvals/{approval_id}/integration',
+          { params: { path: { approval_id: result.approval_id } } },
+        )
+        if (apiError !== undefined || data === undefined) {
+          throw new Error(describeApiError(apiError, response))
+        }
+        if (cancelled) return
+        setResult(data)
+        setError(null)
+        if (data.state === 'complete' || data.state === 'blocked') {
+          await refresh()
+          return
+        }
+      } catch (caught) {
+        if (!cancelled) setError(describeError(caught))
+      }
+      if (!cancelled) timer = window.setTimeout(() => void poll(), 1_500)
+    }
+
+    timer = window.setTimeout(() => void poll(), 1_500)
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [refresh, result, scope])
+
+  const trigger = useCallback(
+    async (approvalId: string) => {
+      if (inFlight.current) return
+      inFlight.current = true
+      setPending(true)
+      setResult(null)
+      setError(null)
+      try {
+        const { data, error: apiError, response } = await client.POST(
+          '/approvals/{approval_id}/integration',
+          { params: { path: { approval_id: approvalId } } },
+        )
+        if (apiError !== undefined || data === undefined) {
+          throw new Error(describeApiError(apiError, response))
+        }
+        setResult(data)
+        await refresh()
+      } catch (caught) {
+        setError(describeError(caught))
+      } finally {
+        inFlight.current = false
+        setPending(false)
+      }
+    },
+    [refresh],
+  )
+
+  return { pending, result, error, trigger }
 }
 
 export type TimelineLane = Lane<ExecutionEventEntry[]> & {

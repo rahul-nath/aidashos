@@ -25,6 +25,7 @@ import json
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from ..coordination.store import ConnectionLike, iso, now, rowdict, tx
@@ -274,6 +275,23 @@ class DecisionRequestRow:
     resolved_at: float | None
 
 
+class EnqueueKind(StrEnum):
+    """Which delivery one outbox row asks for.
+
+    A sum rather than an inference from WorkUnit status at delivery time: the
+    row states its intent, so the drainer never has to guess whether a pending
+    row means "start me" or "continue me", and a third delivery kind is a new
+    member here rather than a new heuristic there.
+    """
+
+    START = "START"
+    """The first root execution, written when the WorkUnit is created."""
+
+    RESUME = "RESUME"
+    """A continuation of a halted root, written when an operator decision
+    unblocks a BLOCKED WorkUnit."""
+
+
 @dataclass(frozen=True)
 class EnqueueOutboxRow:
     outbox_id: str
@@ -283,6 +301,7 @@ class EnqueueOutboxRow:
     compiled_plan_revision_id: str
     compiled_plan_hash: str
     lifecycle_profile_version: int
+    kind: EnqueueKind
     status: str
     attempts: int
     last_error: str | None
@@ -816,8 +835,8 @@ def start_work_unit(
             INSERT INTO work_unit_enqueue_outbox(
                 outbox_id, work_unit_id, root_workflow_id, design_doc_revision_id,
                 compiled_plan_revision_id, compiled_plan_hash, lifecycle_profile_version,
-                status, attempts, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?)
+                kind, status, attempts, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?)
             """,
             (
                 f"wuo_{work_unit_id}",
@@ -827,6 +846,7 @@ def start_work_unit(
                 compiled_plan_revision_id,
                 revision.plan_hash,
                 plan.lifecycle.profile_version,
+                EnqueueKind.START.value,
                 t,
             ),
         )
@@ -1754,12 +1774,68 @@ def list_pending_enqueues(limit: int = 20) -> tuple[EnqueueOutboxRow, ...]:
             compiled_plan_revision_id=str(rowdict(row)["compiled_plan_revision_id"]),
             compiled_plan_hash=str(rowdict(row)["compiled_plan_hash"]),
             lifecycle_profile_version=int(rowdict(row)["lifecycle_profile_version"]),
+            kind=EnqueueKind(str(rowdict(row)["kind"])),
             status=str(rowdict(row)["status"]),
             attempts=int(rowdict(row)["attempts"]),
             last_error=rowdict(row)["last_error"],
         )
         for row in rows
     )
+
+
+def enqueue_resume(work_unit_id: str) -> bool:
+    """Ensure a pending RESUME delivery exists for this WorkUnit.
+
+    The unique index keeps one outbox row per WorkUnit, so this is a rebirth
+    rather than a sibling: a row that already finished its delivery becomes
+    PENDING again as a RESUME, with its attempts and error reset because they
+    described the previous delivery. A row that is still PENDING is left
+    exactly as it is, which is what makes repeated approvals coalesce into one
+    delivery instead of queueing several.
+
+    Returns whether a pending RESUME row exists afterwards. False means a
+    pending START row was already there, which only a WorkUnit that never had
+    its first delivery can produce; the caller reports it rather than fighting
+    over the row, because that start will run the same root workflow anyway.
+    """
+
+    unit = get_work_unit(work_unit_id)
+    t = now()
+    with tx() as c:
+        c.execute(
+            """
+            INSERT INTO work_unit_enqueue_outbox(
+                outbox_id, work_unit_id, root_workflow_id, design_doc_revision_id,
+                compiled_plan_revision_id, compiled_plan_hash, lifecycle_profile_version,
+                kind, status, attempts, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?)
+            ON CONFLICT (work_unit_id) DO UPDATE SET
+                kind=EXCLUDED.kind,
+                status='PENDING',
+                attempts=0,
+                last_error=NULL,
+                created_at=EXCLUDED.created_at,
+                delivered_at=NULL
+            WHERE work_unit_enqueue_outbox.status <> 'PENDING'
+            """,
+            (
+                f"wuo_{work_unit_id}",
+                work_unit_id,
+                unit.root_workflow_id,
+                unit.design_doc_revision_id,
+                unit.compiled_plan_revision_id,
+                unit.compiled_plan_hash,
+                unit.lifecycle_profile_version,
+                EnqueueKind.RESUME.value,
+                t,
+            ),
+        )
+        row = c.execute(
+            "SELECT kind, status FROM work_unit_enqueue_outbox WHERE work_unit_id=?",
+            (work_unit_id,),
+        ).fetchone()
+    data = rowdict(row)
+    return str(data["status"]) == "PENDING" and str(data["kind"]) == EnqueueKind.RESUME.value
 
 
 def mark_enqueue_delivered(work_unit_id: str) -> None:
@@ -1809,6 +1885,7 @@ __all__ = [
     "DecisionRequestMismatch",
     "DecisionRequestRow",
     "DesignDocRevisionRow",
+    "EnqueueKind",
     "EnqueueOutboxRow",
     "FactOutcome",
     "LIFECYCLE_PROFILE",
@@ -1822,6 +1899,7 @@ __all__ = [
     "WorkUnitEventRow",
     "WorkUnitRow",
     "compiled_milestone_for",
+    "enqueue_resume",
     "event_to_payload",
     "execution_epoch",
     "find_work_unit_by_legacy_saga",

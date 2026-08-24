@@ -74,6 +74,15 @@ class MilestoneView(OperatorContract):
     # execution, not the stable key, so without this a BLOCKED row's "why" was a
     # database query rather than a click.
     milestone_execution_id: str
+    # What the design document asks of whoever runs this milestone. Carried
+    # because an operator-review milestone is a task assigned to a person, and
+    # the person was the only participant who could not read it: the agent lanes
+    # get both in their prompt, while the cockpit showed a title and a status
+    # pill. "on-device operator verification" does not say what to verify, and an
+    # operator who cannot see the acceptance criteria either guesses or opens the
+    # design document by hand.
+    description: str = ""
+    acceptance_criteria: tuple[str, ...] = ()
     dependencies: tuple[str, ...] = ()
     required_artifacts: tuple[str, ...] = ()
     produced_artifacts: tuple[str, ...] = ()
@@ -258,6 +267,8 @@ def build_work_unit_view(work_unit_id: str, *, recent_event_limit: int = 25) -> 
                 status=execution.status,
                 attempt=execution.attempt,
                 requires_operator_approval=execution.requires_operator_approval,
+                description=compiled.description,
+                acceptance_criteria=compiled.acceptance_criteria,
                 dependencies=compiled.dependencies,
                 required_artifacts=compiled.required_artifacts,
                 produced_artifacts=tuple(
@@ -421,11 +432,24 @@ class WorkUnitArtifactList(OperatorContract):
     artifacts: list[ArtifactView]
 
 
+class ResumeDeliveryView(OperatorContract):
+    """What a decision that unblocks a BLOCKED WorkUnit did about resuming it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enqueued: bool
+    reason: str
+
+
 class WorkUnitDecisionResult(OperatorContract):
     """What submitting one operator decision did.
 
     ``applied`` false with a ``reason`` is the idempotent case: the request was
     already resolved, and saying so is not an error.
+
+    ``resume`` is absent for the decisions that unblock nothing; present, it
+    says whether a RESUME delivery now awaits the enqueue drainer and why or
+    why not.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -437,6 +461,7 @@ class WorkUnitDecisionResult(OperatorContract):
     milestone_key: str | None = None
     sequence_number: int | None = None
     reason: str | None = None
+    resume: ResumeDeliveryView | None = None
 
 
 class StopAttemptView(OperatorContract):
@@ -670,6 +695,7 @@ __all__ = [
     "PendingDecisionView",
     "PhaseView",
     "RebuiltState",
+    "ResumeDeliveryView",
     "WorkUnitArtifactList",
     "WorkUnitCancelResult",
     "WorkUnitDecisionResult",

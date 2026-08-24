@@ -34,6 +34,8 @@ function milestone(overrides: Record<string, unknown> = {}) {
     attempt: 1,
     requires_operator_approval: false,
     milestone_execution_id: 'mex_a',
+    description: '',
+    acceptance_criteria: [],
     dependencies: [],
     required_artifacts: ['implementation_plan'],
     produced_artifacts: ['implementation_plan'],
@@ -157,6 +159,10 @@ function workUnitView(overrides: Record<string, unknown> = {}) {
         status: 'BLOCKED',
         requires_operator_approval: true,
         milestone_execution_id: 'mex_e',
+        description: 'Verify the built app on the physical device before approving it.',
+        acceptance_criteria: [
+          'the highlighted line matches audible narration and a seek re-resolves within one second',
+        ],
         dependencies: ['d'],
         required_artifacts: ['operator_approval'],
         produced_artifacts: [],
@@ -278,6 +284,33 @@ async function stubWorkUnit(page: Page, view: Record<string, unknown>) {
       },
     }),
   )
+  await page.route(`**/work-units/${WORK_UNIT_ID}/next-commands`, (route) =>
+    route.fulfill({
+      json: {
+        schema_version: 'next_commands.v1',
+        headline: 'BLOCKED  a correctable failure parked this work for you',
+        detail: 'milestone e needs an operator decision',
+        commands: [
+          {
+            command: `agent-ledger resume_work_unit ${WORK_UNIT_ID}`,
+            intent: 're-drive the parked work',
+            status: 'READY',
+            precondition: 'the staffed harnesses can act',
+            reason: null,
+            refusal_code: null,
+          },
+          {
+            command: `agent-ledger adopt_settled_work_unit_dispatch ${WORK_UNIT_ID} e`,
+            intent: 'credit a settled dispatch',
+            status: 'REFUSED',
+            precondition: 'the milestone has a DONE dispatch',
+            reason: 'the operator milestone has no dispatch intent',
+            refusal_code: 'settled_adoption_dispatch_missing',
+          },
+        ],
+      },
+    }),
+  )
 }
 
 async function selectWorkUnit(page: Page) {
@@ -326,6 +359,25 @@ test.describe('work unit cockpit', () => {
     )
   })
 
+  test('shows a numbered operator playbook with the human acceptance check', async ({ page }) => {
+    await stubShell(page)
+    await stubWorkUnit(page, workUnitView())
+    await page.goto('/')
+
+    const cockpit = await selectWorkUnit(page)
+    const playbook = cockpit.getByLabel('What you need to do')
+
+    await expect(playbook).toContainText('Verify the built app on the physical device')
+    await expect(playbook).toContainText(
+      'the highlighted line matches audible narration and a seek re-resolves within one second',
+    )
+    await expect(playbook.locator('ol > li').first()).toContainText('re-drive the parked work')
+    await expect(playbook.locator('ol > li').first()).toContainText(
+      `agent-ledger resume_work_unit ${WORK_UNIT_ID}`,
+    )
+    await expect(playbook.getByText('1 command(s) ruled out in this state')).toBeVisible()
+  })
+
   test('shows milestone evidence, and names what is missing', async ({ page }) => {
     await stubShell(page)
     await stubWorkUnit(page, workUnitView())
@@ -338,6 +390,44 @@ test.describe('work unit cockpit', () => {
     // Required-but-absent evidence is the news, because evidence gates completion.
     await expect(milestones.getByText('missing operator_approval')).toBeVisible()
     await expect(milestones.getByText('missing delivery_record')).toBeVisible()
+  })
+
+  test('a running attempt labels old failure text as previous and awaits its artifact', async ({
+    page,
+  }) => {
+    await stubShell(page)
+    await stubWorkUnit(
+      page,
+      workUnitView({
+        status: 'RUNNING',
+        current_phase: 'IMPLEMENT',
+        blocking: { kind: 'NONE', detail: 'nothing is blocking this work', milestone_keys: [] },
+        pending_decisions: [],
+        milestones: [
+          milestone({
+            stable_key: 'b',
+            title: 'implement the reader',
+            phase: 'IMPLEMENT',
+            status: 'RUNNING',
+            attempt: 4,
+            milestone_execution_id: 'mex_b',
+            required_artifacts: ['source_patch'],
+            produced_artifacts: [],
+            failure_code: 'USAGE_LIMIT',
+            failure_summary: 'the previous provider quota was exhausted',
+            result_summary: null,
+          }),
+        ],
+      }),
+    )
+    await page.goto('/')
+
+    const cockpit = await selectWorkUnit(page)
+    const milestones = cockpit.getByLabel('Milestones')
+
+    await expect(milestones.getByText('awaiting source_patch')).toBeVisible()
+    await expect(milestones.getByText('previous attempt:')).toBeVisible()
+    await expect(milestones.getByText('missing source_patch')).toHaveCount(0)
   })
 
   test('approving resolves the named request and the WorkUnit moves on', async ({ page }) => {

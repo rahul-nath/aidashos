@@ -657,7 +657,9 @@ def compile_design_doc(
                 "missing_delivery_contract",
                 (
                     "the plan changes the system but declares neither a DELIVER milestone "
-                    "nor document-level Required Artifacts"
+                    "nor document-level Required Artifacts; add a '## Required Artifacts' "
+                    "section listing the terminal evidence (for a build: source_patch, "
+                    "test_result, operator_approval), or declare a DELIVER milestone"
                 ),
                 None,
             )
@@ -787,13 +789,19 @@ def _resolve_target_project(declared: str | None) -> tuple[str, str | None, str 
     try:
         adopted = adopt_unregistered_target(declared, settings=get_settings())
     except (ValueError, OSError, subprocess.SubprocessError) as error:
-        return declared, (
-            f"target project {declared!r} is not registered and could not be "
-            f"adopted: {error}. Known projects: {', '.join(sorted(known))}"
-        ), None
+        return (
+            declared,
+            (
+                f"target project {declared!r} is not registered and could not be "
+                f"adopted: {error}. Known projects: {', '.join(sorted(known))}"
+            ),
+            None,
+        )
     verb = "created" if adopted["created"] else "adopted existing"
-    return declared, None, (
-        f"{verb} target project {declared!r} at {adopted['path']} and registered it"
+    return (
+        declared,
+        None,
+        (f"{verb} target project {declared!r} at {adopted['path']} and registered it"),
     )
 
 

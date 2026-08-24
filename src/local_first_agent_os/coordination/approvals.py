@@ -33,13 +33,16 @@ def submit_approval_request(
 ) -> dict[str, Any]:
     """Submit an approval gate request.
 
-    request_type: PURCHASE | EXTERNAL_COMMS | CODE_MERGE | MODEL_ESCALATION | GENERAL
+    request_type: PURCHASE | EXTERNAL_COMMS | CODE_MERGE | MODEL_ESCALATION |
+    REVIEW_ESCALATION | GENERAL
 
     Policy:
     - No purchase/payment without PURCHASE approval
     - No external comms without EXTERNAL_COMMS approval
     - No code merge without CODE_MERGE approval (implies prior review)
     - No model escalation without MODEL_ESCALATION + budget reason
+    - A REVIEW_ESCALATION carries a staff reviewer's ESCALATE verdict to the
+      operator; the payload holds the review text and the dispatch identifiers
     """
     valid_types = set(APPROVAL_REQUEST_TYPES)
     if request_type not in valid_types:

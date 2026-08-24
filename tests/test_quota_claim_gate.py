@@ -37,6 +37,7 @@ from local_first_agent_os.harness_availability import (
     recently_usage_limited,
 )
 from local_first_agent_os.staffing import (
+    BackupModel,
     Bench,
     BenchSlot,
     FrontierHarness,
@@ -250,7 +251,7 @@ def _two_vendor_bench() -> Bench:
             harness=Harness.CODEX,
             model="gpt-5.6-sol",
             capacity=2,
-            backup_models=("claude-sonnet-5",),
+            backup_models=(BackupModel(harness=Harness.CLAUDE, model="claude-sonnet-5"),),
         ),
         Tier.STAFF: BenchSlot(harness=Harness.CLAUDE, model="claude-opus-5", capacity=1),
         Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4),
@@ -295,7 +296,11 @@ def test_a_backup_naming_the_reviewer_s_own_model_is_skipped() -> None:
 
     bench = _two_vendor_bench()
     bench[Tier.SENIOR] = replace(
-        bench[Tier.SENIOR], backup_models=("claude-opus-5", "claude-sonnet-5")
+        bench[Tier.SENIOR],
+        backup_models=(
+            BackupModel(harness=Harness.CLAUDE, model="claude-opus-5"),
+            BackupModel(harness=Harness.CLAUDE, model="claude-sonnet-5"),
+        ),
     )
     effective = effective_bench(_spent_codex_plan(bench))
 
@@ -322,3 +327,156 @@ def test_the_notice_tells_the_two_losses_apart() -> None:
     lost = collapsed_cross_checks(_spent_codex_plan(bench))
     assert len(lost) == 1
     assert "implementing and reviewing its own change" in lost[0]
+
+
+# --- The escape hatch on a bare bench, which needs no peer ---------------------
+#
+# These exercise the Bench form of `staffing_around_spent_quotas`: per-tier
+# moves through harness-typed `backup_models`, the behavior a bench without
+# pairing declarations can honestly support. The production path loads a
+# `Staffing` and moves the frontier pair together; that is covered below and in
+# `test_staffing.py`.
+
+
+def _spent_claude_plan(bench: Bench):
+    from local_first_agent_os.harness_availability import staffing_around_spent_quotas
+
+    return staffing_around_spent_quotas(bench, frozenset({FrontierHarness.CLAUDE}))
+
+
+def _escape_hatch_bench(*backups: BackupModel) -> Bench:
+    """The 2026-08-12 seating again, with a way out declared on the senior seat."""
+
+    bench = _bench()
+    bench[Tier.SENIOR] = replace(bench[Tier.SENIOR], backup_models=backups)
+    return bench
+
+
+def test_a_backup_names_the_harness_a_bench_with_no_unspent_peer_moves_to() -> None:
+    """The escape hatch, in the only seating that needs one.
+
+    Both frontier seats on one vendor is what an operator writes during that
+    vendor's outage, and it is exactly the bench with no unspent peer. The peer
+    search answered `None`, `_replacement_for` returned before reading a backup,
+    and the tier was reported unstaffable while the config carried a written-down
+    way out - so the hatch was closed in the one situation it exists for.
+    """
+
+    from local_first_agent_os.harness_readiness import TierRestaffed
+
+    plan = _spent_claude_plan(
+        _escape_hatch_bench(
+            BackupModel(harness=Harness.CODEX, model="gpt-5.6-sol", reasoning_effort="high")
+        )
+    )
+
+    senior = next(item for item in plan if item.tier is Tier.SENIOR)
+    assert isinstance(senior, TierRestaffed)
+    assert senior.slot.harness is Harness.CODEX
+    assert senior.slot.model == "gpt-5.6-sol"
+    assert senior.slot.reasoning_effort == "high"
+    # How many of a tier may run at once is a statement about the tier, so it
+    # survives a move that has no peer slot to borrow anything from.
+    assert senior.slot.capacity == _bench()[Tier.SENIOR].capacity
+
+
+def test_a_backup_on_the_spent_harness_is_not_a_way_out() -> None:
+    """Another model from the vendor that just refused is still that vendor."""
+
+    from local_first_agent_os.harness_readiness import TierUnstaffable
+
+    plan = _spent_claude_plan(
+        _escape_hatch_bench(BackupModel(harness=Harness.CLAUDE, model="claude-sonnet-5"))
+    )
+
+    senior = next(item for item in plan if item.tier is Tier.SENIOR)
+    assert isinstance(senior, TierUnstaffable)
+
+
+def test_a_backup_on_the_local_harness_is_not_a_way_out() -> None:
+    """The substitution the peer search already refuses, refused on this path too.
+
+    A served local model standing in for a frontier implementer is the silent
+    substitution this area exists to avoid. A backup entry is a second door into
+    the same decision, and it would have been an unguarded one.
+    """
+
+    from local_first_agent_os.harness_readiness import TierUnstaffable
+
+    plan = _spent_claude_plan(_escape_hatch_bench(BackupModel(harness=Harness.PI, model="gemma4")))
+
+    senior = next(item for item in plan if item.tier is Tier.SENIOR)
+    assert isinstance(senior, TierUnstaffable)
+    assert "declares no backup on an unspent harness" in senior.detail
+
+
+def test_the_escape_hatch_is_what_the_claim_gate_asks_about(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate refuses a seat with no way out and admits one with a hatch.
+
+    The two halves have to agree or the fix is cosmetic: a tier that can now be
+    restaffed must also become claimable, or the intent keeps waiting for a
+    quota window it no longer needs.
+    """
+
+    monkeypatch.setattr(
+        availability, "read_spent_quotas", lambda **_: frozenset({FrontierHarness.CLAUDE})
+    )
+    hatch = _escape_hatch_bench(BackupModel(harness=Harness.CODEX, model="gpt-5.6-sol"))
+
+    assert build_quota_claim_gate(_bench(), ttl_seconds=0)("senior") is False
+    assert build_quota_claim_gate(hatch, ttl_seconds=0)("senior") is True
+    # The seat that declares nothing still waits, which is the queueing this
+    # gate exists for rather than a hole the hatch opened.
+    assert build_quota_claim_gate(hatch, ttl_seconds=0)("staff") is False
+
+
+# --- The gate on the real thing: a Staffing, where the pair answers as one -----
+
+
+def _staffing(*, with_fallback: bool):
+    from local_first_agent_os.staffing import FrontierPairing, Staffing
+
+    seated = FrontierPairing(
+        name="claude-only",
+        senior=BenchSlot(harness=Harness.CLAUDE, model="claude-opus-5", capacity=2),
+        staff=BenchSlot(harness=Harness.CLAUDE, model="claude-fable-5", capacity=1),
+        fallback=("codex-only",) if with_fallback else (),
+    )
+    codex = FrontierPairing(
+        name="codex-only",
+        senior=BenchSlot(harness=Harness.CODEX, model="gpt-5.6-terra", capacity=2),
+        staff=BenchSlot(harness=Harness.CODEX, model="gpt-5.6-sol", capacity=1),
+    )
+    return Staffing(
+        pairings={seated.name: seated, codex.name: codex},
+        seated=seated,
+        solo={Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4)},
+    )
+
+
+def test_the_pair_is_claimable_together_or_not_at_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate's answer is pair-shaped because the restaffing is.
+
+    A gate that admitted senior while staff queued would run the half-escape
+    the pairing type exists to remove: an implementation dispatched with no
+    reviewer able to stand behind it. So a viable fallback pairing opens both
+    seats and a missing one closes both, while the local tier - which never
+    depended on either subscription - keeps running either way.
+    """
+
+    monkeypatch.setattr(
+        availability, "read_spent_quotas", lambda **_: frozenset({FrontierHarness.CLAUDE})
+    )
+
+    open_gate = build_quota_claim_gate(_staffing(with_fallback=True), ttl_seconds=0)
+    assert open_gate("senior") is True
+    assert open_gate("staff") is True
+
+    closed_gate = build_quota_claim_gate(_staffing(with_fallback=False), ttl_seconds=0)
+    assert closed_gate("senior") is False
+    assert closed_gate("staff") is False
+    assert closed_gate("junior") is True

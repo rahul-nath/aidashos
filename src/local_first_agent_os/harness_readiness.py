@@ -32,7 +32,9 @@ from .staffing import (
     Bench,
     BenchSlot,
     FrontierHarness,
+    FrontierPairing,
     LocalHarness,
+    Staffing,
     Tier,
     classify_harness,
     resolve_bench,
@@ -177,13 +179,24 @@ def probe_harness(harness: FrontierHarness) -> HarnessReadiness:
             return _probe_codex()
 
 
-def frontier_harnesses_on_bench(bench: Bench | None = None) -> frozenset[FrontierHarness]:
+def frontier_harnesses_on_bench(
+    bench: Bench | Staffing | None = None,
+) -> frozenset[FrontierHarness]:
     """Which spawnable CLIs this machine's staffing actually calls for.
 
     A tier staffed to the local delegate contributes nothing, which is what keeps
     an all-local bench startable with no frontier account at all.
+
+    A `Staffing` answers with everything in play - the seated pairing, its
+    declared escapes, and any solo frontier tier - because the caller holding
+    one is a door, and a door that probed only the seated vendors would find
+    every escape `HarnessUnknown` and refuse an outage a proven way out could
+    have absorbed. A bare bench has no escape declarations, so it answers with
+    its own tiers, exactly as before.
     """
 
+    if isinstance(bench, Staffing):
+        return bench.frontier_harnesses_in_play()
     harnesses: set[FrontierHarness] = set()
     for tier in Tier:
         kind = classify_harness(resolve_bench(tier, bench).harness)
@@ -193,7 +206,7 @@ def frontier_harnesses_on_bench(bench: Bench | None = None) -> frozenset[Frontie
     return frozenset(harnesses)
 
 
-def check_frontier_readiness(bench: Bench | None = None) -> tuple[HarnessReadiness, ...]:
+def check_frontier_readiness(bench: Bench | Staffing | None = None) -> tuple[HarnessReadiness, ...]:
     return tuple(probe_harness(harness) for harness in sorted(frontier_harnesses_on_bench(bench)))
 
 
@@ -322,8 +335,65 @@ def _ready_frontier_peer(
     return None
 
 
+def _paired_door_staffing(
+    staffing: Staffing, readiness: dict[FrontierHarness, HarnessReadiness]
+) -> dict[Tier, TierStaffing]:
+    """The frontier pair at a door, moved as the one decision it is declared as.
+
+    The mirror of `harness_availability._paired_tier_staffing`, and deliberately
+    a separate body: that one is handed a set of spent quotas the ledger
+    reported, this one a probe's answer per harness. Same shape, different
+    evidence, and the difference is not cosmetic - a spent quota is a fact about
+    a vendor, while `HarnessUnknown` is the absence of a fact, and only this side
+    has to decide what to do about not knowing.
+
+    It decides the same way `_ready_frontier_peer` always did: a pairing is a
+    candidate only if every vendor it needs answered `HarnessReady`. Moving onto
+    a harness that could not be probed would trade a refusal we understand for a
+    run we do not. But `HarnessNotReady` on the *seated* pairing is what triggers
+    a move; an unprobed seated vendor is not, because not knowing is reported
+    rather than acted on.
+    """
+
+    seats = staffing.seated.seats()
+    blocked = [
+        readiness[kind]
+        for kind in sorted(staffing.seated.frontier_harnesses())
+        if isinstance(readiness.get(kind), HarnessNotReady)
+    ]
+    if not blocked:
+        return {tier: TierServed(tier=tier, configured=slot) for tier, slot in seats.items()}
+    detail = "; ".join(state.describe() for state in blocked)
+
+    def usable(pairing: FrontierPairing) -> bool:
+        return all(
+            isinstance(readiness.get(kind), HarnessReady) for kind in pairing.frontier_harnesses()
+        )
+
+    target = next((pairing for pairing in staffing.escape_pairings() if usable(pairing)), None)
+    if target is None:
+        chain = ", ".join(staffing.seated.fallback) or "none declared"
+        return {
+            tier: TierUnstaffable(
+                tier=tier,
+                configured=slot,
+                detail=f"{detail}; no fallback pairing is ready (chain: {chain})",
+            )
+            for tier, slot in seats.items()
+        }
+    return {
+        tier: TierRestaffed(
+            tier=tier,
+            configured=slot,
+            replacement=target.seats()[tier],
+            detail=f"{detail}; the pair moves to pairing {target.name!r}",
+        )
+        for tier, slot in seats.items()
+    }
+
+
 def plan_tier_staffing(
-    bench: Bench | None = None,
+    bench: Bench | Staffing | None = None,
     states: Iterable[HarnessReadiness] | None = None,
 ) -> tuple[TierStaffing, ...]:
     """How each tier is actually staffed once this machine has been asked.
@@ -334,6 +404,19 @@ def plan_tier_staffing(
     senior work, and refusing on the harness answer stopped runs that had a
     ready peer sitting on the same bench.
 
+    Handed a `Staffing`, the two frontier seats move as a pair to a declared
+    fallback pairing, exactly as the dispatch path moves them. The door used to
+    restaff per tier onto a ready peer's slot, which meant the operator-facing
+    answer and the unattended one could disagree about the same outage: the
+    door would report senior moved onto the staff seat's model while the
+    dispatcher moved the pair to a pairing an operator had actually declared and
+    checked. One outage, two stories, and the door's was the one a human read
+    before granting execution.
+
+    Handed a bare `Bench`, every tier walks the per-tier rule: a bench carries no
+    pairing declarations, so a ready peer's slot is the only replacement it can
+    name.
+
     `states` is injectable so a caller that already probed does not probe twice,
     and so tests can describe a machine instead of being one.
     """
@@ -342,8 +425,15 @@ def plan_tier_staffing(
         state.harness: state
         for state in (states if states is not None else check_frontier_readiness(bench))
     }
+    paired: dict[Tier, TierStaffing] = {}
+    if isinstance(bench, Staffing):
+        paired = _paired_door_staffing(bench, readiness)
+        bench = bench.bench
     plan: list[TierStaffing] = []
     for tier in Tier:
+        if tier in paired:
+            plan.append(paired[tier])
+            continue
         slot = resolve_bench(tier, bench)
         kind = classify_harness(slot.harness)
         if isinstance(kind, LocalHarness):

@@ -127,11 +127,14 @@ No flat per-role env vars such as a `..._REVIEW_HARNESS` setting. A TOML registr
 e.g. `configs/staffing.toml`:
 
 ```toml
+seated_pairing = "two-vendor"
+
 [bench.junior]
 harness = "pi"     ; model = "general"  ; capacity = 4
-[bench.senior]
+
+[pairings.two-vendor.senior]
 harness = "claude" ; capacity = 3
-[bench.staff]
+[pairings.two-vendor.staff]
 harness = "codex"  ; capacity = 1
 
 [stage.IMPLEMENTATION]
@@ -148,6 +151,18 @@ consensus = [ { role = "reviewer", tier = "staff" },
 
 This is the "stage → who's rostered" model directly. Swapping which model plays
 staff is a one-line bench edit; re-staffing a stage never touches code.
+
+The two frontier seats are declared together, as a named `[pairings.<name>]`, and one is seated by the top-level `seated_pairing`.
+Junior stays in `[bench]` because it is seated alone.
+The pairing was added later than the rest of this document, and the reason is in the seat's own history: senior and staff were two independent tables, so an operator could change the implementer and leave the reviewer pointing where it already pointed.
+Picking an implementer and picking its reviewer is one decision, and `FrontierPairing` is that decision as a type.
+It refuses a pairing that names one model for both seats, unconditionally: there is no acknowledgement flag, because every harness this system staffs offers more than one model (operator's ruling, 2026-08-23), and the flag's brief life proved that an escape hatch on an invariant decays into the thing the invariant guards against.
+The all-local seating satisfies this too: `configs/model_registry.toml` carries a `deliberator` alongside the fast `general` model, so an operator with no frontier subscription still seats two.
+A pairing may name other pairings in `fallback`, in order.
+When any vendor the seated pairing depends on reports a spent quota, restaffing moves BOTH seats to the first fallback pairing that avoids every spent vendor - even the seat whose own vendor is fine, because "who reviews the implementer" changed the moment the implementer did.
+The landing is itself a constructed `FrontierPairing`, so implementer and reviewer arrive together, already proven distinct; the claim gate answers with the same pair shape, both seats claimable together or neither.
+`Staffing` is the loaded whole - pairings, the seated one, and the solo tiers - and `load_bench` stays beside `load_staffing` for the consumers that resolve tiers and never restaff.
+When nothing declared avoids the outage (both vendors out), both seats queue; the plan for that state is `docs/local_fallback_seating_gawd.md`, a local fallback pairing with the panel idea still parked behind operator decisions.
 
 ## Keep / unify / defer from Ouroboros
 

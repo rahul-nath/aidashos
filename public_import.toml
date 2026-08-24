@@ -323,7 +323,11 @@ overwrite = true
 # docs/onboarding/prompts.json at build time, so the two cannot drift. Its
 # node_modules/ and dist/ are gitignored, and the importer skips whatever
 # git ignores.
+#
+# Named `landing_page_website/` rather than `website/` since 2026-08-23, so the
+# directory Netlify builds from is unmistakable next to `web/`. Its netlify.toml
+# names the same path as its base directory.
 [[allow]]
-path = "website"
+path = "landing_page_website"
 kind = "directory"
 overwrite = true

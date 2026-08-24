@@ -77,11 +77,12 @@ It names the DBOS system database, and feeding it to the coordination store prod
 ## 2. Compile the design doc
 
 ```bash
-agent-ledger compile_design_doc docs/runtime_lifetime_follows_work_gawd.md
+agent-ledger compile_design_doc docs/failure_taxonomy_and_propagation_design.md
 ```
 
 This runbook's original example was `docs/completed/agent_acl_enforcement_gawd.md`.
 That WorkUnit reached `SUCCEEDED`/`COMPLETE` on 2026-08-11 and must not be re-run: its code is on main, so a re-run dispatches agents at finished work and fails the `source_patch` evidence gate on empty patches.
+The example after it, `runtime_lifetime_follows_work_gawd`, completed on 2026-08-23 and moved to `docs/completed/` for the same reason.
 Substitute whichever design doc you are actually running; the steps do not change.
 
 Read three fields of the answer before going on.

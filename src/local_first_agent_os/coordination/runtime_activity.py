@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, assert_never
 
 from ..contracts import DispatchIntentStatus, LeaseStatus
 from ..work_units.lifecycle import WorkUnitStatus
@@ -46,24 +46,86 @@ class RuntimeWorkKind(StrEnum):
     WORK_UNIT = "work_unit"
 
 
-# What each column has to hold for a process to be live behind it.
-#
-# Included: a CLAIMED or IN_PROGRESS intent has an executor; an ACTIVE lease is
-# heartbeating and a CANCEL_REQUESTED one is still being torn down; a RUNNING
-# work unit is executing and a CANCELLING one has not finished stopping. In each
-# case something is running right now that a shutdown would destroy rather than
-# defer.
-#
-# Excluded, deliberately: PENDING intents and QUEUED work units, because nothing
-# has claimed them and a stop leaves them exactly where they are; PAUSED and
-# CHECKPOINT_REVIEW intents and WAITING_FOR_OPERATOR or BLOCKED work units,
-# because those stopped on purpose pending a person and hold no process; and
-# every terminal status, because those are over. Excluding them keeps this
-# answer to "work would be destroyed", which is the only thing that justifies
-# leaving a runtime the operator did not ask to keep.
-_BUSY_INTENT_STATUSES = (DispatchIntentStatus.CLAIMED, DispatchIntentStatus.IN_PROGRESS)
-_BUSY_LEASE_STATUSES = (LeaseStatus.ACTIVE, LeaseStatus.CANCEL_REQUESTED)
-_BUSY_WORK_UNIT_STATUSES = (WorkUnitStatus.RUNNING, WorkUnitStatus.CANCELLING)
+class RuntimeProcessPresence(StrEnum):
+    """Whether a ledger state says stopping can destroy a live process."""
+
+    LIVE = "live"
+    ABSENT = "absent"
+
+
+def _dispatch_intent_process(status: DispatchIntentStatus) -> RuntimeProcessPresence:
+    """Classify every intent state by whether its claimed process may be live."""
+
+    match status:
+        case DispatchIntentStatus.CLAIMED | DispatchIntentStatus.IN_PROGRESS:
+            return RuntimeProcessPresence.LIVE
+        case (
+            DispatchIntentStatus.PENDING
+            | DispatchIntentStatus.CHECKPOINT_REVIEW
+            | DispatchIntentStatus.PAUSED
+            | DispatchIntentStatus.DONE
+            | DispatchIntentStatus.FAILED
+            | DispatchIntentStatus.CANCELED
+            | DispatchIntentStatus.SUPERSEDED
+        ):
+            return RuntimeProcessPresence.ABSENT
+    assert_never(status)
+
+
+def _execution_lease_process(status: LeaseStatus) -> RuntimeProcessPresence:
+    """Classify every lease state by whether its agent process may be live."""
+
+    match status:
+        case LeaseStatus.ACTIVE | LeaseStatus.CANCEL_REQUESTED:
+            return RuntimeProcessPresence.LIVE
+        case (
+            LeaseStatus.COMPLETED
+            | LeaseStatus.FAILED
+            | LeaseStatus.TIMED_OUT
+            | LeaseStatus.CANCELED
+            | LeaseStatus.COMPENSATED
+        ):
+            return RuntimeProcessPresence.ABSENT
+    assert_never(status)
+
+
+def _work_unit_process(status: WorkUnitStatus) -> RuntimeProcessPresence:
+    """Classify every WorkUnit state by whether its execution may be live."""
+
+    match status:
+        case WorkUnitStatus.RUNNING | WorkUnitStatus.CANCELLING:
+            return RuntimeProcessPresence.LIVE
+        case (
+            WorkUnitStatus.DRAFT
+            | WorkUnitStatus.COMPILED
+            | WorkUnitStatus.QUEUED
+            | WorkUnitStatus.WAITING_FOR_OPERATOR
+            | WorkUnitStatus.BLOCKED
+            | WorkUnitStatus.SUCCEEDED
+            | WorkUnitStatus.FAILED
+            | WorkUnitStatus.CANCELLED
+            | WorkUnitStatus.SUPERSEDED
+        ):
+            return RuntimeProcessPresence.ABSENT
+    assert_never(status)
+
+
+# Derive the SQL partitions from exhaustive classifiers. Adding an enum member
+# now fails type checking at its classifier instead of silently authorizing a
+# shutdown while that new state has a live process.
+_BUSY_INTENT_STATUSES = tuple(
+    status
+    for status in DispatchIntentStatus
+    if _dispatch_intent_process(status) is RuntimeProcessPresence.LIVE
+)
+_BUSY_LEASE_STATUSES = tuple(
+    status
+    for status in LeaseStatus
+    if _execution_lease_process(status) is RuntimeProcessPresence.LIVE
+)
+_BUSY_WORK_UNIT_STATUSES = tuple(
+    status for status in WorkUnitStatus if _work_unit_process(status) is RuntimeProcessPresence.LIVE
+)
 
 # Live work is small by construction, but a run that died without recording a
 # halt leaves its lease ACTIVE until `recover_dead_execution` says otherwise, so
@@ -75,23 +137,22 @@ _MAX_REPORTED_FACTS = 8
 # here has an index leading with `status`, so the cost follows the amount of
 # live work and not the size of the ledger.
 _LIVE_WORK_QUERY = f"""
-SELECT 'dispatch_intent' AS fact_kind, intent_id AS identifier, status FROM dispatch_intents
+SELECT '{RuntimeWorkKind.DISPATCH_INTENT.value}' AS fact_kind,
+       intent_id AS identifier, status FROM dispatch_intents
   WHERE status IN ({sql_status_list(*_BUSY_INTENT_STATUSES)})
 UNION ALL
-SELECT 'execution_lease', lease_id, status FROM agent_execution_leases
+SELECT '{RuntimeWorkKind.EXECUTION_LEASE.value}', lease_id, status FROM agent_execution_leases
   WHERE status IN ({sql_status_list(*_BUSY_LEASE_STATUSES)})
 UNION ALL
-SELECT 'work_unit', work_unit_id, status FROM work_units
+SELECT '{RuntimeWorkKind.WORK_UNIT.value}', work_unit_id, status FROM work_units
   WHERE status IN ({sql_status_list(*_BUSY_WORK_UNIT_STATUSES)})
 LIMIT {_MAX_REPORTED_FACTS + 1}
 """
 
-# A caller on this path is closing a terminal. The pool waits 30 seconds for a
-# connection by default and keeps retrying a refused one for the whole wait, and
-# a Postgres that is already down is exactly the case this check has to answer
-# quickly rather than correctly. Giving up early costs an idle runtime nobody
-# needed; waiting costs the operator a hung terminal every time.
-_CHECKOUT_TIMEOUT_SECONDS = 3.0
+# Closing a terminal must not wait for the pool's normal 30-second checkout.
+# Giving up quickly may retain an idle runtime; waiting or guessing idle may
+# destroy live work.
+_CHECKOUT_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,23 +247,36 @@ def read_runtime_activity() -> RuntimeActivity:
         connection = connect(checkout_timeout_seconds=_CHECKOUT_TIMEOUT_SECONDS)
     except Exception as exc:
         return RuntimeActivityUnknown(reason=f"{type(exc).__name__}: {exc}")
+    read_failure: Exception | None = None
+    rows: list[Any] = []
     try:
         rows = connection.execute(_LIVE_WORK_QUERY).fetchall()
     except Exception as exc:
-        return RuntimeActivityUnknown(reason=f"{type(exc).__name__}: {exc}")
-    finally:
-        # Read-only, so there is nothing to commit; the rollback ends the
-        # transaction the read opened before the connection goes back to the
-        # pool holding it.
-        try:
-            connection.rollback()
-        finally:
-            connection.close()
+        read_failure = exc
+
+    cleanup_failures: list[Exception] = []
+    try:
+        connection.rollback()
+    except Exception as exc:
+        cleanup_failures.append(exc)
+    try:
+        connection.close()
+    except Exception as exc:
+        cleanup_failures.append(exc)
+
+    failures = ([read_failure] if read_failure is not None else []) + cleanup_failures
+    if failures:
+        reason = "; ".join(f"{type(exc).__name__}: {exc}" for exc in failures)
+        return RuntimeActivityUnknown(reason=reason)
     if not rows:
         return RuntimeActivityIdle()
     truncated = len(rows) > _MAX_REPORTED_FACTS
+    try:
+        facts = tuple(_fact_of(row) for row in rows[:_MAX_REPORTED_FACTS])
+    except Exception as exc:
+        return RuntimeActivityUnknown(reason=f"{type(exc).__name__}: {exc}")
     return RuntimeActivityBusy(
-        facts=tuple(_fact_of(row) for row in rows[:_MAX_REPORTED_FACTS]),
+        facts=facts,
         truncated=truncated,
     )
 
@@ -225,6 +299,7 @@ __all__ = [
     "RuntimeActivityBusy",
     "RuntimeActivityIdle",
     "RuntimeActivityUnknown",
+    "RuntimeProcessPresence",
     "RuntimeWorkFact",
     "RuntimeWorkKind",
     "answer_of",

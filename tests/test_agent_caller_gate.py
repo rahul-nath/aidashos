@@ -72,7 +72,14 @@ free to disagree with it, so these scenarios failed again the next reseating
 with the same irrelevant denial.
 """
 
-_OTHER_AGENT = seat_agent_name(Tier.STAFF)
+# An agent that is genuinely not AGENT. The staff seat's vendor is the natural
+# choice, but an outage staffing can put one vendor in both frontier seats, and
+# this test's premise is per-agent scoping, not the current seating.
+_OTHER_AGENT = (
+    seat_agent_name(Tier.STAFF)
+    if seat_agent_name(Tier.STAFF) != AGENT
+    else ("codex" if AGENT == "claude" else "claude")
+)
 """The other frontier vendor, for the scopes that must not reach `AGENT`."""
 
 

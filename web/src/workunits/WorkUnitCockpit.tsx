@@ -25,6 +25,7 @@ import type {
   BlockingCondition,
   EventView,
   MilestoneView,
+  NextCommandSet,
   PhaseView,
   StatusLegendEntry,
   StatusLegendView,
@@ -37,6 +38,7 @@ import {
   useWorkUnit,
   useWorkUnitEvents,
   useWorkUnitList,
+  useWorkUnitNextCommands,
 } from './lanes'
 
 const NOT_RECORDED = '—'
@@ -231,6 +233,9 @@ function MilestoneRow({
   const missing = milestone.required_artifacts.filter(
     (artifact) => !milestone.produced_artifacts.includes(artifact),
   )
+  const running = milestone.status === 'RUNNING'
+  const staleOutcome =
+    milestone.failure_code !== null || milestone.failure_summary !== null
   const hasWhy =
     milestone.status === 'BLOCKED' ||
     milestone.status === 'FAILED' ||
@@ -254,12 +259,28 @@ function MilestoneRow({
         </td>
         <td>{milestone.dependencies.join(', ') || NOT_RECORDED}</td>
         <td>
-          {/* Evidence is what gates completion, so the absent ones are the news. */}
+          {/* Evidence is what gates completion, so the absent ones are the news.
+              While an agent is working, absent evidence is the expected state
+              rather than a finding, and colouring it as a failure read as a
+              stall to the first operator who saw it. */}
           {milestone.produced_artifacts.join(', ') || NOT_RECORDED}
-          {missing.length > 0 && <span className="laneFailure">missing {missing.join(', ')}</span>}
+          {missing.length > 0 && (
+            <span className={running ? 'laneMuted' : 'laneFailure'}>
+              {running ? 'awaiting' : 'missing'} {missing.join(', ')}
+            </span>
+          )}
         </td>
         <td>
-          {milestone.failure_code && <span className="laneFailure">{milestone.failure_code}</span>}
+          {/* A running attempt has no outcome yet, so anything in these columns
+              belongs to the attempt before it. Showing that as the current
+              outcome made a live agent look stuck: attempt 3's elapsed dispatch
+              sat in red beside "AGENT RUNNING · attempt 4". */}
+          {running && staleOutcome && (
+            <span className="laneMuted">previous attempt: </span>
+          )}
+          {milestone.failure_code && (
+            <span className={running ? 'laneMuted' : 'laneFailure'}>{milestone.failure_code}</span>
+          )}
           {milestone.failure_summary ?? milestone.result_summary ?? NOT_RECORDED}
           {hasWhy && (
             <button
@@ -449,6 +470,107 @@ function EventList({ events }: { events: EventView[] }) {
   )
 }
 
+/**
+ * The numbered list of what a person does next, and what the work asks of them.
+ *
+ * Two questions an operator standing in front of a stopped WorkUnit has, which
+ * the cockpit answered neither of. "What do I run?" is answered by the same
+ * `next_commands` rule tables the terminal prints from, fetched rather than
+ * re-derived here so the two surfaces cannot drift. "What am I supposed to
+ * *do*?" is answered by the blocking milestone's own description and acceptance
+ * criteria: a milestone titled "on-device operator verification" does not say
+ * what to verify, and until now the design document was the only place that did.
+ *
+ * Numbered, because the ready commands are ordered and an operator asked for a
+ * list they could work down. Refused and unproved commands keep their place
+ * below the ready ones with the reason attached, matching the terminal's
+ * grouping: an operator who does not see a verb ruled out here will reach for it
+ * and spend a command learning what this already knows.
+ */
+function OperatorPlaybook({
+  workUnit,
+  nextCommands,
+  error,
+}: {
+  workUnit: WorkUnitView
+  nextCommands: NextCommandSet | null
+  error: string | null
+}) {
+  const blockingKeys = new Set(workUnit.blocking?.milestone_keys ?? [])
+  const waiting = workUnit.milestones.filter(
+    (milestone) =>
+      blockingKeys.has(milestone.stable_key) &&
+      (milestone.description !== '' || milestone.acceptance_criteria.length > 0),
+  )
+  const ready = nextCommands?.commands.filter((item) => item.status === 'READY') ?? []
+  const blocked = nextCommands?.commands.filter((item) => item.status !== 'READY') ?? []
+  if (error === null && nextCommands === null && waiting.length === 0) return null
+
+  return (
+    <section className="panel" aria-label="What you need to do">
+      <header className="panelHeader">
+        <h2>What you need to do</h2>
+      </header>
+      {error && <p className="projectActionError">{error}</p>}
+      {nextCommands && <p className="playbookHeadline">{nextCommands.headline}</p>}
+      {nextCommands?.detail && <p className="playbookDetail">{nextCommands.detail}</p>}
+
+      {waiting.map((milestone) => (
+        <div key={milestone.stable_key} className="playbookAsk">
+          <p className="playbookAskTitle">
+            {milestone.stable_key} · {milestone.title} asks of you:
+          </p>
+          {milestone.description !== '' && (
+            <p className="playbookAskBody">{milestone.description}</p>
+          )}
+          {milestone.acceptance_criteria.length > 0 && (
+            <ul className="playbookCriteria">
+              {milestone.acceptance_criteria.map((criterion) => (
+                <li key={criterion}>{criterion}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+
+      {ready.length > 0 && (
+        <ol className="playbookList">
+          {ready.map((item) => (
+            <li key={item.command}>
+              <p className="playbookIntent">{item.intent}</p>
+              <code className="playbookCommand">{item.command}</code>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {blocked.length > 0 && (
+        <details className="playbookRuledOut">
+          <summary>{blocked.length} command(s) ruled out in this state</summary>
+          <ul>
+            {blocked.map((item) => (
+              <li key={item.command}>
+                <p className="playbookIntent">{item.intent}</p>
+                <code className="playbookCommand ruledOut">{item.command}</code>
+                <p className="playbookReason">
+                  {item.status}
+                  {item.refusal_code ? ` · ${item.refusal_code}` : ''}
+                  {item.reason ? ` - ${item.reason}` : ''}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </section>
+  )
+}
+
+// Settled means nothing here will ever need an operator again. FAILED is
+// deliberately not in this set: a failed unit is the one that most needs a
+// person, so it stays visible by default.
+const SETTLED_WORK_UNIT_STATUSES = new Set(['SUCCEEDED', 'CANCELLED'])
+
 function WorkUnitPicker({
   workUnits,
   selected,
@@ -458,18 +580,44 @@ function WorkUnitPicker({
   selected: string
   onSelect: (workUnitId: string) => void
 }) {
+  const [showSettled, setShowSettled] = useState(false)
+  const settledCount = workUnits.filter((unit) =>
+    SETTLED_WORK_UNIT_STATUSES.has(unit.status),
+  ).length
+  // The selected unit is always listed, settled or not: a <select> whose value
+  // has no matching <option> silently renders as unselected.
+  const visible = workUnits.filter(
+    (unit) =>
+      showSettled ||
+      unit.work_unit_id === selected ||
+      !SETTLED_WORK_UNIT_STATUSES.has(unit.status),
+  )
   return (
-    <label className="workUnitPicker">
-      <span className="eyebrow">WorkUnit</span>
-      <select value={selected} onChange={(event) => onSelect(event.target.value)}>
-        <option value="">Select a WorkUnit</option>
-        {workUnits.map((unit) => (
-          <option key={unit.work_unit_id} value={unit.work_unit_id}>
-            {unit.title} · {unit.status}
-          </option>
-        ))}
-      </select>
-    </label>
+    <div className="workUnitPicker">
+      <label>
+        <span className="eyebrow">WorkUnit</span>
+        <select value={selected} onChange={(event) => onSelect(event.target.value)}>
+          <option value="">Select a WorkUnit</option>
+          {visible.map((unit) => (
+            <option key={unit.work_unit_id} value={unit.work_unit_id}>
+              {unit.title} · {unit.status} · {unit.work_unit_id}
+            </option>
+          ))}
+        </select>
+      </label>
+      {settledCount > 0 && (
+        <label className="mx-auto">
+          <input
+            type="checkbox"
+            checked={showSettled}
+            onChange={(event) => setShowSettled(event.target.checked)}
+          />
+          <span className="whitespace-nowrap ml-0">
+            Show {settledCount} settled (SUCCEEDED / CANCELLED)
+          </span>
+        </label>
+      )}
+    </div>
   )
 }
 
@@ -483,11 +631,12 @@ export function WorkUnitCockpit({
   const list = useWorkUnitList()
   const detail = useWorkUnit(selectedWorkUnit)
   const events = useWorkUnitEvents(selectedWorkUnit)
+  const operator = useWorkUnitNextCommands(selectedWorkUnit)
   const statusLegend = useStatusLegend()
   const legend = useLegendLookup(statusLegend.legend)
 
-  const refreshBoth = async () => {
-    await Promise.all([detail.refresh(), events.refresh()])
+  const refreshAll = async () => {
+    await Promise.all([detail.refresh(), events.refresh(), operator.refresh()])
   }
 
   return (
@@ -502,7 +651,7 @@ export function WorkUnitCockpit({
           selected={selectedWorkUnit}
           onSelect={onSelectWorkUnit}
         />
-        <button type="button" className="iconButton" onClick={() => void refreshBoth()}>
+        <button type="button" className="iconButton" onClick={() => void refreshAll()}>
           <RefreshCcw aria-hidden /> Refresh
         </button>
       </header>
@@ -535,10 +684,15 @@ export function WorkUnitCockpit({
           </div>
 
           <BlockingBanner blocking={detail.workUnit.blocking} />
+          <OperatorPlaybook
+            workUnit={detail.workUnit}
+            nextCommands={operator.nextCommands}
+            error={operator.error}
+          />
           <PhaseStrip phases={detail.workUnit.phases} legend={legend} />
           <StatusLegendPanel legend={legend} />
-          <PendingDecisions workUnit={detail.workUnit} onSettled={refreshBoth} />
-          <RuntimeControls onRan={refreshBoth} />
+          <PendingDecisions workUnit={detail.workUnit} onSettled={refreshAll} />
+          <RuntimeControls onRan={refreshAll} />
 
           <div className="cockpitFactColumns">
             <section className="panel" aria-label="WorkUnit identity">

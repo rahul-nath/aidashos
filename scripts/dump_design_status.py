@@ -12,15 +12,18 @@ latest plan hash and validation status are, how many execution blockers it has,
 and how many WorkUnits it has produced. Every one of those is a row in
 ``design_doc_revisions``, ``compiled_plan_revisions``, or ``work_units``.
 
-**Not derivable, and deliberately left alone:** whether the implementation is
-*done*. The ledger cannot know that ``session_handoff`` is nearly complete but
-unreferenced, or that ``parked_dispatch`` was built in a different shape than
-proposed. That judgement is made by a human reading code, and generating a guess
-at it would be worse than the hand-written table it replaced, because it would
-look authoritative.
+**Human-judged, and transcribed rather than guessed:** whether the
+implementation is *done*. The ledger cannot know that ``session_handoff`` is
+nearly complete but unreferenced, or that ``parked_dispatch`` was built in a
+different shape than proposed. That judgement is made by a human reading code,
+and it lives in exactly one place: each document's own ``Status:`` line, plus
+placement in ``docs/completed/``. The status table is generated from those two
+signals, so this script assembles the judgement without ever making it. A
+status line the closed vocabulary below cannot classify is a check failure
+naming the document, never a silent bucket.
 
-So this writes one new generated section and *checks* the hand-written one. The
-check is the narrow, decidable part: every design document on disk appears in the
+So this writes two generated sections and checks both for drift. The check is
+the narrow, decidable part: every design document on disk appears in the
 status table exactly once, and every name in the table exists on disk. That is
 the drift class that actually bit - ``README.md`` and
 ``docs/gawd_drafts/completed/README.md`` disagreed about which drafts were live,
@@ -45,6 +48,21 @@ _DOCS_DIR = _REPO_ROOT / "docs"
 
 _BEGIN = "<!-- BEGIN GENERATED: design-pipeline -->"
 _END = "<!-- END GENERATED: design-pipeline -->"
+_ROSTER_BEGIN = "<!-- BEGIN GENERATED: design-roster -->"
+_ROSTER_END = "<!-- END GENERATED: design-roster -->"
+
+# The status line's classification vocabulary, matched as a case-insensitive
+# prefix of the declared value with markdown emphasis stripped. Closed on
+# purpose, in the same spirit as the heading vocabulary in
+# `work_units/design_doc.py`: a spelling outside the vocabulary is a named
+# check failure, never a silent bucket, so a new way of saying "half built"
+# gets added here as a deliberate decision.
+_PARTIAL_STATUS_PREFIXES: Final = ("partially implemented", "accepted")
+_NOT_STARTED_STATUS_PREFIXES: Final = ("draft", "proposed", "proposal", "design, not built")
+
+# The banner form spec documents use, and the plain form prose notes use.
+_BANNER_STATUS_RE = re.compile(r"\*\*Status:\*\*\s*(?P<value>[^|\n]+)")
+_PLAIN_STATUS_RE = re.compile(r"^Status:\s*(?P<value>.+)$", re.MULTILINE)
 
 # Documents under docs/ that are not design documents. Everything else in the
 # directory is one, which is the rule that makes the roster check possible: an
@@ -64,6 +82,7 @@ _NOT_DESIGN_DOCS = frozenset(
         "local_observability.md",
         "new_project_intake.md",
         "decomposition_dispatch.md",
+        "doctrine_bump_recovery.md",
         "parallel_forks_example.md",
         "project_center.md",
         "public_release_checklist.md",
@@ -171,6 +190,94 @@ def _completed_doc_files() -> list[Path]:
     return sorted(path for path in completed.glob("*.md") if not path.name.startswith("README"))
 
 
+def _legacy_design_files() -> list[Path]:
+    """The pre-split `docs/design/` directory, carried until its two files move."""
+
+    legacy = _DOCS_DIR / "design"
+    if not legacy.is_dir():
+        return []
+    return sorted(path for path in legacy.glob("*.md") if not path.name.startswith("README"))
+
+
+def _declared_status(path: Path) -> str | None:
+    """The document's own Status value, banner form first, else the plain line."""
+
+    text = path.read_text(encoding="utf-8")
+    match = _BANNER_STATUS_RE.search(text) or _PLAIN_STATUS_RE.search(text)
+    if match is None:
+        return None
+    return match.group("value").strip()
+
+
+def _classify_status(value: str) -> str | None:
+    normalized = value.replace("*", "").replace("_", "").strip().lower()
+    if normalized.startswith(_PARTIAL_STATUS_PREFIXES):
+        return "partial"
+    if normalized.startswith(_NOT_STARTED_STATUS_PREFIXES):
+        return "not_started"
+    return None
+
+
+def _render_roster(problems: list[str]) -> str:
+    """The status table, from placement plus each document's own Status line.
+
+    Done is placement: `docs/completed/` is the done shelf, and a status line
+    there is not consulted. Partial versus not-started is the document's own
+    declaration, classified through the closed vocabulary above. The script
+    never judges; it moves a human judgement from a hand-written table nobody
+    remembered to update into the one file its author was already editing.
+    """
+
+    done = [path.stem for path in _completed_doc_files()]
+    partial: list[str] = []
+    not_started: list[str] = []
+    labelled = [
+        *((path, path.stem) for path in _design_doc_files()),
+        *((path, path.stem) for path in _design_note_files()),
+        *((path, f"design/{path.stem}") for path in _legacy_design_files()),
+    ]
+    for path, label in labelled:
+        value = _declared_status(path)
+        if value is None:
+            problems.append(
+                f"{path.relative_to(_REPO_ROOT)} declares no Status line, so the roster "
+                "cannot place it; add one"
+            )
+            continue
+        bucket = _classify_status(value)
+        if bucket is None:
+            problems.append(
+                f"{path.relative_to(_REPO_ROOT)} declares Status {value!r}, which the "
+                "roster vocabulary cannot classify; start it with one of: "
+                + ", ".join((*_PARTIAL_STATUS_PREFIXES, *_NOT_STARTED_STATUS_PREFIXES))
+            )
+            continue
+        (partial if bucket == "partial" else not_started).append(label)
+
+    def _row(title: str, names: list[str]) -> str:
+        rendered = ", ".join(f"`{name}`" for name in names) or "-"
+        return f"| {title} | {len(names)} | {rendered} |"
+
+    return "\n".join(
+        [
+            _ROSTER_BEGIN,
+            "",
+            "Generated by `scripts/dump_design_status.py`. Do not edit by hand.",
+            "",
+            "Done is placement in `docs/completed/`. Partial versus not-started is each",
+            "document's own `Status:` line, transcribed rather than judged here.",
+            "",
+            "| Status | Count | Documents |",
+            "| --- | --- | --- |",
+            _row("**Done** (in `docs/completed/`)", done),
+            _row("**Partial** (by own `Status:` line)", partial),
+            _row("**Not started**", not_started),
+            "",
+            _ROSTER_END,
+        ]
+    )
+
+
 def _ledger_rows() -> list[dict[str, Any]]:
     try:
         from local_first_agent_os.work_units import service
@@ -218,16 +325,16 @@ def _render(rows: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _replace_section(text: str, rendered: str) -> str:
-    if _BEGIN in text and _END in text:
+def _replace_section(text: str, rendered: str, begin: str, end: str) -> str:
+    if begin in text and end in text:
         pattern = re.compile(
-            re.escape(_BEGIN) + ".*?" + re.escape(_END),
+            re.escape(begin) + ".*?" + re.escape(end),
             re.DOTALL,
         )
         return pattern.sub(lambda _: rendered, text, count=1)
     raise SystemExit(
         f"{_README_PATH} has no generated block. Add these two markers where the "
-        f"table should go:\n{_BEGIN}\n{_END}"
+        f"table should go:\n{begin}\n{end}"
     )
 
 
@@ -296,6 +403,7 @@ def main() -> int:
     args = parser.parse_args()
 
     problems = _roster_problems() + _compile_problems()
+    roster_rendered = _render_roster(problems)
 
     try:
         rows = _ledger_rows()
@@ -313,7 +421,8 @@ def main() -> int:
         return 2
 
     current = _README_PATH.read_text(encoding="utf-8")
-    updated = _replace_section(current, _render(rows))
+    updated = _replace_section(current, _render(rows), _BEGIN, _END)
+    updated = _replace_section(updated, roster_rendered, _ROSTER_BEGIN, _ROSTER_END)
 
     if args.write:
         if updated != current:

@@ -28,6 +28,8 @@ from ..coordination.resident_loop import (
 from ..coordination.store import check_connection_budget, err, ok
 from ..harness_availability import check_harness_availability
 from ..harness_readiness import plan_tier_staffing, restaffings, staffing_refusals
+from ..settings import get_settings
+from ..staffing import load_staffing
 from . import repository as repo
 from . import service
 from .dispatch_adoption import (
@@ -104,7 +106,11 @@ def _harness_refusal() -> dict[str, Any] | None:
     ``None`` when nothing blocks, so callers read as a guard clause.
     """
 
-    plan = plan_tier_staffing(states=check_harness_availability())
+    staffing = load_staffing(get_settings().config_dir / "staffing.toml")
+    plan = plan_tier_staffing(
+        bench=staffing,
+        states=check_harness_availability(staffing),
+    )
     refusals = staffing_refusals(plan)
     if refusals:
         return err(
@@ -204,6 +210,24 @@ def list_work_unit_artifacts(work_unit_id: str) -> dict[str, Any]:
     return ok(work_unit_id=work_unit_id, artifacts=list(artifacts))
 
 
+def _resume_gate() -> str | None:
+    """The refusal a decision-triggered resume answers to at this door.
+
+    The same two probes `resume_work_unit` runs, for the same reason: an
+    approved override on a BLOCKED WorkUnit now enqueues a resume, and this
+    door owes that resume the same refusal it owes a typed one. It is handed to
+    the service as a callable rather than run here because most decisions
+    (denials, clarifications, approvals of waiting milestones) deliver nothing,
+    and a harness probe spawns subprocesses that those submissions should not
+    pay for.
+    """
+
+    refusal = _budget_refusal() or _harness_refusal()
+    if refusal is None:
+        return None
+    return str(refusal.get("message") or refusal.get("error"))
+
+
 def submit_work_unit_decision(
     work_unit_id: str,
     request_id: str,
@@ -226,6 +250,7 @@ def submit_work_unit_decision(
                 decision,
                 idempotency_key,
                 decided_by=decided_by,
+                resume_refusal=_resume_gate,
             )
         )
     except repo.DecisionRequestMismatch as exc:

@@ -67,7 +67,7 @@ from .project_center import LinkedProject, load_project_center, project_status_r
 from .review_recovery import staff_review_approves_checkpoint
 from .runtime import AppRuntime
 from .spawn_authority import SpawnAuthority
-from .staffing import Bench, JudgmentRole, Tier, load_bench
+from .staffing import Bench, JudgmentRole, Staffing, Tier, load_staffing
 
 DispatchKind = Literal["advisory", "code", "cast"]
 
@@ -170,7 +170,7 @@ class DispatcherIntentRunner:
         delegate_fn: DelegateFn | None = None,
         dependency_compactor: ViewCompactor | None = None,
         executor_factory: Callable[[Bench, SpawnAuthority], CliPowWowExecutor] | None = None,
-        bench: Bench | None = None,
+        bench: Bench | Staffing | None = None,
         planner: DecompositionPlanner | None = None,
         claude_bin: str = "claude",
         codex_bin: str = "codex",
@@ -187,7 +187,12 @@ class DispatcherIntentRunner:
                 "dependency_compactor is consumed by the default executor factory; "
                 "a caller supplying its own executor_factory wires its own compactor"
             )
-        self.bench = bench or load_bench(runtime.settings.config_dir / "staffing.toml")
+        # The full `Staffing` rather than its bench, because this runner is the
+        # one consumer that restaffs: `bench_for_dispatch` needs the pairing
+        # declarations to move the frontier pair together. A test may still hand
+        # a bare `Bench` and get per-tier behavior, which is all a bare bench
+        # can declare.
+        self.bench = bench or load_staffing(runtime.settings.config_dir / "staffing.toml")
         self.planner = planner or RuleBasedDecompositionPlanner()
         self.executor_factory = executor_factory or (
             lambda bench_config, ceiling: CliPowWowExecutor(
@@ -1065,6 +1070,7 @@ def _context_for_intent(
         checkpoint_base_head_sha=str(checkpoint.get("base_head_sha") or "") or None,
         checkpoint_patch_artifact_id=(str(checkpoint.get("patch_artifact_id") or "") or None),
         reuse_checkpoint_worktree=bool(checkpoint.get("reuse_preserved_worktree")),
+        base_commit_sha=str(intent.get("base_commit_sha") or "") or None,
     )
 
 

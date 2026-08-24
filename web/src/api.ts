@@ -33,6 +33,8 @@ export type ArtifactView = components['schemas']['ArtifactView']
 export type EventView = components['schemas']['EventView']
 export type PendingDecisionView = components['schemas']['PendingDecisionView']
 export type BlockingCondition = components['schemas']['BlockingCondition']
+export type NextCommandSet = components['schemas']['NextCommandSet']
+export type NextCommand = components['schemas']['NextCommand']
 export type WorkUnitStatus = components['schemas']['WorkUnitStatus']
 export type MilestoneExecutionStatus = components['schemas']['MilestoneExecutionStatus']
 export type PhaseStatus = components['schemas']['PhaseStatus']
@@ -54,6 +56,11 @@ export type CheckpointFacts = components['schemas']['CheckpointFacts']
 export type ApprovalFacts = components['schemas']['ApprovalFacts']
 export type LeaseFacts = components['schemas']['LeaseFacts']
 export type IntentFacts = components['schemas']['IntentFacts']
+export type IntegrationTriggerResult =
+  | components['schemas']['IntegrationAccepted']
+  | components['schemas']['IntegrationRunning']
+  | components['schemas']['IntegrationComplete']
+  | components['schemas']['IntegrationBlocked']
 
 /** One of two execution shapes, discriminated by `execution_kind` on the wire. */
 export type ExecutionFacts = LeaseFacts | IntentFacts

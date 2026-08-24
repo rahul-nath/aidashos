@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from local_first_agent_os.staffing import Bench, Harness, Tier, load_bench
+from local_first_agent_os.staffing import Bench, FrontierPairing, Harness, Tier, load_bench
 
 REPO_STAFFING_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "staffing.toml"
 
@@ -48,3 +48,45 @@ def seat_agent_name(tier: Tier) -> str:
     """The agent name a fake filling `tier`'s seat must answer to."""
 
     return seat_vendor(tier).value
+
+
+def two_vendor_bench() -> Bench:
+    """A fixed cross-vendor seating, for tests whose premise IS two vendors.
+
+    The repo's config may seat one vendor in both frontier seats (an outage
+    staffing, sanctioned by `load_bench`). Most tests should inherit whatever
+    the config says, per this module's docstring - but a test about
+    cross-vendor mechanics (provider fallback, the vendor cross-check) asserts
+    vendor pairs by name, and inheriting a same-vendor seating deletes its
+    subject. Such a test declares this seating explicitly instead. The shape is
+    the historical one: codex implements, claude reviews. Models are cleared
+    because they belong to the config's seating, not this synthetic one.
+
+    Built through `FrontierPairing` rather than by editing two slots, so this
+    helper is held to the rule the config is held to. A synthetic seating is
+    still a seating, and one that quietly put a vendor in both seats would hand
+    every cross-vendor test a bench with no cross-vendor in it.
+    """
+
+    from dataclasses import replace
+
+    bench = dict(repo_bench())
+    pairing = FrontierPairing(
+        name="two_vendor_bench",
+        senior=replace(
+            bench[Tier.SENIOR],
+            harness=Harness.CODEX,
+            model=None,
+            backup_models=(),
+            workload_profiles=(),
+        ),
+        staff=replace(
+            bench[Tier.STAFF],
+            harness=Harness.CLAUDE,
+            model=None,
+            backup_models=(),
+            workload_profiles=(),
+        ),
+    )
+    bench.update(pairing.seats())
+    return bench

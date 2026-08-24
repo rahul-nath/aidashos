@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -31,7 +32,12 @@ from local_first_agent_os.pow_wow import (
     PowWowTaskResult,
 )
 from local_first_agent_os.staffing import Tier
-from local_first_agent_os.work_units.design_doc import parse_declared_permission_envelope
+from local_first_agent_os.work_units.compiler import CompiledPlanOutcome, compile_design_doc
+from local_first_agent_os.work_units.design_doc import (
+    SectionKind,
+    parse_declared_permission_envelope,
+    parse_design_doc,
+)
 from local_first_agent_os.work_units.permissions import (
     BASELINE_AUTONOMOUS_ACTIONS,
     BASELINE_BUILD_ACTIONS,
@@ -1023,9 +1029,7 @@ def test_the_finalized_document_declares_its_own_delivery_contract(tmp_path) -> 
     )
     assert parse_design_doc(document, design_doc_id="before").required_artifacts == ()
 
-    document = append_required_artifacts_section(
-        document, render_required_artifacts_markdown(plan)
-    )
+    document = append_required_artifacts_section(document, render_required_artifacts_markdown(plan))
     parsed = parse_design_doc(document, design_doc_id="after")
 
     assert "source_patch" in parsed.required_artifacts
@@ -1436,3 +1440,144 @@ def test_the_envelope_payload_names_its_source_and_keeps_suggestions_apart() -> 
             "matched_terms": ("api",),
         }
     ]
+
+
+# --------------------------------------------------------------------------- #
+# Target project: the id, never the title
+# --------------------------------------------------------------------------- #
+
+
+def _sparse_draft_with_target(tmp_path, target_line: str, project: str) -> Path:
+    """A draft off the shipped template, with only its two project lines set.
+
+    The real template rather than a hand-written document, because the line under
+    test is one the template writes: a fixture that spells it out itself would
+    keep passing after the template stopped emitting it.
+    """
+
+    draft_file = create_sparse_gawd_draft_file(tmp_path)
+    text = draft_file.path.read_text(encoding="utf-8")
+    text = text.replace("Target project: _REGISTERED PROJECT ID_", target_line)
+    text = text.replace("**Project:** _PROJECT NAME_", f"**Project:** {project}")
+    draft_file.path.write_text(text, encoding="utf-8")
+    return draft_file.path
+
+
+def test_a_finalized_document_compiles_against_the_id_the_draft_declared(tmp_path) -> None:
+    """The finalized document is compiled directly, so it must carry the id.
+
+    It used to carry `draft.project`, the human title off the `**Project:**`
+    banner. The compiler reads `Target project:` as a registered project id, so
+    every finalized document produced by intake blocked with "target project
+    'Pocket Tracker' is not registered and could not be adopted" - naming a
+    string no author had ever typed on that line, while the id they did type was
+    parsed away and dropped.
+
+    The two facts stay separate here on purpose: the banner keeps the title a
+    human reads, and this line carries the id the compiler resolves.
+    """
+
+    path = _sparse_draft_with_target(
+        tmp_path,
+        "Target project: local_first_agent_os",
+        "Pocket Tracker",
+    )
+    draft = parse_sparse_gawd_draft(path)
+
+    assert draft.project == "Pocket Tracker"
+    assert draft.target_project_id == "local_first_agent_os"
+
+    final_markdown = build_reviewable_gawd_draft(draft).final_markdown
+
+    assert "Target project: local_first_agent_os" in final_markdown
+    assert "**Project:** Pocket Tracker" in final_markdown
+
+    parsed = parse_design_doc(final_markdown, design_doc_id="finalized-intake")
+    assert parsed.declared_target_project_id == "local_first_agent_os"
+
+    outcome = compile_design_doc(parsed, design_doc_revision_id="ddr-finalized-intake")
+    assert isinstance(outcome, CompiledPlanOutcome)
+    assert not [item for item in outcome.execution_blockers if "target project" in item]
+
+
+def test_an_unfilled_target_project_line_is_not_a_declaration(tmp_path) -> None:
+    """A blank the author never filled in must stay blank in the finalized doc.
+
+    The finalized document renders the `**Project:**` banner too, and the
+    compiler falls back to that banner when no `Target project:` line exists. So
+    omitting the line for an undeclared id would hand the compiler the human
+    title anyway and reproduce the exact failure this pair of tests is about.
+    Emitting the line empty is what makes the compiler say the document declares
+    no target project, which is the message that names the fix.
+    """
+
+    path = _sparse_draft_with_target(
+        tmp_path,
+        "Target project: _REGISTERED PROJECT ID_",
+        "Pocket Tracker",
+    )
+    draft = parse_sparse_gawd_draft(path)
+
+    assert draft.target_project_id is None
+
+    final_markdown = build_reviewable_gawd_draft(draft).final_markdown
+    assert "Target project:\n" in final_markdown
+    assert "Target project: Pocket Tracker" not in final_markdown
+
+    parsed = parse_design_doc(final_markdown, design_doc_id="unfilled-intake")
+    assert parsed.declared_target_project_id is None
+
+    outcome = compile_design_doc(parsed, design_doc_revision_id="ddr-unfilled-intake")
+    assert isinstance(outcome, CompiledPlanOutcome)
+    blockers = "; ".join(outcome.execution_blockers)
+    assert "declares no target project" in blockers
+    assert "Pocket Tracker" not in blockers
+
+
+# --------------------------------------------------------------------------- #
+# The template is the format's executable spec
+# --------------------------------------------------------------------------- #
+
+
+def test_the_blank_template_parses_with_nothing_unaccounted_for() -> None:
+    """Render the shipped template, parse it with the one parser, pin the result.
+
+    This is the two-sided contract for the whole document, not just section 14:
+    the template is the half an operator copies, the vocabulary is the half the
+    compiler applies, and this test fails when either moves alone. Every level-2
+    heading must resolve to a known kind - a vocabulary that does not know its
+    own template is lying to someone - and the only diagnostic a blank sparse
+    draft may carry is `no_milestones`, which is what sparse means.
+    """
+
+    template = _sparse_gawd_template("abc123", datetime(2026, 8, 17, tzinfo=UTC))
+    parsed = parse_design_doc(template, design_doc_id="template", source_path=None)
+
+    unknown = [section.heading for section in parsed.unknown_sections if section.level >= 2]
+    assert unknown == []
+    assert [item.code for item in parsed.diagnostics] == ["no_milestones"]
+    # The fenced Milestone 0 example stays an example, as the template promises.
+    assert parsed.milestone_candidates == ()
+
+
+def test_the_finalized_blank_draft_parses_clean_and_compiles_its_own_output(tmp_path) -> None:
+    """What intake writes, the compiler reads - with no residue in between.
+
+    The finalized document is not sparse: milestones are derived, so even the
+    `no_milestones` allowance disappears. Zero diagnostics, zero unknown
+    sections, and the intake-lifecycle sections (Staff Verdict, quoted model
+    turns) are known INTAKE_METADATA rather than UNKNOWN noise.
+    """
+
+    draft_file = create_sparse_gawd_draft_file(tmp_path)
+    finalized = build_reviewable_gawd_draft(parse_sparse_gawd_draft(draft_file.path))
+
+    parsed = parse_design_doc(finalized.final_markdown, design_doc_id="final", source_path=None)
+
+    unknown = [section.heading for section in parsed.unknown_sections if section.level >= 2]
+    assert unknown == []
+    assert parsed.diagnostics == ()
+    verdict = next(
+        section for section in parsed.sections if section.normalized_heading == "staff verdict"
+    )
+    assert verdict.kind is SectionKind.INTAKE_METADATA

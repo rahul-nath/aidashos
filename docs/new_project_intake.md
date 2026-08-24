@@ -114,6 +114,36 @@ inside that prose, which parsed as a real milestone, so a model could add an
 executable step to a plan by describing one. A `>` prefix settles both, because
 the heading and field patterns are anchored at line start.
 
+Fenced text is quotation too. The parser masks code fences before it looks for
+sections, milestones, fields, or permission actions, so a fenced example - the
+template's own `### Milestone 0:` block, or the envelope syntax shown in this
+document - shows a shape without declaring one. Before this rule, every sparse
+draft compiled with a fake PLAN milestone copied from the template's example.
+
+## One Document Grammar
+
+The sparse draft, the finalized document, and every design document in `docs/`
+are one format read by one parser: `split_document_sections`, `mask_fences`,
+`normalize_heading`, and `canonical_heading` in `work_units/design_doc.py`.
+`parse_sparse_gawd_draft` selects sections through the same functions the
+compiler uses, so the two cannot disagree about where a section starts, what a
+heading means, or where a fence is. The intake module's private section parser
+is gone.
+
+Headings match the canonical vocabulary exactly after normalization, or not at
+all. An accepted variant spelling classifies through the alias table and emits
+an `alias_heading` diagnostic naming the canonical form. Any other heading is
+UNKNOWN: preserved, named, and reaching no compiler collection. There is no
+substring matching, so a heading that merely contains a known phrase -
+"Permission Envelope (Proposed)", "Not in scope" - no longer becomes that
+section.
+
+The template is the format's executable spec.
+`test_the_blank_template_parses_with_nothing_unaccounted_for` renders the
+shipped template, parses it, and pins the result: every level-2 heading known,
+no diagnostics beyond `no_milestones`, and the fenced example inert. Change the
+template or the vocabulary alone and that test names the drift.
+
 `## Required Artifacts` is derived from the phases the milestones declare, and
 is the plan's delivery contract. The compiler rejects a plan that declares an
 IMPLEMENT milestone and names no terminal evidence, and intake used to emit
@@ -129,9 +159,9 @@ plan then requires evidence no executor produces.
 
 A milestone's `Acceptance:` lines are its own exit gate, not the document's.
 Document-wide Verification, Operational Contract, and Risk Synthesis sections
-already reach the compiler through their own probes in
-`work_units/design_doc._SECTION_PROBES`; copying them onto every step carried
-them twice and asked a planning milestone to satisfy an on-device check.
+already reach the compiler through the canonical heading table in
+`work_units/design_doc.py`; copying them onto every step carried them twice and
+asked a planning milestone to satisfy an on-device check.
 
 ## Permission Envelope
 

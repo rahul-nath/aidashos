@@ -46,7 +46,7 @@ def run_ledger_dispatcher(
     from ..dispatcher_runner import build_dispatcher_runner
     from ..harness_availability import build_quota_claim_gate
     from ..runtime import build_runtime
-    from ..staffing import dispatch_seat_counts, load_bench
+    from ..staffing import dispatch_seat_counts, load_staffing
 
     with hold_resident_loop(ResidentLoop.LEDGER_DISPATCHER, scope=tier) as lease:
         if isinstance(lease, ResidentLoopBusy):
@@ -83,18 +83,21 @@ def run_ledger_dispatcher(
         # every PENDING intent is runnable by construction, so the loop claims
         # up to each tier's free seats - the seat counts are staffing's
         # capacity numbers, read from the same file that staffs the pipelines.
-        bench = load_bench(runtime.settings.config_dir / "staffing.toml")
+        staffing = load_staffing(runtime.settings.config_dir / "staffing.toml")
         dispatcher = LedgerDispatcher(
             build_dispatcher_runner(runtime),
             name=name,
             tier=tier,
             settings=runtime.settings,
-            seats=dispatch_seat_counts(bench),
-            # A tier whose harness has reported a spent quota is not claimed
+            seats=dispatch_seat_counts(staffing.bench),
+            # A tier whose seating has reported a spent quota is not claimed
             # from at all, so its intents keep their place in the queue instead
-            # of being spent against a provider that will refuse. This loop's
-            # own interval is what picks them up again once the quota returns.
-            tier_claimable=build_quota_claim_gate(bench, settings=runtime.settings),
+            # of being spent against a provider that will refuse. The gate holds
+            # the full staffing, so the frontier pair answers as a pair: both
+            # seats claimable when a fallback pairing can take them, neither
+            # when nothing declared can. This loop's own interval is what picks
+            # them up again once the quota returns.
+            tier_claimable=build_quota_claim_gate(staffing, settings=runtime.settings),
         )
         dispatched = dispatcher.dispatch_pending_intents(
             interval_seconds=interval_seconds,

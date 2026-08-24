@@ -61,7 +61,7 @@ When you are telling a human what to run next, either run the shell command and 
 
 ## Boundaries that are not yours to cross
 
-- Approval gates (`CODE_MERGE`, `PURCHASE`, `EXTERNAL_COMMS`, `MODEL_ESCALATION`) are resolved by the human operator.
+- Approval gates (`CODE_MERGE`, `PURCHASE`, `EXTERNAL_COMMS`, `MODEL_ESCALATION`, `REVIEW_ESCALATION`) are resolved by the human operator.
   Surface pending requests; never submit the decision unless the operator explicitly tells you to in this session.
 - The system never auto-merges, deploys, or spends; do not work around that with your own shell.
 - Coordination flows through ledger rows and artifacts, not chat memory; if you coordinated something, record it.

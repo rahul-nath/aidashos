@@ -657,6 +657,19 @@ def _dbos_active() -> bool:
     return is_dbos_active() and SetWorkflowID is not None and DBOS is not None
 
 
+def _dbos_configured() -> bool:
+    """Whether the workflow decorators here are real DBOS decorators.
+
+    The same two facts `_dbos_runtime` used to choose them. True with the
+    runtime unlaunched is the one state where calling a decorated function is
+    not a plain call: DBOS intercepts it and reaches for the system database.
+    """
+
+    from ..settings import get_settings
+
+    return DBOS is not None and get_settings().use_dbos
+
+
 @dataclass
 class WorkUnitEngine:
     """Lifecycle orchestration with its side effects injected.
@@ -1630,6 +1643,68 @@ def execute_milestone_workflow(
     )
 
 
+@dataclass(frozen=True)
+class InlineRunRefused:
+    """An inline run stopped before touching an unlaunched runtime's database.
+
+    A `@dbos_workflow` function does not degrade to a plain call when DBOS is
+    configured but not launched: DBOS intercepts the call and reaches for the
+    system database, which raises. Observed live on 2026-08-23, when
+    `resume_work_unit --inline` from the one-shot CLI answered with
+    `DBOSException: System database accessed before DBOS was launched` instead
+    of a resume. A delivery outcome is an answer, never a stack trace.
+    """
+
+    reason: str
+
+
+def _drive_root_inline(
+    unit: repo.WorkUnitRow, workflow_id: str
+) -> dict[str, Any] | InlineRunRefused:
+    """Run the root execution in this process, durably when DBOS can launch.
+
+    The inline caller is a one-shot operator process, so launching here is the
+    designed lifecycle: `run_workflow_durably` set the launch-on-demand
+    pattern, and the CLI's exit boundary (`exit_code_after_runtime_shutdown`)
+    stops what this starts. Launched, the direct call runs as a real durable
+    workflow under `workflow_id`, blocking until it finishes, which is what
+    inline promises. Only when the decorators are the identity ones does the
+    call run as plain Python, and then no launch is attempted.
+    """
+
+    if _dbos_configured() and not _dbos_active():
+        from ..dbos_app import launch_dbos
+
+        launch_dbos()
+    if _dbos_active():
+        assert SetWorkflowID is not None
+        with SetWorkflowID(workflow_id):
+            result = execute_work_unit(
+                unit.work_unit_id,
+                unit.design_doc_revision_id,
+                unit.compiled_plan_revision_id,
+                unit.compiled_plan_hash,
+                unit.lifecycle_profile_version,
+            )
+        return {"result": result, "durable": True}
+    if _dbos_configured():
+        return InlineRunRefused(
+            reason=(
+                "DBOS is configured but its runtime could not be launched, so "
+                "the inline run stopped before touching the system database; "
+                "check the DBOS system database and retry"
+            )
+        )
+    result = execute_work_unit(
+        unit.work_unit_id,
+        unit.design_doc_revision_id,
+        unit.compiled_plan_revision_id,
+        unit.compiled_plan_hash,
+        unit.lifecycle_profile_version,
+    )
+    return {"result": result, "durable": False}
+
+
 def start_root_workflow(
     work_unit_id: str,
     delivery: EnqueueDelivery = EnqueueDelivery.DURABLE,
@@ -1670,18 +1745,19 @@ def start_root_workflow(
             "durable": False,
             "reason": "no active DBOS runtime; the enqueue stays pending",
         }
-    result = execute_work_unit(
-        unit.work_unit_id,
-        unit.design_doc_revision_id,
-        unit.compiled_plan_revision_id,
-        unit.compiled_plan_hash,
-        unit.lifecycle_profile_version,
-    )
+    driven = _drive_root_inline(unit, unit.root_workflow_id)
+    if isinstance(driven, InlineRunRefused):
+        return {
+            "work_unit_id": work_unit_id,
+            "delivered": False,
+            "durable": False,
+            "reason": driven.reason,
+        }
     return {
         "work_unit_id": work_unit_id,
-        "result": result,
+        "result": driven["result"],
         "delivered": True,
-        "durable": False,
+        "durable": driven["durable"],
     }
 
 
@@ -1742,19 +1818,21 @@ def resume_root_workflow(
             "durable": False,
             "reason": "no active DBOS runtime; resume again from a durable runtime",
         }
-    result = execute_work_unit(
-        unit.work_unit_id,
-        unit.design_doc_revision_id,
-        unit.compiled_plan_revision_id,
-        unit.compiled_plan_hash,
-        unit.lifecycle_profile_version,
-    )
+    driven = _drive_root_inline(unit, continuation_id)
+    if isinstance(driven, InlineRunRefused):
+        return {
+            "work_unit_id": work_unit_id,
+            "continuation_of": unit.root_workflow_id,
+            "delivered": False,
+            "durable": False,
+            "reason": driven.reason,
+        }
     return {
         "work_unit_id": work_unit_id,
         "continuation_of": unit.root_workflow_id,
-        "result": result,
+        "result": driven["result"],
         "delivered": True,
-        "durable": False,
+        "durable": driven["durable"],
     }
 
 
@@ -1813,11 +1891,48 @@ class EnqueueSettled:
 type EnqueueOutcome = EnqueueSettled | EnqueueFailed
 
 
+def _deliver_resume_enqueue(work_unit_id: str, delivery: EnqueueDelivery) -> dict[str, Any]:
+    """Deliver one RESUME outbox row through the full operator resume path.
+
+    Deliberately the whole of `service.resume_work_unit`, not a bare
+    `resume_root_workflow`: crashed-execution recovery, the
+    indeterminate-liveness refusal, and the per-milestone retry decisions are
+    the resume, and delivering around them would mint a continuation on an
+    epoch nothing repaired. The import is deferred because the service imports
+    this module at its top; by the time a drain runs, both are fully loaded.
+
+    A WorkUnit that reached a terminal state between the decision and this
+    delivery has nothing to resume, and `resume_work_unit` would refuse it with
+    an exception every pass, forever. The intent is consumed instead: the
+    payload says `delivered` so the drain closes the row, and the reason says
+    that nothing ran.
+    """
+
+    from . import service
+
+    unit = repo.get_work_unit(work_unit_id)
+    if unit.status in TERMINAL_WORK_UNIT_STATUSES:
+        return {
+            "work_unit_id": work_unit_id,
+            "delivered": True,
+            "durable": False,
+            "reason": (
+                f"work unit is {unit.status.value}; the resume intent is obsolete "
+                "and was consumed without resuming"
+            ),
+        }
+    return service.resume_work_unit(work_unit_id, delivery=delivery)
+
+
 def drain_enqueue_outbox(
     limit: int = 20,
     delivery: EnqueueDelivery = EnqueueDelivery.DURABLE,
 ) -> tuple[EnqueueOutcome, ...]:
     """Deliver pending root-workflow enqueues idempotently.
+
+    Each row names its own delivery: a START row hands the first root execution
+    to a runtime, a RESUME row re-drives a halted WorkUnit through the operator
+    resume path.
 
     A row is marked delivered only after the execution was actually accepted, so a
     crash between the two leaves a row that is retried rather than a WorkUnit that
@@ -1832,7 +1947,10 @@ def drain_enqueue_outbox(
     outcomes: list[EnqueueOutcome] = []
     for row in repo.list_pending_enqueues(limit):
         try:
-            payload = start_root_workflow(row.work_unit_id, delivery)
+            if row.kind is repo.EnqueueKind.RESUME:
+                payload = _deliver_resume_enqueue(row.work_unit_id, delivery)
+            else:
+                payload = start_root_workflow(row.work_unit_id, delivery)
         except Exception as exc:  # noqa: BLE001 - one bad row must not stop the drain
             failure = exceptional_failure(exc, operation="drain_enqueue_outbox")
             repo.mark_enqueue_failed(row.work_unit_id, failure.message)

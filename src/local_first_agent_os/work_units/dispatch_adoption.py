@@ -24,7 +24,7 @@ from ..coordination.outcomes import (
 )
 from ..coordination.store import connect, decode_json_object, rowdict
 from ..project_center import LinkedProject, load_project_center
-from ..review_recovery import staff_review_approves_checkpoint
+from ..review_recovery import diagnose_staff_review_provenance
 from ..settings import Settings, get_settings
 from . import repository as repo
 from .events import ArtifactKind, MilestoneTransition, RequirableArtifact
@@ -38,7 +38,9 @@ from .execution import (
 )
 from .lifecycle import MilestoneExecutionStatus
 
-_WORK_UNIT_SOURCE = re.compile(
+# Public because the doctrine staleness scan also has to say which WorkUnit
+# owns a stale dispatch, and a second copy of this pattern would drift.
+WORK_UNIT_DISPATCH_SOURCE = re.compile(
     r"^work_unit:(?P<work_unit_id>[^:]+):milestone_execution:(?P<milestone_key>[^:]+)$"
 )
 
@@ -101,7 +103,7 @@ def adopt_recovered_dispatch(
 
     settings = settings or get_settings()
     intent = _dispatch_intent(intent_id)
-    match = _WORK_UNIT_SOURCE.fullmatch(str(intent.get("source") or ""))
+    match = WORK_UNIT_DISPATCH_SOURCE.fullmatch(str(intent.get("source") or ""))
     if match is None:
         raise DispatchAdoptionRefused(
             "dispatch_not_owned_by_work_unit",
@@ -130,10 +132,12 @@ def adopt_recovered_dispatch(
         )
     checkpoint = _mapping(checkpoints[-1].get("content"))
     review_contents = [_mapping(review.get("content")) for review in reviews]
-    if not staff_review_approves_checkpoint(review_contents[-1], review_contents[:-1], checkpoint):
+    issue = diagnose_staff_review_provenance(review_contents[-1], review_contents[:-1], checkpoint)
+    if issue is not None:
         raise DispatchAdoptionRefused(
             "recovered_review_provenance_invalid",
-            "approved recovery does not prove an exact host-stamped staff approval",
+            "approved recovery does not prove an exact host-stamped staff approval: "
+            f"{issue.code.value}: {issue.message}",
         )
     commit_sha = str(payload.get("commit_sha") or "").strip()
     base_sha = str(payload.get("base_sha") or "").strip()
@@ -794,6 +798,7 @@ def _integrated_branch_contains(project: LinkedProject, commit_sha: str) -> bool
 
 
 __all__ = [
+    "WORK_UNIT_DISPATCH_SOURCE",
     "DispatchAdoption",
     "DispatchAdoptionRefused",
     "IntegratedMilestoneAdoption",

@@ -17,7 +17,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { client, describeApiError } from '../api'
-import type { EventView, StatusLegendView, WorkUnitSummary, WorkUnitView } from '../api'
+import type {
+  EventView,
+  NextCommandSet,
+  StatusLegendView,
+  WorkUnitSummary,
+  WorkUnitView,
+} from '../api'
 
 export const WORK_UNIT_POLL_MS = 5_000
 export const WORK_UNIT_EVENTS_POLL_MS = 3_000
@@ -146,6 +152,45 @@ export function useWorkUnit(workUnitId: string): WorkUnitLane {
   usePolling(refresh, WORK_UNIT_POLL_MS)
 
   return { workUnit, error, refresh }
+}
+
+export type NextCommandLane = {
+  nextCommands: NextCommandSet | null
+  error: string | null
+  refresh: () => Promise<void>
+}
+
+/**
+ * Lane three: what the operator does next, computed server-side.
+ *
+ * Its own lane rather than a field on the WorkUnit, because it is derived from
+ * that view rather than part of it, and because the rule tables that produce it
+ * live in one module that the terminal already prints from. The cockpit asking
+ * the same question of the same function is what keeps the two surfaces from
+ * disagreeing about what unblocks a WorkUnit.
+ */
+export function useWorkUnitNextCommands(workUnitId: string): NextCommandLane {
+  const [nextCommands, setNextCommands] = useState<NextCommandSet | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const refresh = useCallback(async () => {
+    if (!workUnitId) return
+    const { data, error: failed, response } = await client.GET(
+      '/work-units/{work_unit_id}/next-commands',
+      { params: { path: { work_unit_id: workUnitId } } },
+    )
+    if (failed !== undefined || data === undefined) {
+      setNextCommands(null)
+      setError(describeApiError(failed, response))
+      return
+    }
+    setNextCommands(data)
+    setError(null)
+  }, [workUnitId])
+
+  usePolling(refresh, WORK_UNIT_POLL_MS)
+
+  return { nextCommands, error, refresh }
 }
 
 export type WorkUnitEventLane = {

@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.routing import APIRoute
+from fastapi.testclient import TestClient
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCHEMA_PATH = _REPO_ROOT / "web" / "openapi.json"
@@ -36,6 +37,7 @@ _TYPED_ROUTES = (
     "/status-legend",
     "/work-units",
     "/work-units/{work_unit_id}",
+    "/work-units/{work_unit_id}/next-commands",
     "/work-units/{work_unit_id}/events",
     "/work-units/{work_unit_id}/artifacts",
     "/work-units/{work_unit_id}/decisions",
@@ -69,6 +71,28 @@ def test_every_typed_route_declares_its_response_model() -> None:
                 f"{method.upper()} {path} publishes an untyped response body, so the "
                 "generated client cannot type it. Declare response_model on the route."
             )
+
+
+def test_the_next_commands_route_reuses_the_terminal_rule_table(
+    work_unit_ledger: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from work_unit_support import install_simulated_engine, run_acceptance_work_unit
+
+    install_simulated_engine()
+    work_unit_id = run_acceptance_work_unit()
+
+    from local_first_agent_os import api
+    from local_first_agent_os.work_units.next_commands import next_commands_for_view
+    from local_first_agent_os.work_units.projection import build_work_unit_view
+
+    view = build_work_unit_view(work_unit_id)
+    expected = next_commands_for_view(view).model_dump(mode="json")
+    monkeypatch.setattr(api.work_units, "get_work_unit", lambda _work_unit_id: view)
+
+    response = TestClient(api.create_app()).get(f"/work-units/{work_unit_id}/next-commands")
+
+    assert response.status_code == 200
+    assert response.json() == expected
 
 
 def test_the_generated_typescript_covers_every_published_schema() -> None:

@@ -58,6 +58,7 @@ from ..refinery.requests import (
     require_integration_transition,
     state_of,
 )
+from .outcomes import DispatchPromotionState, require_dispatch_promotion_transition
 from .store import (
     ConnectionLike,
     connect,
@@ -310,6 +311,29 @@ def record_bisected_out(
     )
     apply_integration_transition(c, request, parked, recorded_at=recorded_at)
     return parked
+
+
+def record_integrated(
+    c: ConnectionLike,
+    request: InFlight,
+    *,
+    integration_commit_sha: str,
+    recorded_at: float,
+) -> Integrated:
+    """Persist the one fact that represents ``MERGE_APPROVED -> MERGED``."""
+
+    require_dispatch_promotion_transition(
+        DispatchPromotionState.MERGE_APPROVED,
+        DispatchPromotionState.MERGED,
+    )
+    integrated = Integrated(
+        subject=request.subject,
+        batch_id=request.batch_id,
+        integration_commit_sha=integration_commit_sha,
+        integrated_at=recorded_at,
+    )
+    apply_integration_transition(c, request, integrated, recorded_at=recorded_at)
+    return integrated
 
 
 def recover_in_flight_requests(
@@ -586,6 +610,7 @@ __all__ = [
     "list_integration_requests",
     "read_integration_requests",
     "record_bisected_out",
+    "record_integrated",
     "record_queued_request",
     "recover_in_flight_requests",
     "return_requests_to_queue",

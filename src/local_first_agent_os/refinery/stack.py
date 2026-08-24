@@ -5,17 +5,17 @@
 
 `bisect` decides which requests to try and who to blame. This module is the half
 that touches git: allocate a worktree, merge the commits in order, notice a
-conflict, and tear the worktree down. It decides nothing about attribution, and
-it never advances the target project's integrated branch.
+conflict, advance the declared integrated branch, and tear worktrees down. It
+decides nothing about attribution.
 
 The promise it keeps
 ====================
 
-**Nothing outside the integration worktree is touched.** Every merge happens in a
-detached worktree under ``<saga_worktree_root>/integration/<batch_id>``, so a
-conflicting merge leaves conflict markers in a throwaway directory and the target
-project's working tree, index, ``HEAD``, and refs are untouched by every path
-through this module. There is no path through this module that writes a ref.
+Every speculative merge happens in a detached worktree under
+``<saga_worktree_root>/integration/<batch_id>``. The one permitted write outside
+it is an exact ``--ff-only`` of the declared integrated branch after provenance
+and the whole project gate pass. The target checkout is never switched, and a
+dirty checkout, wrong branch, or moved base refuses that write.
 
 Detached rather than ``-b``, so an abandoned attempt leaves no ref at all. A
 named branch would leak, and a leaked branch under a prefix an operator
@@ -170,6 +170,45 @@ type ProvenanceVerdict = ProvenanceHeld | ProvenanceBroken
 
 
 @dataclass(frozen=True)
+class FastForwarded:
+    """The declared branch now names the exact verified stack tip."""
+
+    tip_sha: str
+
+
+@dataclass(frozen=True)
+class FastForwardRefused:
+    """The operator checkout made the single branch write unsafe."""
+
+    detail: str
+
+
+type FastForwardOutcome = FastForwarded | FastForwardRefused
+
+
+@dataclass(frozen=True)
+class SourceWorktreeRemoved:
+    """The clean execution worktree was removed; its branch remains."""
+
+    path: Path
+
+
+@dataclass(frozen=True)
+class SourceWorktreeAbsent:
+    """No registered worktree currently has the approved branch checked out."""
+
+
+@dataclass(frozen=True)
+class SourceWorktreePreserved:
+    """Cleanup refused because removing this worktree would discard or race work."""
+
+    detail: str
+
+
+type SourceWorktreeCleanup = SourceWorktreeRemoved | SourceWorktreeAbsent | SourceWorktreePreserved
+
+
+@dataclass(frozen=True)
 class StackBuilder:
     """The git operations one refinery run performs, against one repository.
 
@@ -276,6 +315,106 @@ class StackBuilder:
         # next `git worktree list` does not report a directory that is gone.
         self._run(("worktree", "prune"), cwd=self.repository_path)
         return result.output or None
+
+    def fast_forward_integrated_branch(
+        self,
+        workspace: IntegrationWorkspace,
+        *,
+        branch_name: str,
+        tip_sha: str,
+    ) -> FastForwardOutcome:
+        """Advance exactly the checked-out declared branch to the verified tip."""
+
+        checked_out = self.checked_out_branch()
+        if checked_out != branch_name:
+            return FastForwardRefused(
+                f"target checkout is on {checked_out or 'a detached HEAD'}, not {branch_name}"
+            )
+        if self.working_tree_is_dirty():
+            return FastForwardRefused("target checkout has staged or tracked working-tree changes")
+        current_tip = self.integrated_tip(branch_name)
+        if current_tip != workspace.base_sha:
+            return FastForwardRefused(
+                f"{branch_name} moved from {workspace.base_sha} to {current_tip} while the "
+                "stack was being verified"
+            )
+        result = self._run(("merge", "--ff-only", tip_sha), cwd=self.repository_path)
+        if result.exit_code != 0:
+            return FastForwardRefused(
+                f"git refused the exact verified tip {tip_sha}: {result.output}"
+            )
+        landed = self.integrated_tip(branch_name)
+        if landed != tip_sha:
+            raise RuntimeError(
+                f"git reported a successful fast-forward to {tip_sha}, "
+                f"but {branch_name} is {landed}"
+            )
+        return FastForwarded(tip_sha=tip_sha)
+
+    def cleanup_source_worktree(
+        self,
+        *,
+        branch_name: str,
+        approved_tip_sha: str,
+    ) -> SourceWorktreeCleanup:
+        """Remove the clean worktree for an integrated branch without deleting its ref.
+
+        A moved branch or any nonignored dirt is preserved. Cleanup is secondary
+        to integration and therefore reports a value instead of changing the
+        durable merge verdict.
+        """
+
+        try:
+            return self._cleanup_source_worktree(
+                branch_name=branch_name,
+                approved_tip_sha=approved_tip_sha,
+            )
+        except (GitFailure, OSError) as exc:
+            return SourceWorktreePreserved(f"could not inspect the source worktree: {exc}")
+
+    def _cleanup_source_worktree(
+        self,
+        *,
+        branch_name: str,
+        approved_tip_sha: str,
+    ) -> SourceWorktreeCleanup:
+        """Perform cleanup reads after the public boundary makes them non-fatal."""
+
+        listing = self._must(("worktree", "list", "--porcelain"), cwd=self.repository_path)
+        entries: list[dict[str, str]] = []
+        current: dict[str, str] = {}
+        for line in (*listing.splitlines(), ""):
+            if not line:
+                if current:
+                    entries.append(current)
+                    current = {}
+                continue
+            key, _, value = line.partition(" ")
+            current[key] = value
+
+        wanted_ref = f"refs/heads/{branch_name}"
+        matching = [entry for entry in entries if entry.get("branch") == wanted_ref]
+        if not matching:
+            return SourceWorktreeAbsent()
+        if len(matching) != 1:
+            raise RuntimeError(f"branch {branch_name} is checked out in {len(matching)} worktrees")
+
+        path = Path(matching[0]["worktree"])
+        if path.resolve() == self.repository_path.resolve():
+            return SourceWorktreePreserved("refusing to remove the target project's checkout")
+        actual_tip = self._must(("rev-parse", "HEAD"), cwd=path)
+        if actual_tip != approved_tip_sha:
+            return SourceWorktreePreserved(
+                f"source branch moved from approved {approved_tip_sha} to {actual_tip}"
+            )
+        dirt = self._must(("status", "--porcelain"), cwd=path)
+        if dirt:
+            return SourceWorktreePreserved("source worktree has uncommitted or untracked files")
+
+        removed = self._run(("worktree", "remove", "--force", str(path)), cwd=self.repository_path)
+        if removed.exit_code != 0:
+            return SourceWorktreePreserved(f"git could not remove {path}: {removed.output}")
+        return SourceWorktreeRemoved(path=path)
 
     # -- the merges --------------------------------------------------------
 
@@ -489,6 +628,9 @@ class StackBuilder:
 
 
 __all__ = [
+    "FastForwardOutcome",
+    "FastForwardRefused",
+    "FastForwarded",
     "GitFailure",
     "IntegrationWorkspace",
     "ProvenanceBroken",
@@ -499,4 +641,8 @@ __all__ = [
     "StackBuilt",
     "StackConflicted",
     "StackUnbuildable",
+    "SourceWorktreeAbsent",
+    "SourceWorktreeCleanup",
+    "SourceWorktreePreserved",
+    "SourceWorktreeRemoved",
 ]

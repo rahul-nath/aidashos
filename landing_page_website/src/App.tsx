@@ -155,7 +155,7 @@ export function App() {
           </ol>
           <p className="lane-note">
             The whole path is a checked-in DAG:{" "}
-            <a href={`${GITHUB_URL}/blob/main/docs/diagrams/aidashos-onboarding-dag.png`} rel="noopener">
+            <a href={`${GITHUB_URL}/blob/HEAD/docs/diagrams/aidashos-onboarding-dag.png`} rel="noopener">
               docs/diagrams/aidashos-onboarding-dag.png
             </a>
             , with the boot stages numbered in topological order.

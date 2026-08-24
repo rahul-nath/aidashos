@@ -160,19 +160,6 @@ class StackAbandonment(StrEnum):
     next poll, which is correct: it should stay loud rather than park good work.
     """
 
-    INTEGRATED_BRANCH_ADVANCE_UNIMPLEMENTED = "INTEGRATED_BRANCH_ADVANCE_UNIMPLEMENTED"
-    """Milestone 3 built the stack and is not allowed to land it.
-
-    The dry run is the whole of milestone 3: allocate, merge in order, attribute
-    conflicts, check provenance, tear down, and stop. Reporting `StackLanded`
-    instead would be a lie with consequences, because the next attempt is built
-    on ``landed`` and the branch it names would not have moved.
-
-    **Milestone 4 deletes this member.** It is here rather than as a flag on the
-    driver so that the one place a green stack currently stops is a value a test
-    can assert on and a reader can grep for.
-    """
-
 
 @dataclass(frozen=True)
 class StackAbandoned:

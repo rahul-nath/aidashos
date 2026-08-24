@@ -21,7 +21,11 @@ from .coordination.outcomes import (
 from .dispatch_results import DispatchRunnerResult, normalize_dispatch_runner_result
 from .pow_wow.ledger import run_coordination_command
 from .project_center import load_project_center
-from .review_recovery import staff_review_approves_checkpoint
+from .review_recovery import (
+    DOCTRINE_PROVENANCE_CODES,
+    diagnose_staff_review_provenance,
+    merge_gate_evidence,
+)
 
 _OUTPUT_LIMIT = 4_000
 
@@ -359,42 +363,41 @@ def require_staff_review_provenance(
             "CODE_MERGE is not approvable: typed promotion state is "
             f"{dispatch_result.promotion_state.value}, expected MERGE_PENDING"
         )
-    reviews = [
-        _mapping(artifact.get("content"))
-        for artifact in _all_artifacts(dispatch_result.run_result)
-        if artifact.get("artifact_type") == "review_result"
-        and artifact.get("schema_version") == "review_result.v1"
-    ]
-    if not reviews:
+    evidence = merge_gate_evidence(dispatch_result.run_result)
+    final = evidence.final_review
+    if final is None:
         raise ValueError(
             "CODE_MERGE is not approvable without host-stamped review_result.v1 evidence"
         )
-    final = reviews[-1]
-    checkpoints = [
-        _mapping(artifact.get("content"))
-        for artifact in _all_artifacts(dispatch_result.run_result)
-        if artifact.get("artifact_type") == "worktree_commit_checkpoint"
-        and _mapping(artifact.get("content")).get("commit_sha")
-    ]
-    final_checkpoint = checkpoints[-1] if checkpoints else {}
-    expected_commit = _text(payload.get("commit_sha")) or _text(final_checkpoint.get("commit_sha"))
-    expected_base = _text(payload.get("base_sha")) or _text(final_checkpoint.get("base_head_sha"))
-    if not (
-        expected_commit
-        and expected_base
-        and staff_review_approves_checkpoint(
-            final,
-            reviews[:-1],
-            {
-                "commit_sha": expected_commit,
-                "base_head_sha": expected_base,
-            },
-        )
-    ):
+    expected_commit = _text(payload.get("commit_sha")) or _text(
+        evidence.checkpoint.get("commit_sha")
+    )
+    expected_base = _text(payload.get("base_sha")) or _text(
+        evidence.checkpoint.get("base_head_sha")
+    )
+    if not (expected_commit and expected_base):
         raise ValueError(
-            "CODE_MERGE is not approvable: final review provenance is incomplete "
-            "or is not an approved staff execution under the current engineering doctrine"
+            "CODE_MERGE is not approvable: neither the approval payload nor the "
+            "retained checkpoint names the reviewed commit and base"
         )
+    issue = diagnose_staff_review_provenance(
+        final,
+        evidence.reviews[:-1],
+        {
+            "commit_sha": expected_commit,
+            "base_head_sha": expected_base,
+        },
+    )
+    if issue is None:
+        return
+    message = f"CODE_MERGE is not approvable: {issue.code.value}: {issue.message}."
+    if issue.code in DOCTRINE_PROVENANCE_CODES:
+        message += (
+            " Run `agent-ledger list_doctrine_stale_reviews` to see every pending "
+            "review in this state and the recovery commands; the operator procedure "
+            "is documented in docs/doctrine_bump_recovery.md."
+        )
+    raise ValueError(message)
 
 
 def render_merge_review_packet(packet: Mapping[str, Any]) -> str:

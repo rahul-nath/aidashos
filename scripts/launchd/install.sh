@@ -1,22 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Installs (or removes) the boot launch agents: postgres bring-up, llama-server,
+# Installs (or removes) the launch agents: postgres bring-up, llama-server,
 # whisper-server, pi-daemon, the session-daemon, and the two resident loops that
-# move queued work. Run `install.sh` to load them and `install.sh uninstall` to
-# remove them.
+# move queued work. Run `install.sh` to install them and `install.sh uninstall`
+# to remove them.
 #
-# The loops are here so that a reboot is not a manual step. Everything else in
-# this list answers when asked; the drainer and the dispatcher are the two that
-# go looking, and while they were started only by `start-agent-runtime.sh`, a
-# machine that restarted overnight came back with its services up and its queue
-# frozen.
+# These are not boot agents. The plists are rendered into LOCAL_AGENT_LAUNCHD_DIR
+# rather than ~/Library/LaunchAgents, so login does not start them and a bootout
+# survives a restart; see scripts/launchd-agent-dir.sh for why. What installs
+# them is this script, what starts them afterwards is start-agent-runtime.sh, and
+# what stops them is stop-agent-runtime.sh.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 UV_BIN="$(command -v uv || true)"
 [ -n "$UV_BIN" ] || { echo "uv is required; run $ROOT/scripts/bootstrap.sh" >&2; exit 1; }
-LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
+. "$ROOT/scripts/launchd-agent-dir.sh"
+LAUNCH_AGENTS="$LOCAL_AGENT_LAUNCHD_DIR"
 DOMAIN="gui/$(id -u)"
 LAUNCHD_BOOTOUT_TIMEOUT_SECONDS="${LOCAL_AGENT_LAUNCHD_BOOTOUT_TIMEOUT_SECONDS:-15}"
 LAUNCHD_BOOTOUT_POLL_SECONDS="${LOCAL_AGENT_LAUNCHD_BOOTOUT_POLL_SECONDS:-0.2}"

@@ -65,6 +65,7 @@ APPROVAL_REQUEST_TYPES: tuple[str, ...] = (
     "EXTERNAL_COMMS",
     "CODE_MERGE",
     "MODEL_ESCALATION",
+    "REVIEW_ESCALATION",
     "GENERAL",
 )
 

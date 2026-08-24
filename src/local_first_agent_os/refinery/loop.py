@@ -20,7 +20,7 @@ poll drains everything queued, which means a request cannot be passed over by a
 later arrival.
 
 What grows a batch is the previous run. An integration run allocates a worktree,
-merges N commits, and (from milestone 4) runs the project's whole verification
+merges N commits, and runs the project's whole verification
 command set, which for a real project is seconds to minutes. Every `CODE_MERGE`
 an operator resolves *during* that run enqueues behind it and forms the next
 batch. So batch size is a function of arrival rate against integration duration,
@@ -39,12 +39,12 @@ When it sleeps, and why that is not the same as "after doing work"
 It sleeps on an empty queue, and it sleeps after a run that decided nothing.
 
 The design says "do not sleep after doing work", and a run that abandoned did
-not do any: a dirty working tree, an unallocatable worktree, or milestone 3's
-missing fast-forward all return the whole batch to `Queued` unchanged. Polling
-again immediately would rebuild the same stack against the same condition as fast
-as the machine allows, which is a hot loop wearing a drain's clothing. The
-condition that ends an abandonment is always outside the queue, so waiting for it
-is the only thing that can help.
+not do any: a dirty working tree, wrong checked-out branch, or unallocatable
+worktree returns the undecided portion to `Queued` unchanged. Polling again
+immediately would rebuild the same stack against the same condition as fast as
+the machine allows, which is a hot loop wearing a drain's clothing. The condition
+that ends an abandonment is outside the queue, so waiting for it is the only
+thing that can help.
 
 A run that parked or landed anything did do work, and it polls again at once.
 """
@@ -257,16 +257,14 @@ def run_refinery(
         refinery = Refinery(target_project_id)
         polls = refinery.drain(interval_seconds=interval_seconds, max_polls=max_polls)
 
+    advanced = any(
+        isinstance(poll, Drained) and bool(poll.run.outcome.integrated) for poll in polls
+    )
     return ok(
         target_project_id=target_project_id,
         integrated_branch=refinery.project.integrated_branch,
         polls=[_describe_poll(poll) for poll in polls],
-        advanced_the_integrated_branch=False,
-        note=(
-            "milestone 3 builds and verifies the stack and never advances the integrated "
-            "branch; a stack that builds cleanly is abandoned as "
-            "INTEGRATED_BRANCH_ADVANCE_UNIMPLEMENTED and its members return to the queue"
-        ),
+        advanced_the_integrated_branch=advanced,
     )
 
 
@@ -291,6 +289,15 @@ def _describe_poll(poll: RefineryPoll) -> dict[str, Any]:
                 ],
                 "returned_to_queue": list(getattr(run.outcome, "returned_to_queue", ())),
                 "abandoned_because": getattr(getattr(run.outcome, "reason", None), "value", None),
+                "source_worktree_cleanup": [
+                    {
+                        "request_id": request_id,
+                        "outcome": type(cleanup).__name__,
+                        "path": str(getattr(cleanup, "path", "")) or None,
+                        "detail": getattr(cleanup, "detail", None),
+                    }
+                    for request_id, cleanup in run.source_worktree_cleanup
+                ],
             }
     raise AssertionError(f"unhandled refinery poll {poll!r}")
 

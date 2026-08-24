@@ -26,7 +26,8 @@ from ..contracts import (
     DispatchProgress,
     classify_dispatch_progress,
 )
-from ..coordination.outcomes import TerminalOutcome
+from ..coordination.failures import DurableFailureError, expected_failure
+from ..coordination.outcomes import FailureCategory, TerminalOutcome
 from ..coordination.store import rowdict, tx
 from ..ids import sha256_text
 from .events import (
@@ -625,6 +626,96 @@ def dispatch_intent_row(intent_id: str) -> dict[str, Any] | None:
     return rowdict(row) if row is not None else None
 
 
+DEPENDENCY_BASES_DIVERGED = "MILESTONE_DEPENDENCY_BASES_DIVERGED"
+
+
+def _settled_commit_for_dependency(c: Any, work_unit_id: str, dependency_key: str) -> str | None:
+    """The commit the dependency's latest settled attempt produced, or None.
+
+    Read from the ledger's own record - the settled intent's
+    ``worktree_commit_checkpoint`` artifact - rather than from git, because the
+    ledger is what survives a pruned branch and what the operator audits at the
+    CODE_MERGE gate. A dependency that settled without producing a commit (a
+    PLAN milestone, an advisory read) contributes nothing, so its own inherited
+    seed flows through transitively via whichever ancestor did produce one.
+    """
+
+    row = c.execute(
+        "SELECT result FROM dispatch_intents "
+        "WHERE source=? AND status=? AND result IS NOT NULL "
+        "ORDER BY completed_at DESC LIMIT 1",
+        (
+            f"work_unit:{work_unit_id}:milestone_execution:{dependency_key}",
+            str(_DISPATCH_SUCCESS),
+        ),
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(rowdict(row)["result"] or "null")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    run_result = payload.get("run_result")
+    source = run_result if isinstance(run_result, dict) else payload
+    artifacts = list(source.get("artifacts") or [])
+    for task in source.get("tasks") or []:
+        if isinstance(task, dict):
+            artifacts.extend(task.get("artifacts") or [])
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            continue
+        if artifact.get("artifact_type") != "worktree_commit_checkpoint":
+            continue
+        content = artifact.get("content")
+        if isinstance(content, dict):
+            commit = str(content.get("commit_sha") or "").strip()
+            if commit:
+                return commit
+    return None
+
+
+def resolve_dependency_base_commit(context: MilestoneContext) -> str | None:
+    """The commit this milestone's worktree must branch from.
+
+    The dependency edge acting as a pipe: ordering was always honored, but the
+    worktree was seeded from HEAD, so a chained milestone never contained its
+    predecessor's work. None means no dependency produced a commit and the
+    worktree seeds from HEAD, exactly the old behavior.
+
+    Two dependencies that settled on divergent commits fail closed with a typed
+    refusal naming both. Fork has one parent; merging lineages is the operator
+    gate's job, and picking a parent silently here would show the gate a chain
+    that never contained the other dependency's work.
+    """
+
+    produced: dict[str, str] = {}
+    with tx() as c:
+        for dependency_key in sorted(context.milestone.dependencies):
+            commit = _settled_commit_for_dependency(c, context.work_unit_id, dependency_key)
+            if commit is not None:
+                produced[dependency_key] = commit
+    distinct = sorted(set(produced.values()))
+    if len(distinct) > 1:
+        named = ", ".join(f"{key}={sha}" for key, sha in sorted(produced.items()))
+        raise DurableFailureError(
+            expected_failure(
+                DEPENDENCY_BASES_DIVERGED,
+                operation="resolve_dependency_base_commit",
+                message=(
+                    f"milestone {context.milestone.stable_key} depends on milestones that "
+                    f"settled on divergent commits ({named}); there is no single commit to "
+                    "branch from, and picking one would silently drop the other's work. "
+                    "Merge the dependency branches, then retry."
+                ),
+                category=FailureCategory.BUSINESS,
+                retryable=False,
+            )
+        )
+    return distinct[0] if distinct else None
+
+
 @dataclass(frozen=True)
 class DispatchBackedExecutorRuntime:
     """Execute a milestone by requesting agent work in the dispatch ledger.
@@ -677,6 +768,7 @@ class DispatchBackedExecutorRuntime:
         from ..spawn_authority import SpawnAuthority
 
         submitter = self.intent_submitter or submit_dispatch_intent
+        base_commit_sha = resolve_dependency_base_commit(context)
         result = submitter(
             self.tier,
             self._prompt(context),
@@ -689,11 +781,12 @@ class DispatchBackedExecutorRuntime:
             # already been intersected with the plan-level permission envelope,
             # and parsing the names here refuses an unknown persisted capability.
             permitted_capabilities=SpawnAuthority.from_names(context.permitted_tools).to_names(),
+            base_commit_sha=base_commit_sha,
         )
         if not result.get("ok"):
             raise RuntimeError(f"dispatch intent submission rejected: {result}")
         intent_id = str(result["intent_id"])
-        self._record_intent(context, intent_id)
+        self._record_intent(context, intent_id, base_commit_sha)
         return intent_id
 
     def _target_project_id(self, context: MilestoneContext) -> str | None:
@@ -718,7 +811,9 @@ class DispatchBackedExecutorRuntime:
 
         return load_project_center().default_saga_project
 
-    def _record_intent(self, context: MilestoneContext, intent_id: str) -> None:
+    def _record_intent(
+        self, context: MilestoneContext, intent_id: str, base_commit_sha: str | None = None
+    ) -> None:
         """Link the milestone to the agent work it asked for, before waiting.
 
         `DispatchIntentCreated` was defined and handled and never emitted, so
@@ -739,6 +834,7 @@ class DispatchBackedExecutorRuntime:
                 dispatch_intent_id=intent_id,
                 tier=self.tier,
                 kind=self.kind,
+                base_commit_sha=base_commit_sha,
             ),
         )
 

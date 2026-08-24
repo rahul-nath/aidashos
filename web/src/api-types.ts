@@ -21,6 +21,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/approvals/{approval_id}/integration": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Integration Status */
+        get: operations["integration_status_approvals__approval_id__integration_get"];
+        put?: never;
+        /** Trigger Integration */
+        post: operations["trigger_integration_approvals__approval_id__integration_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/authoring/design-docs/compile": {
         parameters: {
             query?: never;
@@ -429,6 +447,33 @@ export interface paths {
         };
         /** Work Unit Events */
         get: operations["work_unit_events_work_units__work_unit_id__events_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/work-units/{work_unit_id}/next-commands": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Work Unit Next Commands
+         * @description What an operator does next, derived rather than written twice.
+         *
+         *     The terminal has printed this block since the next-command affordance
+         *     shipped; the cockpit had no equivalent, so an operator reading a BLOCKED
+         *     pill in the browser was told the work stopped and not what to do about
+         *     it. `next_commands_for_view` is a pure function of the same view this
+         *     API already serves, so exposing it costs one route and keeps one rule
+         *     table answering both surfaces.
+         */
+        get: operations["work_unit_next_commands_work_units__work_unit_id__next_commands_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -849,6 +894,83 @@ export interface components {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
         };
+        /** IntegrationAccepted */
+        IntegrationAccepted: {
+            /** Approval Id */
+            approval_id: string;
+            /**
+             * Message
+             * @default The approved request was handed to the refinery.
+             */
+            message: string;
+            /** Request Id */
+            request_id: string;
+            /**
+             * State
+             * @default accepted
+             * @constant
+             */
+            state: "accepted";
+            /** Target Project Id */
+            target_project_id: string;
+        };
+        /** IntegrationBlocked */
+        IntegrationBlocked: {
+            /** Approval Id */
+            approval_id: string;
+            /** Message */
+            message: string;
+            /** Request Id */
+            request_id: string | null;
+            /**
+             * State
+             * @default blocked
+             * @constant
+             */
+            state: "blocked";
+            /** Target Project Id */
+            target_project_id: string | null;
+        };
+        /** IntegrationComplete */
+        IntegrationComplete: {
+            /** Approval Id */
+            approval_id: string;
+            /**
+             * Message
+             * @default The approved request is already integrated.
+             */
+            message: string;
+            /** Request Id */
+            request_id: string;
+            /**
+             * State
+             * @default complete
+             * @constant
+             */
+            state: "complete";
+            /** Target Project Id */
+            target_project_id: string;
+        };
+        /** IntegrationRunning */
+        IntegrationRunning: {
+            /** Approval Id */
+            approval_id: string;
+            /**
+             * Message
+             * @default The refinery is already integrating this request.
+             */
+            message: string;
+            /** Request Id */
+            request_id: string;
+            /**
+             * State
+             * @default running
+             * @constant
+             */
+            state: "running";
+            /** Target Project Id */
+            target_project_id: string;
+        };
         /**
          * IntentFacts
          * @description One dispatch intent, for the window before any lease exists.
@@ -952,6 +1074,11 @@ export interface components {
         };
         /** MilestoneView */
         MilestoneView: {
+            /**
+             * Acceptance Criteria
+             * @default []
+             */
+            acceptance_criteria: string[];
             /** Attempt */
             attempt: number;
             /** Child Workflow Id */
@@ -961,6 +1088,11 @@ export interface components {
              * @default []
              */
             dependencies: string[];
+            /**
+             * Description
+             * @default
+             */
+            description: string;
             /** Dispatch Intent Id */
             dispatch_intent_id: string | null;
             dispatch_status: components["schemas"]["DispatchIntentStatus"] | null;
@@ -995,6 +1127,50 @@ export interface components {
             /** Title */
             title: string;
         };
+        /**
+         * NextCommand
+         * @description One command an operator might run next, and what running it would mean.
+         */
+        NextCommand: {
+            /** Command */
+            command: string;
+            /** Intent */
+            intent: string;
+            /** Precondition */
+            precondition: string | null;
+            /** Reason */
+            reason: string | null;
+            /** Refusal Code */
+            refusal_code: string | null;
+            status: components["schemas"]["NextCommandStatus"];
+        };
+        /**
+         * NextCommandSet
+         * @description Every next command for one printed result, plus the headline above them.
+         */
+        NextCommandSet: {
+            /**
+             * Commands
+             * @default []
+             */
+            commands: components["schemas"]["NextCommand"][];
+            /** Detail */
+            detail: string | null;
+            /** Headline */
+            headline: string;
+            /**
+             * Schema Version
+             * @default next_commands.v1
+             * @constant
+             */
+            schema_version: "next_commands.v1";
+        };
+        /**
+         * NextCommandStatus
+         * @description Whether the operator can run this now, and if not, why not.
+         * @enum {string}
+         */
+        NextCommandStatus: "READY" | "REFUSED" | "UNPROVED";
         /**
          * OperatorDecision
          * @description The wire spelling of an operator's answer.
@@ -1248,6 +1424,16 @@ export interface components {
              * @default general
              */
             workspace_id: string;
+        };
+        /**
+         * ResumeDeliveryView
+         * @description What a decision that unblocks a BLOCKED WorkUnit did about resuming it.
+         */
+        ResumeDeliveryView: {
+            /** Enqueued */
+            enqueued: boolean;
+            /** Reason */
+            reason: string;
         };
         /** ReviseWalkthru */
         ReviseWalkthru: {
@@ -1750,6 +1936,10 @@ export interface components {
          *
          *     ``applied`` false with a ``reason`` is the idempotent case: the request was
          *     already resolved, and saying so is not an error.
+         *
+         *     ``resume`` is absent for the decisions that unblock nothing; present, it
+         *     says whether a RESUME delivery now awaits the enqueue drainer and why or
+         *     why not.
          */
         WorkUnitDecisionResult: {
             /** Applied */
@@ -1762,6 +1952,7 @@ export interface components {
             reason: string | null;
             /** Request Id */
             request_id: string;
+            resume: components["schemas"]["ResumeDeliveryView"] | null;
             /** Sequence Number */
             sequence_number: number | null;
             /** Work Unit Id */
@@ -1979,6 +2170,68 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    integration_status_approvals__approval_id__integration_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                approval_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationAccepted"] | components["schemas"]["IntegrationRunning"] | components["schemas"]["IntegrationComplete"] | components["schemas"]["IntegrationBlocked"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    trigger_integration_approvals__approval_id__integration_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                approval_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IntegrationAccepted"] | components["schemas"]["IntegrationRunning"] | components["schemas"]["IntegrationComplete"] | components["schemas"]["IntegrationBlocked"];
                 };
             };
             /** @description Validation Error */
@@ -2724,6 +2977,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkUnitEventPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    work_unit_next_commands_work_units__work_unit_id__next_commands_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                work_unit_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NextCommandSet"];
                 };
             };
             /** @description Validation Error */

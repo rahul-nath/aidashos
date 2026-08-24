@@ -9,7 +9,7 @@ import type {
   LinkedProject,
   ProjectActionSnapshot,
 } from '../api'
-import { useCurrentState, useLifecycleTimeline } from './lanes'
+import { useCurrentState, useIntegrationTrigger, useLifecycleTimeline } from './lanes'
 
 const NOT_RECORDED = '—'
 
@@ -184,8 +184,17 @@ export function ProjectCockpit({
   onSelectProject: (projectId: string) => void
 }) {
   const currentState = useCurrentState(selectedProject)
+  const integration = useIntegrationTrigger(currentState.refresh, selectedProject)
   const timeline = useLifecycleTimeline(selectedProject)
   const snapshot = currentState.data
+  const approvedIntegrationId =
+    snapshot?.action === 'MERGE_INTEGRATION_REQUIRED' &&
+    snapshot.approval?.request_type === 'CODE_MERGE' &&
+    snapshot.approval.status === 'APPROVED'
+      ? snapshot.approval.approval_id
+      : null
+  const integrationResult =
+    integration.result?.target_project_id === selectedProject ? integration.result : null
 
   return (
     <section className="projectCockpit" aria-label="Project action cockpit">
@@ -212,6 +221,34 @@ export function ProjectCockpit({
             <span className={`actionPill ${snapshot.action.toLowerCase()}`}>{snapshot.action}</span>
             <p>{snapshot.summary}</p>
             {snapshot.next_command && <code>{snapshot.next_command}</code>}
+            {(approvedIntegrationId || integrationResult) && (
+              <div className="integrationAction">
+                {approvedIntegrationId &&
+                  integrationResult?.state !== 'complete' &&
+                  integrationResult?.state !== 'blocked' && (
+                  <button
+                    type="button"
+                    disabled={
+                      integration.pending ||
+                      integrationResult?.state === 'accepted' ||
+                      integrationResult?.state === 'running'
+                    }
+                    onClick={() => void integration.trigger(approvedIntegrationId)}
+                  >
+                    {integration.pending ||
+                    integrationResult?.state === 'accepted' ||
+                    integrationResult?.state === 'running'
+                      ? 'Integrating…'
+                      : 'Integrate approved work'}
+                  </button>
+                  )}
+                {(integrationResult || integration.error) && (
+                  <p role="status" className={integration.error ? 'projectActionError' : undefined}>
+                    {integration.error ?? integrationResult?.message}
+                  </p>
+                )}
+              </div>
+            )}
             <p className="laneStamp" data-testid="current-state-stamp">
               Current state as of {formatClockTime(currentState.lastUpdatedAt)}
               <button

@@ -21,6 +21,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Final
 
 from ..ids import sha256_text
@@ -75,6 +76,16 @@ class SectionKind(StrEnum):
     wrong label: routing a GAWD doc's "Scope & Non-Goals" to `NON_GOALS` put its
     in-scope work under "Explicitly out of scope" in the executing agent's
     prompt, which is worse than not carrying it at all.
+    """
+
+    INTAKE_METADATA = "INTAKE_METADATA"
+    """A section the intake lifecycle writes for the operator, not for the plan.
+
+    The template's Time Budget and the finalized document's Staff Verdict and
+    quoted model turns are of this kind. Known and named, deliberately reaching
+    no compiler collection: `UNKNOWN` would be a lie from a vocabulary reading
+    its own template, and any content kind would compile an operator note or a
+    reviewer's transcript into an agent's instructions.
     """
 
     UNKNOWN = "UNKNOWN"
@@ -327,72 +338,147 @@ class ParsedDesignDoc:
 # Section recognition
 # --------------------------------------------------------------------------- #
 
-# Substring probes against the normalized heading. Order matters: the first
-# match wins, so the more specific probe is listed first.
-_SECTION_PROBES: tuple[tuple[str, SectionKind], ...] = (
-    ("execution milestones", SectionKind.MILESTONES),
-    ("milestones", SectionKind.MILESTONES),
-    ("acceptance criteria", SectionKind.ACCEPTANCE_CRITERIA),
-    # Both halves named in one heading, so more specific than either probe below
-    # it and listed first. `_split_scope_section` decides which lines are which.
-    # Probes are matched against `normalize_heading` output, which lowercases,
-    # expands "&" to "and", and turns punctuation into spaces: the heading
-    # "4. This Version - Scope & Non-Goals" arrives as
-    # "this version scope and non goals", so the probe carries no punctuation.
-    ("scope and non goals", SectionKind.SCOPE),
-    ("non goals", SectionKind.NON_GOALS),
-    ("requirements", SectionKind.REQUIREMENTS),
-    ("constraints", SectionKind.CONSTRAINTS),
-    ("assumptions", SectionKind.ASSUMPTIONS),
-    ("failure modes", SectionKind.FAILURE_MODES),
-    ("the failure that matters most", SectionKind.FAILURE_MODES),
-    ("rollout", SectionKind.ROLLOUT),
-    ("rollback", SectionKind.ROLLOUT),
-    ("unresolved questions", SectionKind.UNRESOLVED_QUESTIONS),
-    ("open questions", SectionKind.UNRESOLVED_QUESTIONS),
-    ("approvals", SectionKind.APPROVALS),
-    ("approval requirements", SectionKind.APPROVALS),
-    ("required artifacts", SectionKind.REQUIRED_ARTIFACTS),
-    # The GAWD doc's own section names. "the failure that matters most" above was
-    # already one of them, which is the tell: this parser was always meant to read
-    # a GAWD doc, and the mapping was simply left unfinished. A DesignDoc and a
-    # GAWD doc are the same document; only the milestone blocks need typed fields,
-    # because a phase and its evidence cannot be recovered from prose.
-    ("risk synthesis", SectionKind.FAILURE_MODES),
-    ("known limitations", SectionKind.FAILURE_MODES),
-    ("permission envelope", SectionKind.PERMISSION_ENVELOPE),
-    ("operational contract", SectionKind.CONSTRAINTS),
-    # Before the bare "verification" probe, which would otherwise swallow it:
-    # a current-state audit is what the document assumes to be true today, not
-    # what it promises to prove.
-    ("current state verification", SectionKind.ASSUMPTIONS),
-    ("verification", SectionKind.ACCEPTANCE_CRITERIA),
-    ("scope", SectionKind.REQUIREMENTS),
-    # The golden flow is a statement of what must be true when the work is done,
-    # which is what an acceptance criterion is. It reads as prose rather than
-    # bullets, and that is fine: `_bullet_lines` keeps any non-empty line, and
-    # this repository writes one sentence per line.
-    ("happy path", SectionKind.ACCEPTANCE_CRITERIA),
-    ("golden flow", SectionKind.ACCEPTANCE_CRITERIA),
-    # Core design binds how the work may be built, which is what the compiler
-    # already carries as global constraints on every milestone.
-    ("core design", SectionKind.CONSTRAINTS),
-    ("decision log", SectionKind.ASSUMPTIONS),
-    # The last three GAWD sections that still landed in `UNKNOWN`. An unmapped
-    # section is preserved but reaches no collection, so the document said these
-    # and the agent executing it never heard them.
-    #
-    # The theory of the system is what the author holds true about the domain
-    # before any work starts, which is an assumption in the only sense the
-    # compiler uses the word.
-    ("theory of the system", SectionKind.ASSUMPTIONS),
-    # Deferred work is a non-goal that names its own reason for being deferred.
-    ("if i had 2 more weeks", SectionKind.NON_GOALS),
-    # Not `REQUIREMENTS` and not `ACCEPTANCE_CRITERIA`: see `SectionKind.MOTIVATION`.
-    ("why this exists", SectionKind.MOTIVATION),
+# Exact matches against the whole normalized heading. There is no substring
+# matching and no ordering: a heading either is one of these strings after
+# `normalize_heading` (which lowercases, strips numbering, expands "&" to
+# "and", and turns punctuation into spaces) or it is UNKNOWN.
+#
+# Substring probes preceded this table, and they made the format unstatable.
+# "Permission Envelope (Proposed)" classified as the real envelope because it
+# contains the phrase; "Not in scope" classified as REQUIREMENTS because it
+# contains "scope", publishing a document's exclusions as its obligations; a
+# heading naming a `RollbackAdapter` class became rollout policy. A parser
+# that accepts everything is a format nobody can violate, which means it is
+# not a format. Exact matching is what makes UNKNOWN reachable again, and
+# UNKNOWN is the honest kind for a heading this table has not met.
+#
+# The strings here are the canonical vocabulary: the mini-GAWD template's own
+# section names plus the plain design-doc names. A DesignDoc and a GAWD doc
+# are the same document; only the milestone blocks need typed fields, because
+# a phase and its evidence cannot be recovered from prose.
+_CANONICAL_HEADINGS: Final[Mapping[str, SectionKind]] = MappingProxyType(
+    {
+        "execution milestones": SectionKind.MILESTONES,
+        "milestones": SectionKind.MILESTONES,
+        "acceptance criteria": SectionKind.ACCEPTANCE_CRITERIA,
+        # The template's "7. Verification": the smoke proof that must pass.
+        "verification": SectionKind.ACCEPTANCE_CRITERIA,
+        # Prose statement of what must be true when the work is done; one
+        # sentence per line, which `_bullet_lines` keeps.
+        "happy path golden flow": SectionKind.ACCEPTANCE_CRITERIA,
+        # Both halves under one heading; `_split_scope_section` divides them.
+        "this version scope and non goals": SectionKind.SCOPE,
+        "non goals": SectionKind.NON_GOALS,
+        # Deferred work is a non-goal that names its own reason for deferral.
+        "if i had 2 more weeks": SectionKind.NON_GOALS,
+        "requirements": SectionKind.REQUIREMENTS,
+        "constraints": SectionKind.CONSTRAINTS,
+        # Core design and the operational contract bind how the work may be
+        # built, which the compiler carries as global constraints.
+        "core design": SectionKind.CONSTRAINTS,
+        "operational contract": SectionKind.CONSTRAINTS,
+        "assumptions": SectionKind.ASSUMPTIONS,
+        # What the author holds true about the domain before work starts.
+        "theory of the system": SectionKind.ASSUMPTIONS,
+        # A current-state audit assumes, it does not promise to prove. The
+        # audit date goes in the body: a dated heading is a new spelling per
+        # day, and an exact-match table does not enumerate the calendar.
+        "current state verification": SectionKind.ASSUMPTIONS,
+        "decision log": SectionKind.ASSUMPTIONS,
+        "failure modes": SectionKind.FAILURE_MODES,
+        "the failure that matters most": SectionKind.FAILURE_MODES,
+        "risk synthesis known limitations": SectionKind.FAILURE_MODES,
+        "rollout": SectionKind.ROLLOUT,
+        "rollback": SectionKind.ROLLOUT,
+        "rollout migration rollback": SectionKind.ROLLOUT,
+        "unresolved questions": SectionKind.UNRESOLVED_QUESTIONS,
+        "approvals": SectionKind.APPROVALS,
+        "approval requirements": SectionKind.APPROVALS,
+        "required artifacts": SectionKind.REQUIRED_ARTIFACTS,
+        "permission envelope": SectionKind.PERMISSION_ENVELOPE,
+        # Not `REQUIREMENTS` and not `ACCEPTANCE_CRITERIA`: see
+        # `SectionKind.MOTIVATION`.
+        "why this exists": SectionKind.MOTIVATION,
+        # The intake lifecycle's own sections: known, named, and deliberately
+        # outside every compiler collection. See `SectionKind.INTAKE_METADATA`.
+        "time budget": SectionKind.INTAKE_METADATA,
+        "staff verdict": SectionKind.INTAKE_METADATA,
+        "senior spec completion model output": SectionKind.INTAKE_METADATA,
+    }
+)
+
+# Accepted spellings that are not the canonical one. An alias still classifies
+# - existing documents keep meaning what they meant - but the parser says so
+# with an `alias_heading` diagnostic naming the canonical form, so the drift
+# is visible instead of silently absorbed. New names are added here as a
+# deliberate decision, never by a probe happening to match.
+_HEADING_ALIASES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        "open questions": "unresolved questions",
+        "verification commands": "verification",
+        "happy path": "happy path golden flow",
+        "golden flow": "happy path golden flow",
+        "scope and non goals": "this version scope and non goals",
+        "risk synthesis": "risk synthesis known limitations",
+        "known limitations": "risk synthesis known limitations",
+        "scope": "requirements",
+    }
 )
 
 _HEADING_RE = re.compile(r"^(?P<hashes>#{1,6})\s+(?P<heading>.+?)\s*$", re.MULTILINE)
+
+# A fence delimiter line: up to three spaces of indent, then three or more
+# backticks or tildes. CommonMark closes a fence with at least as many of the
+# same character, which `mask_fences` checks against the opener it recorded.
+_FENCE_DELIMITER_RE = re.compile(r"^ {0,3}(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
+
+
+def mask_fences(text: str) -> str:
+    """The same text with every fenced region blanked to spaces, lengths kept.
+
+    Fenced text is quotation. A document that fences a ``### Milestone`` block
+    or a ``## Permission Envelope`` heading is showing what one looks like, not
+    declaring one, and the reader that cannot tell the difference turns every
+    example into a contract: the sparse template's fenced milestone example
+    compiled as a real PLAN milestone in every draft, exactly the fake-milestone
+    class the ``_MILESTONE_HEADING_RE`` comment above records.
+
+    Masking to spaces rather than deleting is what keeps every ``SourceSpan``
+    honest: offsets computed on the masked text index the original exactly, so
+    diagnostics still point at real characters. Newlines are kept so line-based
+    scans agree too. The delimiter lines themselves are masked with the body,
+    because a fence marker is part of the quotation, not content beside it.
+
+    An unterminated fence masks to the end of the text. That is what the fence
+    means in rendered Markdown, and the cheaper reading - silently closing it -
+    would let a document's trailing example leak back into the contract.
+    """
+
+    out: list[str] = []
+    open_fence: str | None = None
+    for line in text.splitlines(keepends=True):
+        content = line.rstrip("\n")
+        newline = line[len(content) :]
+        match = _FENCE_DELIMITER_RE.match(content)
+        if open_fence is None:
+            if match is not None:
+                open_fence = match.group("fence")
+                out.append(" " * len(content) + newline)
+            else:
+                out.append(line)
+            continue
+        closes = (
+            match is not None
+            and match.group("fence")[0] == open_fence[0]
+            and len(match.group("fence")) >= len(open_fence)
+            and not match.group("info").strip()
+        )
+        out.append(" " * len(content) + newline)
+        if closes:
+            open_fence = None
+    return "".join(out)
+
+
 # The word "milestone" is required, not optional. Without it the pattern matches
 # any numbered heading, so an ordinary document's `## 1. Theory of the System`
 # silently becomes an executable milestone named "1"; a GAWD doc produced
@@ -460,13 +546,25 @@ def _milestone_heading_match(level: int, heading: str) -> re.Match[str] | None:
     return _MILESTONE_HEADING_RE.match(f"{'#' * level} {heading}")
 
 
+def canonical_heading(normalized_heading: str) -> str | None:
+    """The canonical spelling this normalized heading resolves to, if any.
+
+    ``None`` means the vocabulary does not know the heading at all. A canonical
+    heading resolves to itself, so callers can test aliasing with one equality.
+    """
+
+    if normalized_heading in _CANONICAL_HEADINGS:
+        return normalized_heading
+    return _HEADING_ALIASES.get(normalized_heading)
+
+
 def _section_kind(level: int, heading: str, normalized_heading: str) -> SectionKind:
     if _milestone_heading_match(level, heading) is not None:
         return SectionKind.MILESTONES
-    for probe, kind in _SECTION_PROBES:
-        if probe in normalized_heading:
-            return kind
-    return SectionKind.UNKNOWN
+    resolved = canonical_heading(normalized_heading)
+    if resolved is None:
+        return SectionKind.UNKNOWN
+    return _CANONICAL_HEADINGS[resolved]
 
 
 def _bullet_lines(body: str) -> tuple[str, ...]:
@@ -509,8 +607,12 @@ def _parse_phase(value: str) -> LifecyclePhase | None:
         return None
 
 
-def _split_sections(text: str) -> tuple[DocumentSection, ...]:
-    matches = list(_HEADING_RE.finditer(text))
+def split_document_sections(text: str) -> tuple[DocumentSection, ...]:
+    # Headings are found on the masked text, so a fenced heading is quotation
+    # and never a boundary. Bodies are sliced from the original: the masked
+    # form exists to decide structure, never to replace content, and the
+    # length-preserving mask is what lets one set of offsets serve both.
+    matches = list(_HEADING_RE.finditer(mask_fences(text)))
     sections: list[DocumentSection] = []
     for index, match in enumerate(matches):
         body_start = match.end()
@@ -601,7 +703,10 @@ def _parse_permission_envelope(
     denied: list[PermissionAction] = []
     diagnostics: list[Diagnostic] = []
     category: str | None = None
-    for raw_line in _HTML_COMMENT_RE.sub("", section.body).splitlines():
+    # Fences first (length-preserving, so nothing shifts), then comments. A
+    # fenced example of the envelope syntax inside the real section - the docs
+    # write exactly that - must not have its lines read as grants.
+    for raw_line in _HTML_COMMENT_RE.sub("", mask_fences(section.body)).splitlines():
         stripped = raw_line.strip()
         if not stripped:
             continue
@@ -679,7 +784,7 @@ def parse_declared_permission_envelope(
     nothing and blocks.
     """
 
-    return _parse_permission_envelope(_split_sections(raw_content))
+    return _parse_permission_envelope(split_document_sections(raw_content))
 
 
 _CUT_MARKER_RE = re.compile(r"^\**\s*(?:cut|out of scope|non[- ]goals?|not doing)\b", re.IGNORECASE)
@@ -729,7 +834,10 @@ _TARGET_PROJECT_FIELD_NAMES: Final = (
 )
 
 
-def _declared_target_project_id(text: str, sections: Sequence[DocumentSection]) -> str | None:
+def declared_target_project_id(
+    text: str,
+    sections: Sequence[DocumentSection] | None = None,
+) -> str | None:
     """Read a document-level ``Target project:`` line from the preamble.
 
     Only the preamble, meaning everything before the first ``##`` section. A
@@ -740,14 +848,23 @@ def _declared_target_project_id(text: str, sections: Sequence[DocumentSection]) 
     The boundary is the first level-2 heading rather than the first section: the
     title is a level-1 section starting at character zero, so measuring from any
     section would make the preamble empty and this field unreadable.
+
+    Public because the writer of this line needs it as much as the reader does.
+    GAWD intake renders the finalized document that later compiles here, so it
+    has to know which id this will read back out; a second reader over there
+    would be a second answer to one question, and the two answers drifted the
+    moment they existed. ``sections`` is optional so a caller holding only text
+    does not have to reach for the splitter to ask.
     """
 
+    if sections is None:
+        sections = split_document_sections(text)
     first_section_start = min(
         (section.span.start for section in sections if section.level >= 2),
         default=len(text),
     )
     fallback: str | None = None
-    for line in text[:first_section_start].splitlines():
+    for line in mask_fences(text)[:first_section_start].splitlines():
         match = _FIELD_RE.match(line.strip())
         if match is None:
             continue
@@ -812,7 +929,7 @@ def _declared_delivery_pace(
         (section.span.start for section in sections if section.level >= 2),
         default=len(text),
     )
-    for line in text[:first_section_start].splitlines():
+    for line in mask_fences(text)[:first_section_start].splitlines():
         match = _FIELD_RE.match(line.strip())
         if match is None:
             continue
@@ -950,7 +1067,10 @@ def _listed_milestone_candidates(
             continue
         offset = section.span.end - len(section.body)
         cursor = 0
-        for raw_line in section.body.splitlines(keepends=True):
+        # The masked body has identical lengths, so the span arithmetic below
+        # holds; a numbered item inside a fence is masked to spaces and never
+        # matches, while an unfenced line is byte-identical to the original.
+        for raw_line in mask_fences(section.body).splitlines(keepends=True):
             line_start = offset + cursor
             cursor += len(raw_line)
             match = _NUMBERED_ITEM_RE.match(raw_line.strip())
@@ -1003,7 +1123,7 @@ def parse_design_doc(
     ``apply_phase_inference``, which marks it as inferred.
     """
 
-    sections = _split_sections(raw_content)
+    sections = split_document_sections(raw_content)
     diagnostics: list[Diagnostic] = []
     candidates: list[MilestoneCandidate] = []
     seen_keys: dict[str, SourceSpan] = {}
@@ -1011,7 +1131,9 @@ def parse_design_doc(
     for section, heading_match in _milestone_blocks(sections):
         declared_key = normalize_milestone_key(heading_match.group("key"))
         title = heading_match.group("title").strip()
-        fields = _parse_candidate_fields(section.body)
+        # Masked so a fenced `Phase:` or `Acceptance:` example inside the
+        # milestone's own body stays an example instead of becoming the field.
+        fields = _parse_candidate_fields(mask_fences(section.body))
         if fields.phase_text is not None and fields.phase is None:
             diagnostics.append(
                 Diagnostic(
@@ -1114,6 +1236,18 @@ def parse_design_doc(
                     section.span,
                 )
             )
+        elif section.normalized_heading in _HEADING_ALIASES:
+            diagnostics.append(
+                Diagnostic(
+                    DiagnosticSeverity.INFO,
+                    "alias_heading",
+                    (
+                        f"section {section.heading!r} is an accepted alias; the canonical "
+                        f"heading is {_HEADING_ALIASES[section.normalized_heading]!r}"
+                    ),
+                    section.span,
+                )
+            )
 
     delivery_pace, pace_diagnostic = _declared_delivery_pace(raw_content, sections)
     if pace_diagnostic is not None:
@@ -1141,7 +1275,7 @@ def parse_design_doc(
         failure_modes=_collect(sections, SectionKind.FAILURE_MODES),
         rollout=_collect(sections, SectionKind.ROLLOUT),
         unresolved_questions=_collect(sections, SectionKind.UNRESOLVED_QUESTIONS),
-        declared_target_project_id=_declared_target_project_id(raw_content, sections),
+        declared_target_project_id=declared_target_project_id(raw_content, sections),
         declared_delivery_pace=delivery_pace,
         approval_requirements=_collect(sections, SectionKind.APPROVALS),
         required_artifacts=_collect(sections, SectionKind.REQUIRED_ARTIFACTS),
@@ -1259,8 +1393,12 @@ __all__ = [
     "SectionKind",
     "SourceSpan",
     "apply_phase_inference",
+    "canonical_heading",
+    "declared_target_project_id",
+    "mask_fences",
     "normalize_heading",
     "normalize_milestone_key",
     "parse_declared_permission_envelope",
     "parse_design_doc",
+    "split_document_sections",
 ]

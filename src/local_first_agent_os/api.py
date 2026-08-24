@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,7 +12,7 @@ from queue import Queue
 from threading import Thread
 from typing import Any, assert_never
 
-from fastapi import FastAPI, HTTPException, Query, Response
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -56,6 +57,12 @@ from .project_activity import (
     build_project_activity_page,
 )
 from .project_center import ProjectCenterView, load_project_center
+from .refinery.loop import run_refinery
+from .refinery.trigger import (
+    IntegrationAccepted,
+    IntegrationTriggerResult,
+    plan_integration_trigger,
+)
 from .runtime import get_runtime
 from .settings import get_settings
 from .work_units import repository as work_unit_repo
@@ -77,6 +84,7 @@ from .work_units.authoring import (
     WalkthruTransition,
     WalkthruView,
 )
+from .work_units.next_commands import NextCommandSet, next_commands_for_view
 from .work_units.projection import (
     ArtifactView,
     EventView,
@@ -100,6 +108,18 @@ MANUAL_REVIEW_DEPTH = Gauge(
     "Manual review queue depth",
     ["workflow_type"],
 )
+logger = logging.getLogger(__name__)
+
+
+def _drain_accepted_integration(target_project_id: str) -> None:
+    """Run one durable queue drain without turning an HTTP response into a job lease."""
+
+    try:
+        run_refinery(target_project_id, max_polls=1)
+    except Exception:
+        # The queue row remains Queued or recoverable InFlight. The next click or
+        # resident refinery can retry it, while the exception stays visible.
+        logger.exception("cockpit integration trigger failed for %s", target_project_id)
 
 
 def create_app() -> FastAPI:
@@ -216,6 +236,29 @@ def create_app() -> FastAPI:
                 },
             ) from exc
         return snapshot
+
+    @app.get(
+        "/approvals/{approval_id}/integration",
+        response_model=IntegrationTriggerResult,
+    )
+    def integration_status(approval_id: str) -> IntegrationTriggerResult:
+        return plan_integration_trigger(approval_id)
+
+    @app.post(
+        "/approvals/{approval_id}/integration",
+        response_model=IntegrationTriggerResult,
+    )
+    def trigger_integration(
+        approval_id: str,
+        background_tasks: BackgroundTasks,
+    ) -> IntegrationTriggerResult:
+        result = plan_integration_trigger(approval_id)
+        if isinstance(result, IntegrationAccepted):
+            background_tasks.add_task(
+                _drain_accepted_integration,
+                result.target_project_id,
+            )
+        return result
 
     @app.get("/projects/{project_id}/activity", response_model=ProjectActivityPage)
     def project_activity(
@@ -401,6 +444,24 @@ def create_app() -> FastAPI:
             return work_units.get_work_unit(work_unit_id)
         except WorkUnitError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/work-units/{work_unit_id}/next-commands", response_model=NextCommandSet)
+    def work_unit_next_commands(work_unit_id: str) -> NextCommandSet:
+        """What an operator does next, derived rather than written twice.
+
+        The terminal has printed this block since the next-command affordance
+        shipped; the cockpit had no equivalent, so an operator reading a BLOCKED
+        pill in the browser was told the work stopped and not what to do about
+        it. `next_commands_for_view` is a pure function of the same view this
+        API already serves, so exposing it costs one route and keeps one rule
+        table answering both surfaces.
+        """
+
+        try:
+            view = work_units.get_work_unit(work_unit_id)
+        except WorkUnitError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return next_commands_for_view(view)
 
     @app.get("/work-units/{work_unit_id}/events", response_model=WorkUnitEventPage)
     def work_unit_events(

@@ -184,7 +184,27 @@ def normalize_paths(paths: Iterable[str]) -> list[str]:
 # 20: normalized frontier usage and Codex continuation projections. The event
 # ledger remains the immutable evidence, while these tables make budget reads
 # and compatible thread lookup indexed operations on the execution hot path.
-SCHEMA_VERSION = 20
+#
+# 21: `dispatch_intents.base_commit_sha`. The dependency edge between milestones
+# was a bare ordering signal: `_allocate_worktree` seeded every worktree from
+# the target repo's HEAD, so a chained IMPLEMENT milestone never saw its
+# predecessor's work and blocked on an empty checkout (LyricPlayer m3, WorkUnit
+# d31b7eaebde0dcbb5bf730699e299e06). This column is the pipe across that edge:
+# the engine resolves the dependency's settled commit at dispatch time and the
+# executor branches the worktree from it. NULL means seed from HEAD, the exact
+# pre-column behavior. docs/completed/milestone_worktree_inheritance_gawd.md is
+# the spec.
+#
+# 22: `work_unit_enqueue_outbox.kind`. An approved RETRY_BUDGET_OVERRIDE on a
+# BLOCKED WorkUnit resolved the decision and restarted nothing: the durable wake
+# in `submit_work_unit_decision` is a send to a milestone workflow, and a
+# blocked unit's epoch has ended, so nothing was listening and the unit stayed
+# parked until an operator also typed `resume_work_unit`. The outbox is the one
+# durable delivery channel the resident drainer already walks, and this column
+# is what lets a row ask for a continuation ('RESUME') instead of a first start
+# ('START', the default every existing row gets).
+# docs/decision_triggered_resume_gawd.md is the spec.
+SCHEMA_VERSION = 22
 
 # The DDL that `SCHEMA_VERSION` names, pinned by content.
 #
@@ -205,7 +225,7 @@ SCHEMA_VERSION = 20
 # - The edit changed only comments or whitespace. Update this hash alone.
 #
 # Recomputed with `shasum -a 256 agent_coordination_postgres_schema.sql`.
-SCHEMA_CONTENT_HASH = "563e6e76c614f1e5116f68ad9e4c1857a9efbc72e9a64a4c7c228aeaddbf1651"
+SCHEMA_CONTENT_HASH = "30495927625c4d1ab7aacb98525b0dd31476090d347cd76df980be2c461ee1ee"
 
 # The two ways a runtime and a database can disagree about the schema, as stable
 # `failure.v1` codes. Both are operator conditions: the ledger is reachable and
@@ -1001,10 +1021,11 @@ def connect(*, checkout_timeout_seconds: float | None = None) -> ConnectionLike:
     work on" and none of them ever meant "open a socket". Closing it returns it.
 
     `checkout_timeout_seconds` overrides the pool's 30 second wait for this one
-    checkout. It exists for best-effort reads on latency-sensitive paths: a
-    caller that answers "empty" on failure anyway has no business queueing half
-    a minute behind a saturated pool to earn that answer. Correctness paths
-    should leave it unset and inherit the pool's own patience.
+    checkout. It is a hard latency bound: a timed checkout raises its original
+    failure instead of starting the normal five-second reachability diagnosis.
+    It exists for best-effort reads on latency-sensitive paths, while correctness
+    paths should leave it unset and inherit both the pool's patience and its
+    richer diagnosis.
 
     The schema check happens here, on the caller's stack, and costs a set lookup
     after the first checkout in the process. `_new_pool` says why it cannot live
@@ -1061,6 +1082,8 @@ def _borrow(checkout_timeout_seconds: float | None) -> ConnectionLike:
             if remaining and _is_pool_closed(exc):
                 _discard_pool(pool)
                 continue
+            if checkout_timeout_seconds is not None:
+                raise
             raise _diagnosed_checkout_failure(exc) from exc
         return PostgresConnection(raw, release=pool.putconn)
     raise AssertionError("unreachable: the last attempt returns or raises")

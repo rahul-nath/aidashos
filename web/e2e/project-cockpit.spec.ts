@@ -118,6 +118,56 @@ async function stubShell(page: Page) {
 }
 
 test.describe('project cockpit lanes', () => {
+  test('an approved merge exposes one integration action and reports its durable handoff', async ({
+    page,
+  }) => {
+    await stubShell(page)
+    await page.route('**/action', (route) =>
+      route.fulfill({
+        json: actionSnapshot({
+          action: 'MERGE_INTEGRATION_REQUIRED',
+          summary: 'The exact approved commit is queued for integration.',
+        }),
+      }),
+    )
+    await page.route('**/activity?**', (route) => route.fulfill({ json: activityPage({}) }))
+    let triggers = 0
+    await page.route('**/approvals/ap-1/integration', (route) => {
+      const isTrigger = route.request().method() === 'POST'
+      if (isTrigger) triggers += 1
+      route.fulfill({
+        json: {
+          state: isTrigger ? 'accepted' : 'complete',
+          approval_id: 'ap-1',
+          request_id: 'request-1',
+          target_project_id: PROJECT_ID,
+          message: isTrigger
+            ? 'The approved request was handed to the refinery.'
+            : 'The approved request is already integrated.',
+        },
+      })
+    })
+
+    await page.goto('/')
+
+    const button = page.getByRole('button', { name: 'Integrate approved work' })
+    await expect(button).toBeVisible()
+    await button.click()
+    await expect(page.getByRole('status')).toContainText('handed to the refinery')
+    await expect(page.getByRole('status')).toContainText('already integrated', { timeout: 10_000 })
+    expect(triggers).toBe(1)
+  })
+
+  test('no integration action is shown before CODE_MERGE approval', async ({ page }) => {
+    await stubShell(page)
+    await page.route('**/action', (route) => route.fulfill({ json: actionSnapshot() }))
+    await page.route('**/activity?**', (route) => route.fulfill({ json: activityPage({}) }))
+
+    await page.goto('/')
+
+    await expect(page.getByRole('button', { name: 'Integrate approved work' })).toHaveCount(0)
+  })
+
   test('surfaces every execution lane with its failure reason', async ({ page }) => {
     await stubShell(page)
     await page.route('**/action', (route) => route.fulfill({ json: actionSnapshot() }))

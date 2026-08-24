@@ -126,10 +126,11 @@ mkdir -p .local_agent/logs .local_agent/run
 
 uv run local-agent init-db
 
-# Symmetric undo of stop-agent-runtime.sh's bootout. Bring back any launchctl-managed
-# agents whose plists are present in ~/Library/LaunchAgents but aren't loaded
-# in this session. The whisper/llama bring-up below short-circuits if these
-# already brought the ports up.
+# Symmetric undo of stop-agent-runtime.sh's bootout, and now the only thing that
+# starts these agents at all: their plists live outside ~/Library/LaunchAgents,
+# so launchd does not load them at login and this loop is where they enter the
+# domain. The whisper/llama bring-up below short-circuits if these already
+# brought the ports up.
 LAUNCH_LABELS=(
   com.rahul.local-first-agent.lifecycle-maintenance
   com.rahul.local-first-agent.session-daemon
@@ -144,7 +145,8 @@ if [ "$START_ASR" = "true" ]; then
   LAUNCH_LABELS+=(com.rahul.local-first-agent.whisper)
 fi
 LAUNCH_DOMAIN="gui/$(id -u)"
-LAUNCH_PLIST_DIR="$HOME/Library/LaunchAgents"
+. "$ROOT/scripts/launchd-agent-dir.sh"
+LAUNCH_PLIST_DIR="$LOCAL_AGENT_LAUNCHD_DIR"
 # A failed bootstrap used to be discarded (`2>/dev/null || true`) and the script
 # went on to exit 0, so a runtime that never came up reported success. That is
 # how five plists pointing at a `uv` version that no longer existed stayed

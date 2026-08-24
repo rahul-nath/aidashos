@@ -9,11 +9,12 @@ import shlex
 import subprocess
 import sys
 import threading
+import uuid
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from staffing_support import repo_bench, seat_agent_name
+from staffing_support import repo_bench, seat_agent_name, two_vendor_bench
 
 from local_first_agent_os.constants import DEFAULT_VERIFICATION_COMMAND_TIMEOUT_SECONDS
 from local_first_agent_os.coordination import (
@@ -22,6 +23,7 @@ from local_first_agent_os.coordination import (
     CoordinationCommand,
     CoordinationResult,
     OpenExecutionLease,
+    SubmitApprovalRequest,
     SubmitArtifact,
     parse_coordination_result,
 )
@@ -116,6 +118,27 @@ def _seated(
 
     seating = bench if bench is not None else repo_bench()
     senior = seating[Tier.SENIOR].harness
+    staff = seating[Tier.STAFF].harness
+
+    if senior is staff and implementer and reviewer:
+        # One vendor holds both frontier seats: an outage staffing. The binary
+        # can no longer say which seat is spawning, but the spawn command still
+        # can, because each seat pins its own model and the executor passes it
+        # as `--model <id>`. A dispatcher script routes on the senior slot's
+        # model, so the two fakes keep the seats they were written for and
+        # these tests stay about the executor rather than about the seating.
+        senior_model = seating[Tier.SENIOR].model or ""
+        wrapper = Path(implementer).with_name(f"seat_dispatch_{uuid.uuid4().hex[:6]}.py")
+        wrapper.write_text(
+            "#!/usr/bin/env python3\n"
+            "import os, sys\n"
+            f"seat = {implementer!r} if {senior_model!r} and {senior_model!r} in sys.argv "
+            f"else {reviewer!r}\n"
+            "os.execv(seat, [seat] + sys.argv[1:])\n",
+            encoding="utf-8",
+        )
+        os.chmod(wrapper, 0o755)
+        return {"bench": seating, "claude_bin": str(wrapper), "codex_bin": str(wrapper)}
 
     def spawned_as(vendor: Harness) -> str:
         seated = implementer if senior is vendor else reviewer
@@ -1088,7 +1111,7 @@ def test_cli_executor_records_usage_limit_execution_lease(tmp_path: Path) -> Non
     )
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
-        **_seated(implementer=str(claude), reviewer=str(codex)),
+        **_seated(implementer=str(claude), reviewer=str(codex), bench=two_vendor_bench()),
         coordination_command=fake_coordination_command,
     )
     executor._codex_auth_ok_cache = True
@@ -1280,7 +1303,7 @@ def test_frontier_usage_limit_falls_back_to_other_frontier_provider(tmp_path: Pa
     )
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
-        **_seated(implementer=str(claude), reviewer=str(codex)),
+        **_seated(implementer=str(claude), reviewer=str(codex), bench=two_vendor_bench()),
         delegate_fn=fake_delegate,
     )
     executor._codex_auth_ok_cache = True
@@ -1333,7 +1356,7 @@ def test_frontier_timeout_uses_other_provider_once(tmp_path: Path) -> None:
 
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
-        **_seated(implementer=str(claude), reviewer=str(codex)),
+        **_seated(implementer=str(claude), reviewer=str(codex), bench=two_vendor_bench()),
         delegate_fn=lambda **kwargs: calls.append(kwargs) or {"ok": True, "output": "junior"},
         timeout_seconds=1,
     )
@@ -1362,9 +1385,12 @@ def test_frontier_timeout_uses_other_provider_once(tmp_path: Path) -> None:
     )
     assert fallback["reason"] == "timeout"
     # The staff seat timed out, so the one bounded replacement is the other
-    # vendor - which is the senior seat's, whichever way the bench is seated.
-    assert fallback["failed_harness"] == _staff_vendor()
-    assert fallback["fallback_harness"] == _senior_vendor()
+    # vendor - which is the senior seat's. Asserted against the bench this
+    # executor was handed, not the repo config: the two disagree whenever the
+    # config seats one vendor in both frontier seats.
+    seating = two_vendor_bench()
+    assert fallback["failed_harness"] == seating[Tier.STAFF].harness.value
+    assert fallback["fallback_harness"] == seating[Tier.SENIOR].harness.value
 
 
 def test_four_junior_delegates_feed_codex_reviewer(tmp_path: Path) -> None:
@@ -1425,7 +1451,7 @@ def test_four_junior_delegates_feed_codex_reviewer(tmp_path: Path) -> None:
     )
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
-        **_seated(reviewer=str(codex)),
+        **_seated(reviewer=str(codex), bench=two_vendor_bench()),
         delegate_fn=fake_delegate,
     )
     executor._codex_auth_ok_cache = True
@@ -1556,11 +1582,19 @@ def _review_loop_fixture(
     *,
     codex_verdicts: list[str],
 ) -> tuple[Path, str, str, tuple[PowWowTaskSpec, PowWowTaskSpec]]:
-    """A repo, fake claude/codex bins, and an implement+review task pair.
+    """A repo, one dual-role fake bin, and an implement+review task pair.
 
-    The fake codex prints the next verdict from `codex_verdicts` on each review
+    The fake prints the next verdict from `codex_verdicts` on each review
     invocation (repeating the last one when exhausted), so tests can script a
-    block-then-approve negotiation.
+    block-then-approve negotiation. On implementer invocations it writes the
+    file instead.
+
+    Both returned bin paths are the same script, and the script decides its
+    role from the prompt rather than from which vendor spawned it. Two scripts
+    keyed by vendor stopped working the day `configs/staffing.toml` seated one
+    vendor in both frontier seats (the codex-outage fallback): the executor
+    keys binaries by harness, so the reviewer's script could never be spawned
+    and every review-loop test failed for a reason none of them is about.
     """
     import os
 
@@ -1568,31 +1602,29 @@ def _review_loop_fixture(
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
-    claude = tmp_path / "fake_claude.py"
-    claude.write_text(
-        _FAKE_AGENT_PREAMBLE + "import sys, json\n"
+    counter = tmp_path / "review_verdict_count"
+    agent = tmp_path / "fake_seat_agent.py"
+    agent.write_text(
+        _FAKE_AGENT_PREAMBLE + "import sys\n"
         "from pathlib import Path\n"
         "prompt = sys.argv[-1]\n"
-        "if 'requested changes' in prompt:\n"
+        "review_markers = ('Review the change', 'Re-review the updated diff')\n"
+        "if any(marker in prompt for marker in review_markers):\n"
+        f"    counter = Path({str(counter)!r})\n"
+        "    n = int(counter.read_text()) if counter.exists() else 0\n"
+        "    counter.write_text(str(n + 1))\n"
+        f"    verdicts = {codex_verdicts!r}\n"
+        "    emit(verdicts[min(n, len(verdicts) - 1)])\n"
+        "elif 'requested changes' in prompt:\n"
         "    Path('NEXT_STEP.md').write_text('- add feature X\\n- guardrail\\n')\n"
+        "    emit('wrote NEXT_STEP.md')\n"
         "else:\n"
         "    Path('NEXT_STEP.md').write_text('- add feature X\\n')\n"
-        "emit('wrote NEXT_STEP.md')\n",
+        "    emit('wrote NEXT_STEP.md')\n",
         encoding="utf-8",
     )
-    os.chmod(claude, 0o755)
-    counter = tmp_path / "codex_review_count"
-    codex = tmp_path / "fake_codex.py"
-    codex.write_text(
-        _FAKE_AGENT_PREAMBLE + "from pathlib import Path\n"
-        f"counter = Path({str(counter)!r})\n"
-        "n = int(counter.read_text()) if counter.exists() else 0\n"
-        "counter.write_text(str(n + 1))\n"
-        f"verdicts = {codex_verdicts!r}\n"
-        "emit(verdicts[min(n, len(verdicts) - 1)])\n",
-        encoding="utf-8",
-    )
-    os.chmod(codex, 0o755)
+    os.chmod(agent, 0o755)
+    claude = codex = agent
     tasks = (
         PowWowTaskSpec(
             task_name="implement_next_step",
@@ -1864,10 +1896,13 @@ def test_staff_review_fails_if_reviewer_mutates_worktree(tmp_path: Path) -> None
     Path(codex_bin).write_text(
         _FAKE_AGENT_PREAMBLE + "import sys\n"
         "from pathlib import Path\n"
-        "if 'login' in sys.argv:\n"
-        "    raise SystemExit(0)\n"
-        "Path('REVIEWER_EDIT.md').write_text('not allowed\\n', encoding='utf-8')\n"
-        "emit('APPROVE - attempted to edit during review')\n",
+        "prompt = sys.argv[-1]\n"
+        "if 'Review the change' in prompt:\n"
+        "    Path('REVIEWER_EDIT.md').write_text('not allowed\\n', encoding='utf-8')\n"
+        "    emit('APPROVE - attempted to edit during review')\n"
+        "else:\n"
+        "    Path('NEXT_STEP.md').write_text('- add feature X\\n')\n"
+        "    emit('wrote NEXT_STEP.md')\n",
         encoding="utf-8",
     )
     target = _review_loop_target(repo)
@@ -1952,6 +1987,172 @@ def test_review_loop_stops_when_classifier_detects_circling(tmp_path: Path) -> N
     unresolved = next(tr for tr in result.tasks if tr.task_name.endswith("_unresolved"))
     assert "circling" in unresolved.summary
     assert result.status == "FAILED"
+
+
+def _escalation_coordination_fake() -> tuple[list[CoordinationCommand], Any]:
+    """A ledger fake that acknowledges leases, claims, artifacts, and approvals."""
+
+    calls: list[CoordinationCommand] = []
+
+    def fake_coordination_command(command: CoordinationCommand) -> CoordinationResult:
+        calls.append(command)
+        if isinstance(command, OpenExecutionLease):
+            return parse_coordination_result(
+                command,
+                {
+                    "ok": True,
+                    "created": True,
+                    "lease": {
+                        "lease_id": f"lease-{len(calls)}",
+                        "status": "ACTIVE",
+                        "result": {},
+                    },
+                },
+            )
+        if isinstance(command, CompleteExecutionLease):
+            return parse_coordination_result(
+                command,
+                {
+                    "ok": True,
+                    "lease": {
+                        "lease_id": command.lease_id,
+                        "status": command.status.value,
+                        "result": dict(command.result or {}),
+                    },
+                },
+            )
+        if isinstance(command, ClaimTask):
+            return parse_coordination_result(command, {"ok": True, "task_id": f"task-{len(calls)}"})
+        if isinstance(command, SubmitArtifact):
+            return parse_coordination_result(
+                command, {"ok": True, "artifact_id": f"artifact-{len(calls)}"}
+            )
+        if isinstance(command, SubmitApprovalRequest):
+            return parse_coordination_result(
+                command, {"ok": True, "approval_id": "approval-esc-1", "status": "PENDING"}
+            )
+        raise AssertionError(f"unexpected coordination command: {command}")
+
+    return calls, fake_coordination_command
+
+
+def test_round_zero_escalation_skips_revision_and_reaches_the_operator(tmp_path: Path) -> None:
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+
+    escalate_verdict = "ESCALATE - the approach conflicts with the settled architecture"
+    repo, claude_bin, codex_bin, tasks = _review_loop_fixture(
+        tmp_path, codex_verdicts=[escalate_verdict]
+    )
+    target = _review_loop_target(repo)
+    calls, fake_coordination_command = _escalation_coordination_fake()
+    progress: list[dict[str, object]] = []
+    with progress_event_sink(progress.append):
+        result = CliPowWowExecutor(
+            worktree_root=tmp_path / "wt",
+            **_seated(implementer=claude_bin, reviewer=codex_bin),
+            max_review_rounds=2,
+            coordination_command=fake_coordination_command,
+        ).dispatch_pow_wow("pow-review-escalate-r0", target, tasks, _context(target))
+
+    names = [task_result.task_name for task_result in result.tasks]
+    assert result.status == "FAILED"
+    # ESCALATE is an operator request, not a change request: no revision runs.
+    assert "implement_next_step_revision_r1" not in names
+    escalated = next(tr for tr in result.tasks if tr.task_name == "review_next_step_escalated")
+    assert escalated.status == "failed"
+    assert "approval-esc-1" in escalated.summary
+    escalation = next(
+        artifact.content
+        for artifact in escalated.artifacts
+        if artifact.artifact_type == "review_escalation"
+    )
+    assert escalation["schema_version"] == "review_escalation.v1"
+    assert escalation["approval_id"] == "approval-esc-1"
+    assert escalation["revision_rounds_run"] == 0
+    assert escalation["review_text"] == escalate_verdict
+    submitted = next(command for command in calls if isinstance(command, SubmitApprovalRequest))
+    assert submitted.request_type == "REVIEW_ESCALATION"
+    assert submitted.saga_id == "saga-1"
+    assert submitted.payload is not None
+    assert submitted.payload["review_text"] == escalate_verdict
+    assert submitted.payload["review_task_name"] == "review_next_step"
+    # The merge gate names the escalation instead of imitating an unparsed verdict.
+    unresolved = next(tr for tr in result.tasks if tr.task_name.endswith("_unresolved"))
+    assert "escalated to the operator" in unresolved.summary
+    assert any(
+        event.get("phase") == "review_escalated" and event.get("approval_id") == "approval-esc-1"
+        for event in progress
+    )
+
+
+def test_re_review_escalation_is_not_converged_and_reaches_the_operator(tmp_path: Path) -> None:
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+
+    escalate_verdict = "ESCALATE - reviewer and implementer fundamentally disagree on the approach"
+    repo, claude_bin, codex_bin, tasks = _review_loop_fixture(
+        tmp_path,
+        codex_verdicts=[
+            "BLOCK - the change has no guardrail bullet",
+            escalate_verdict,
+        ],
+    )
+    target = _review_loop_target(repo)
+    calls, fake_coordination_command = _escalation_coordination_fake()
+    result = CliPowWowExecutor(
+        worktree_root=tmp_path / "wt",
+        **_seated(implementer=claude_bin, reviewer=codex_bin),
+        max_review_rounds=3,
+        coordination_command=fake_coordination_command,
+    ).dispatch_pow_wow("pow-review-escalate-r1", target, tasks, _context(target))
+
+    names = [task_result.task_name for task_result in result.tasks]
+    assert result.status == "FAILED"
+    assert "implement_next_step_revision_r1" in names
+    assert "review_next_step_r1" in names
+    # The escalated re-review ends the loop without another revision round.
+    assert "implement_next_step_revision_r2" not in names
+    escalated = next(tr for tr in result.tasks if tr.task_name == "review_next_step_escalated")
+    escalation = next(
+        artifact.content
+        for artifact in escalated.artifacts
+        if artifact.artifact_type == "review_escalation"
+    )
+    assert escalation["revision_rounds_run"] == 1
+    assert escalation["review_task_name"] == "review_next_step_r1"
+    assert escalation["review_text"] == escalate_verdict
+    submitted = next(command for command in calls if isinstance(command, SubmitApprovalRequest))
+    assert submitted.payload is not None
+    assert submitted.payload["revision_rounds_run"] == 1
+    unresolved = next(tr for tr in result.tasks if tr.task_name.endswith("_unresolved"))
+    assert "escalated to the operator" in unresolved.summary
+
+
+def test_escalation_without_transport_still_fails_closed_with_the_review_text(
+    tmp_path: Path,
+) -> None:
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+
+    escalate_verdict = "ESCALATE - needs an operator decision on scope"
+    repo, claude_bin, codex_bin, tasks = _review_loop_fixture(
+        tmp_path, codex_verdicts=[escalate_verdict]
+    )
+    target = _review_loop_target(repo)
+    result = CliPowWowExecutor(
+        worktree_root=tmp_path / "wt",
+        **_seated(implementer=claude_bin, reviewer=codex_bin),
+        max_review_rounds=2,
+    ).dispatch_pow_wow("pow-review-escalate-offline", target, tasks, _context(target))
+
+    assert result.status == "FAILED"
+    escalated = next(tr for tr in result.tasks if tr.task_name == "review_next_step_escalated")
+    assert "no coordination transport" in escalated.summary
+    escalation = next(
+        artifact.content
+        for artifact in escalated.artifacts
+        if artifact.artifact_type == "review_escalation"
+    )
+    assert escalation["approval_id"] is None
+    assert escalation["review_text"] == escalate_verdict
 
 
 def test_cli_progress_assessor_uses_junior_delegate_and_parses_json(tmp_path: Path) -> None:

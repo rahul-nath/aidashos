@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
-import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
 
+from local_first_agent_os.harness_availability import staffing_around_spent_quotas
+from local_first_agent_os.harness_readiness import TierRestaffed, TierServed, TierUnstaffable
 from local_first_agent_os.pow_wow import CliPowWowExecutor
 from local_first_agent_os.pow_wow.protocol import PlanningPhase, TaskPurpose
 from local_first_agent_os.pow_wow.types import PowWowTaskSpec
@@ -16,17 +18,21 @@ from local_first_agent_os.spawn_authority import ReadOnlyInspection, UnattendedI
 from local_first_agent_os.staffing import (
     DEFAULT_BENCH,
     DEFAULT_ROSTERS,
+    BackupModel,
     BenchSlot,
     CheckRole,
     FrontierHarness,
+    FrontierPairing,
     Harness,
     JudgmentRole,
     JudgmentWorkload,
     Roster,
+    SharedSeatRefused,
     Tier,
     WorkloadModelProfile,
     dispatch_seat_counts,
     load_bench,
+    load_staffing,
     resolve_bench,
     resolve_bench_for_workload,
 )
@@ -48,7 +54,7 @@ def test_default_bench_seats_two_different_frontier_vendors() -> None:
     assert junior.harness == Harness.PI
     assert junior.model == "gemma4"
     # qwen kept as a backup junior model for the upcoming local comparison eval
-    assert junior.backup_models == ("qwen3.8-27b-mtp",)
+    assert junior.backup_models == (BackupModel(harness=Harness.PI, model="qwen3.8-27b-mtp"),)
 
 
 def test_capacity_encodes_allocation() -> None:
@@ -105,11 +111,17 @@ def test_load_bench_reads_toml(tmp_path: Path) -> None:
     cfg = tmp_path / "staffing.toml"
     cfg.write_text(
         """
-[bench.staff]
+seated_pairing = "pair"
+
+[pairings.pair.senior]
+harness = "codex"
+capacity = 3
+
+[pairings.pair.staff]
 harness = "claude"
 capacity = 2
 
-[bench.staff.workloads.independent_reading]
+[pairings.pair.staff.workloads.independent_reading]
 model = "claude-sonnet-5"
 reasoning_effort = "medium"
 
@@ -133,7 +145,349 @@ capacity = 8
             ),
         ),
     )
+    assert bench[Tier.SENIOR] == BenchSlot(harness=Harness.CODEX, model=None, capacity=3)
     assert bench[Tier.JUNIOR] == BenchSlot(harness=Harness.PI, model="gemma4", capacity=8)
+
+
+def test_a_frontier_seat_cannot_be_declared_alone(tmp_path: Path) -> None:
+    """Half a pair is refused at load, which is the whole point of pairing them.
+
+    Two independent tables let an operator change the implementer and leave the
+    reviewer pointing wherever it already pointed. That is not hypothetical: the
+    2026-08-09 swap left four prose claims behind, and POLICIES.md twice denied
+    the implementer a write its own plan had granted, because two declarations
+    disagreed about who was seated.
+    """
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+[bench.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[bench.junior]
+harness = "pi"
+model = "gemma4"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"\[bench.senior\] seats half of a pair"):
+        load_bench(cfg)
+
+
+def test_a_pairing_needs_both_seats(tmp_path: Path) -> None:
+    """A table naming one seat is not a pairing with a blank in it."""
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+seated_pairing = "half"
+
+[pairings.half.senior]
+harness = "claude"
+model = "claude-opus-5"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="declares no staff seat"):
+        load_bench(cfg)
+
+
+def test_the_seated_pairing_is_named_rather_than_assumed(tmp_path: Path) -> None:
+    """Even with one pairing declared, which one is seated is written down.
+
+    "The only one" stops being a rule the moment a second is added, and the
+    second is added precisely when an operator is restaffing under pressure.
+    """
+
+    body = """
+[pairings.only.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[pairings.only.staff]
+harness = "codex"
+model = "gpt-5.6-sol"
+""".strip()
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(body, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="names none as seated"):
+        load_bench(cfg)
+
+    cfg.write_text(f'seated_pairing = "nope"\n\n{body}', encoding="utf-8")
+    with pytest.raises(ValueError, match="which is not declared"):
+        load_bench(cfg)
+
+
+def test_a_backup_model_must_name_the_harness_that_runs_it(tmp_path: Path) -> None:
+    """A bare model id is refused at load, where an operator can still fix it.
+
+    The id alone does not say which CLI runs it, and every reader of this field
+    had to assume one. `_replacement_for` assumed the harness of whichever peer
+    it found, so a bench with no unspent peer read no backup at all - and an
+    outage bench, one vendor in both frontier seats, is precisely that bench.
+    """
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+[bench.junior]
+harness = "pi"
+model = "gemma4"
+backup_models = ["qwen3.8-27b-mtp"]
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must name the harness"):
+        load_bench(cfg)
+
+
+def test_a_spent_vendor_moves_the_whole_pair_to_the_fallback_pairing(tmp_path: Path) -> None:
+    """The escape is a pairing, so implementer and reviewer move together.
+
+    The per-seat shape this replaced was half a way out twice over: a seat with
+    no backup stayed behind on the spent vendor while its pair member escaped,
+    and the seat that did move landed beside a reviewer nobody had checked it
+    against. Moving to a declared pairing removes both - the landing was
+    constructed through `FrontierPairing`, so its two seats are already proven
+    distinct.
+    """
+
+    body = """
+seated_pairing = "claude-pair"
+
+[pairings.claude-pair]
+fallback = "codex-pair"
+
+[pairings.claude-pair.senior]
+harness = "claude"
+model = "claude-opus-5"
+reasoning_effort = "max"
+
+[pairings.claude-pair.staff]
+harness = "claude"
+model = "claude-fable-5"
+
+[pairings.codex-pair.senior]
+harness = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+
+[pairings.codex-pair.staff]
+harness = "codex"
+model = "gpt-5.6-terra"
+reasoning_effort = "high"
+""".strip()
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(body, encoding="utf-8")
+
+    staffing = load_staffing(cfg)
+    plan = staffing_around_spent_quotas(staffing, frozenset({FrontierHarness.CLAUDE}))
+    moved = {item.tier: item for item in plan if item.tier is not Tier.JUNIOR}
+
+    senior, staff = moved[Tier.SENIOR], moved[Tier.STAFF]
+    assert isinstance(senior, TierRestaffed) and isinstance(staff, TierRestaffed)
+    assert senior.slot.model == "gpt-5.6-sol"
+    assert senior.slot.reasoning_effort == "high"
+    assert staff.slot.model == "gpt-5.6-terra"
+    assert "the pair moves to pairing 'codex-pair'" in senior.detail
+
+    cfg.write_text(
+        body.replace(
+            'model = "claude-opus-5"',
+            'model = "claude-opus-5"\nbackup_models = [{ harness = "codex", model = "x" }]',
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="A paired seat escapes with its pair"):
+        load_staffing(cfg)
+
+
+def test_a_spent_vendor_the_pair_does_not_use_moves_nothing(tmp_path: Path) -> None:
+    """Codex being spent is not a fact about a pairing seated entirely on claude."""
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+seated_pairing = "claude-pair"
+
+[pairings.claude-pair.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[pairings.claude-pair.staff]
+harness = "claude"
+model = "claude-fable-5"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    staffing = load_staffing(cfg)
+    plan = staffing_around_spent_quotas(staffing, frozenset({FrontierHarness.CODEX}))
+
+    assert all(isinstance(item, TierServed) for item in plan)
+
+
+def test_a_pair_with_no_viable_fallback_queues_both_seats(tmp_path: Path) -> None:
+    """Half a pair is never staffed, in failure exactly as in configuration.
+
+    A fallback whose own vendor is also spent is skipped, and when the chain
+    runs out both seats report unstaffable together. Implementing with no
+    reviewer standing behind it is the state the pairing type exists to make
+    unreachable, so the restaffing does not produce it either.
+    """
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+seated_pairing = "claude-pair"
+
+[pairings.claude-pair]
+fallback = "codex-pair"
+
+[pairings.claude-pair.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[pairings.claude-pair.staff]
+harness = "claude"
+model = "claude-fable-5"
+
+[pairings.codex-pair.senior]
+harness = "codex"
+model = "gpt-5.6-sol"
+
+[pairings.codex-pair.staff]
+harness = "codex"
+model = "gpt-5.6-terra"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    staffing = load_staffing(cfg)
+    plan = staffing_around_spent_quotas(
+        staffing, frozenset({FrontierHarness.CLAUDE, FrontierHarness.CODEX})
+    )
+    frontier = [item for item in plan if item.tier is not Tier.JUNIOR]
+
+    assert len(frontier) == 2
+    assert all(isinstance(item, TierUnstaffable) for item in frontier)
+
+
+def test_a_pairing_cannot_fall_back_to_itself_or_to_nothing(tmp_path: Path) -> None:
+    """An escape that names the seating it escapes from is not an escape."""
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+seated_pairing = "pair"
+
+[pairings.pair]
+fallback = "pair"
+
+[pairings.pair.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[pairings.pair.staff]
+harness = "claude"
+model = "claude-fable-5"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="falls back to itself"):
+        load_bench(cfg)
+
+
+def test_the_repo_matrix_survives_the_loss_of_any_one_vendor() -> None:
+    """The operator's staffing matrix (2026-08-23), made executable.
+
+    Whichever pairing is seated, killing any single vendor it depends on has to
+    land the pair - both seats, together - on a bench that avoids the dead
+    vendor and keeps two different models. Not one scenario but the property
+    itself, quantified over every pairing the file declares and every vendor
+    each depends on: this is what makes editing the config safe, because a
+    matrix hole fails here by name instead of surfacing as a queued pipeline
+    during the outage that finds it.
+
+    Killing everything a pairing depends on must queue both seats, since the
+    both-vendors-out answer is the local ensemble direction and nothing
+    declared yet; see docs/local_fallback_seating_gawd.md.
+    """
+
+    repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
+    staffing = load_staffing(repo_cfg)
+    accepted_efforts = {None, "low", "medium", "high", "xhigh", "max"}
+
+    for seated in staffing.pairings.values():
+        candidate = replace(staffing, seated=seated)
+        depends_on = seated.frontier_harnesses()
+        for vendor in depends_on:
+            plan = staffing_around_spent_quotas(candidate, frozenset({vendor}))
+            moved = {item.tier: item for item in plan if item.tier is not Tier.JUNIOR}
+            for tier, item in moved.items():
+                assert isinstance(item, TierRestaffed), (
+                    f"pairing {seated.name!r} has no way off a spent {vendor.value} for "
+                    f"its {tier.value} seat; extend its `fallback` chain in "
+                    "configs/staffing.toml"
+                )
+                assert (
+                    vendor
+                    not in FrontierPairing(
+                        name="landed",
+                        senior=moved[Tier.SENIOR].slot,
+                        staff=moved[Tier.STAFF].slot,
+                    ).frontier_harnesses()
+                )
+                assert item.slot.reasoning_effort in accepted_efforts
+            # Constructing the landing as a pairing IS the cross-check assertion:
+            # a shared seat would have raised SharedSeatRefused above.
+
+        both_out = staffing_around_spent_quotas(candidate, frozenset(FrontierHarness))
+        unstaffed = [item for item in both_out if item.tier is not Tier.JUNIOR]
+        assert all(isinstance(item, TierUnstaffable) for item in unstaffed)
+
+
+def test_the_repo_matrix_is_the_operator_s_matrix() -> None:
+    """The three seatings, by name, exactly as ruled on 2026-08-23.
+
+    The property test above proves the matrix has no holes; this one pins its
+    content, so a drive-by edit to a model or an effort dial is a deliberate
+    act against a named ruling rather than a quiet drift. Changing this test IS
+    the act of changing the ruling.
+    """
+
+    repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
+    staffing = load_staffing(repo_cfg)
+
+    def seats(name: str) -> tuple[tuple[str, str | None, str | None], ...]:
+        pairing = staffing.pairings[name]
+        return tuple(
+            (slot.harness.value, slot.model, slot.reasoning_effort)
+            for slot in (pairing.senior, pairing.staff)
+        )
+
+    assert seats("cross-vendor") == (
+        ("codex", "gpt-5.6-sol", "high"),
+        ("claude", "claude-opus-5", "xhigh"),
+    )
+    assert seats("claude-only") == (
+        ("claude", "claude-opus-5", "high"),
+        ("claude", "claude-fable-5", "high"),
+    )
+    assert seats("codex-only") == (
+        ("codex", "gpt-5.6-terra", "max"),
+        ("codex", "gpt-5.6-sol", "high"),
+    )
+    assert staffing.pairings["cross-vendor"].fallback == ("claude-only", "codex-only")
+    assert staffing.pairings["claude-only"].fallback == ("codex-only",)
+    assert staffing.pairings["codex-only"].fallback == ("claude-only",)
 
 
 def test_workload_profile_changes_model_not_seniority_or_capacity(tmp_path: Path) -> None:
@@ -205,60 +559,110 @@ def test_executor_routes_only_independent_reading_to_its_workload_profile(
     )
 
 
-def test_a_bench_whose_reviewer_wrote_the_change_warns(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Same (harness, model) in senior and staff is legal and must not be silent.
+def _same_model_config(*, acknowledged: bool) -> str:
+    flag = "same_model_review_accepted = true\n" if acknowledged else ""
+    return f"""
+seated_pairing = "one-model"
 
-    Legal because an operator with every subscription but one down may accept
-    same-model review as a last resort; not silent because the reviewer is then
-    the model that wrote the change, and that property change should be on the
-    record where the config was loaded.
+[pairings.one-model]
+{flag}
+[pairings.one-model.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[pairings.one-model.staff]
+harness = "claude"
+model = "claude-opus-5"
+""".strip()
+
+
+def test_one_model_in_both_seats_is_unrepresentable(tmp_path: Path) -> None:
+    """The hardening: the reviewer being the author cannot be written down.
+
+    It used to be a log line, and a log line during a 3am outage is not read.
+    Then it was a refusal with an acknowledgement flag, and the flag's first use
+    was an agent reaching for it past a second model that was already installed.
+    Now the pairing does not construct, full stop (operator's ruling,
+    2026-08-23): every harness this system staffs offers more than one model,
+    so a second model always exists and the last resort the flag served does
+    not.
     """
 
     cfg = tmp_path / "staffing.toml"
-    cfg.write_text(
-        """
-[bench.senior]
-harness = "claude"
-model = "claude-opus-5"
+    cfg.write_text(_same_model_config(acknowledged=False), encoding="utf-8")
 
-[bench.staff]
-harness = "claude"
-model = "claude-opus-5"
-""".strip(),
-        encoding="utf-8",
-    )
-    with caplog.at_level(logging.WARNING, logger="local_first_agent_os.staffing"):
+    with pytest.raises(SharedSeatRefused, match="both implementer and reviewer"):
         load_bench(cfg)
-    assert "second pair of eyes" in caplog.text
 
 
-def test_two_models_from_one_provider_do_not_warn(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The sanctioned outage fallback stays silent: opus implements, fable reviews.
+def test_the_retired_acknowledgement_flag_is_refused_by_name(tmp_path: Path) -> None:
+    """A stale key errors instead of being ignored.
 
-    The warning is about model identity, not vendor identity. Warning here would
-    train operators to ignore it, which is how a warning stops being one.
+    Silently dropping it would tell an operator their acknowledgement was on
+    record when nothing reads it, which is worse than either honoring it or
+    refusing it.
+    """
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(_same_model_config(acknowledged=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="no longer exists"):
+        load_bench(cfg)
+
+
+def test_two_models_from_one_provider_are_a_legal_pairing(tmp_path: Path) -> None:
+    """The sanctioned outage seating loads: opus implements, fable reviews.
+
+    The rule is about model identity, not vendor identity. Refusing here would
+    make the single-vendor outage seating unwritable, which is the 2026-08-11
+    lesson: a rule the operator cannot satisfy gets smuggled past, not obeyed.
     """
 
     cfg = tmp_path / "staffing.toml"
     cfg.write_text(
         """
-[bench.senior]
+seated_pairing = "outage"
+
+[pairings.outage.senior]
 harness = "claude"
 model = "claude-opus-5"
 
-[bench.staff]
+[pairings.outage.staff]
 harness = "claude"
 model = "claude-fable-5"
 """.strip(),
         encoding="utf-8",
     )
-    with caplog.at_level(logging.WARNING, logger="local_first_agent_os.staffing"):
-        load_bench(cfg)
-    assert "second pair of eyes" not in caplog.text
+
+    bench = load_bench(cfg)
+
+    assert bench[Tier.SENIOR].model != bench[Tier.STAFF].model
+
+
+def test_one_seat_pinned_and_one_defaulted_is_not_decidable_here(tmp_path: Path) -> None:
+    """Whether they coincide depends on a CLI default this cannot see.
+
+    Refusing would block a legal seating on a guess; the existing warning made
+    the same call, and the pairing keeps its predicate identical rather than
+    inventing a second one.
+    """
+
+    cfg = tmp_path / "staffing.toml"
+    cfg.write_text(
+        """
+seated_pairing = "maybe"
+
+[pairings.maybe.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[pairings.maybe.staff]
+harness = "claude"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    assert load_bench(cfg)[Tier.STAFF].model is None
 
 
 def test_repo_staffing_toml_matches_locked_mapping() -> None:
@@ -397,7 +801,13 @@ def test_bench_slot_reasoning_effort_reaches_codex_command(tmp_path) -> None:
     config = tmp_path / "staffing.toml"
     config.write_text(
         """
-[bench.staff]
+seated_pairing = "pair"
+
+[pairings.pair.senior]
+harness = "claude"
+model = "claude-opus-5"
+
+[pairings.pair.staff]
 harness = "codex"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"

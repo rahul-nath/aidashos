@@ -10,22 +10,10 @@ and knows neither. A driver that folded any two of them together would be the
 shape this design was written against, so this module is deliberately small and
 does nothing either of the other two could have done.
 
-What milestone 3 does and does not do
-=====================================
-
-It builds the stack and stops. Merges happen in queue order, a conflict is
-attributed to the request that would not apply and parked durably, the built
-stack is checked for containment and provenance, and the worktree is removed on
-every path. **The integrated branch is never advanced**, so a stack that builds
-cleanly ends the run as `StackAbandoned` under
-`StackAbandonment.INTEGRATED_BRANCH_ADVANCE_UNIMPLEMENTED` and its members go
-back to `Queued`.
-
-That makes conflict attribution the only durable verdict this milestone
-produces, and it is a real one: requests ahead of a conflict applied cleanly by
-construction, so the culprit is known without running a gate at all. Milestone 4
-adds the gate and the fast-forward, at which point a green stack lands instead
-of abandoning.
+The integrated branch moves only after the built stack has exact approved
+provenance and every target-project verification command exits zero. A red gate
+enters the pure bisect rule. A dirty checkout, wrong branch, moved base, or git
+failure abandons the attempt and returns undecided requests to the queue.
 
 Why the base is re-read every attempt
 =====================================
@@ -56,12 +44,22 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import assert_never
 
+from ..constants import DEFAULT_VERIFICATION_COMMAND_TIMEOUT_SECONDS
 from ..coordination.integration_queue import (
     claim_requests_for_attempt,
     record_bisected_out,
+    record_integrated,
     return_requests_to_queue,
 )
 from ..coordination.store import ConnectionLike
+from ..pow_wow.process import run_captured_shell_command
+from ..pow_wow.verification import (
+    VerificationFailed,
+    VerificationIncomplete,
+    VerificationNotDeclared,
+    VerificationPassed,
+    classify_verification,
+)
 from ..project_center import LinkedProject
 from .bisect import (
     AwaitingStack,
@@ -72,6 +70,8 @@ from .bisect import (
     StackAbandoned,
     StackAbandonment,
     StackAttempt,
+    StackGateRed,
+    StackLanded,
     StackMergeConflict,
     StackOutcome,
     begin_integration,
@@ -79,6 +79,7 @@ from .bisect import (
 )
 from .queue import SelectedBatch
 from .requests import (
+    GateFailed,
     InFlight,
     IntegrationAttemptId,
     IntegrationBatchId,
@@ -86,10 +87,13 @@ from .requests import (
     IntegrationSubject,
 )
 from .stack import (
+    FastForwarded,
+    FastForwardRefused,
     GitFailure,
     IntegrationWorkspace,
     ProvenanceBroken,
     ProvenanceHeld,
+    SourceWorktreeCleanup,
     StackBuilder,
     StackBuilt,
     StackConflicted,
@@ -112,6 +116,7 @@ class RefineryRun:
 
     batch_id: IntegrationBatchId
     outcome: IntegrationOutcome
+    source_worktree_cleanup: tuple[tuple[IntegrationRequestId, SourceWorktreeCleanup], ...] = ()
 
     @property
     def decided_anything(self) -> bool:
@@ -176,7 +181,30 @@ def integrate_batch(
             )
 
     _release_undecided(c, progress, in_flight=in_flight, now=now)
-    return RefineryRun(batch_id=batch_id, outcome=progress)
+
+    cleanup: list[tuple[IntegrationRequestId, SourceWorktreeCleanup]] = []
+    for request_id in progress.integrated:
+        request = in_flight[request_id]
+        record_integrated(
+            c,
+            request,
+            integration_commit_sha=builder.integrated_tip(project.integrated_branch),
+            recorded_at=now,
+        )
+        cleanup.append(
+            (
+                request_id,
+                builder.cleanup_source_worktree(
+                    branch_name=request.subject.branch_name,
+                    approved_tip_sha=request.subject.commit_sha,
+                ),
+            )
+        )
+    return RefineryRun(
+        batch_id=batch_id,
+        outcome=progress,
+        source_worktree_cleanup=tuple(cleanup),
+    )
 
 
 def _attempt(
@@ -209,7 +237,16 @@ def _attempt(
         return StackAbandoned(StackAbandonment.INTEGRATION_WORKTREE_UNAVAILABLE), base_sha
 
     try:
-        return _build_and_check(allocation, attempt, batch=batch, builder=builder), base_sha
+        return (
+            _build_and_check(
+                allocation,
+                attempt,
+                batch=batch,
+                project=project,
+                builder=builder,
+            ),
+            base_sha,
+        )
     finally:
         # Every path, green or red or exceptional. `git worktree list` on the
         # target project must be clean after every run, and the one way to make
@@ -223,6 +260,7 @@ def _build_and_check(
     attempt: StackAttempt,
     *,
     batch: SelectedBatch,
+    project: LinkedProject,
     builder: StackBuilder,
 ) -> StackOutcome:
     subjects = _subjects_for(batch, attempt.candidates)
@@ -233,23 +271,25 @@ def _build_and_check(
         case StackUnbuildable():
             return StackAbandoned(StackAbandonment.INTEGRATION_WORKTREE_UNAVAILABLE)
         case StackBuilt(tip_sha=tip_sha):
-            return _check_provenance(workspace, subjects, builder=builder, tip_sha=tip_sha)
+            return _check_provenance_and_land(
+                workspace,
+                subjects,
+                project=project,
+                builder=builder,
+                tip_sha=tip_sha,
+            )
     assert_never(built)
 
 
-def _check_provenance(
+def _check_provenance_and_land(
     workspace: IntegrationWorkspace,
     subjects: Sequence[IntegrationSubject],
     *,
+    project: LinkedProject,
     builder: StackBuilder,
     tip_sha: str,
 ) -> StackOutcome:
-    """The stack applied. Prove it carries exactly the approved work, then stop.
-
-    Milestone 4 replaces the final return with the gate and the fast-forward.
-    Until then a proven stack is still abandoned, because reporting it as landed
-    would tell the rule that a branch had moved when it had not.
-    """
+    """Prove the stack, run the one definition of green, then land exactly it."""
 
     try:
         verdict = builder.verify_provenance(workspace, subjects, tip_sha=tip_sha)
@@ -259,8 +299,51 @@ def _check_provenance(
         case ProvenanceBroken():
             return StackAbandoned(StackAbandonment.PROVENANCE_NOT_ESTABLISHED)
         case ProvenanceHeld():
-            return StackAbandoned(StackAbandonment.INTEGRATED_BRANCH_ADVANCE_UNIMPLEMENTED)
-    assert_never(verdict)
+            pass
+        case _:
+            assert_never(verdict)
+
+    declared = tuple(project.verification_commands)
+    captures = tuple(
+        run_captured_shell_command(
+            command,
+            workspace.path,
+            timeout_seconds=DEFAULT_VERIFICATION_COMMAND_TIMEOUT_SECONDS,
+        )
+        for command in declared
+    )
+    verification = classify_verification(declared, captures)
+    match verification:
+        case VerificationPassed():
+            pass
+        case VerificationFailed(failed=failed):
+            first = failed[0]
+            excerpt = (first.stderr.strip() or first.stdout.strip())[-4_000:]
+            return StackGateRed(
+                failure=GateFailed(
+                    command=first.command,
+                    exit_code=first.exit_code,
+                    output_excerpt=excerpt,
+                )
+            )
+        case VerificationNotDeclared() | VerificationIncomplete():
+            raise RuntimeError(
+                f"project {project.id} reached the refinery without a complete declared gate"
+            )
+        case _:
+            assert_never(verification)
+
+    fast_forward = builder.fast_forward_integrated_branch(
+        workspace,
+        branch_name=project.integrated_branch,
+        tip_sha=tip_sha,
+    )
+    match fast_forward:
+        case FastForwarded():
+            return StackLanded()
+        case FastForwardRefused():
+            return StackAbandoned(StackAbandonment.FAST_FORWARD_REFUSED)
+    assert_never(fast_forward)
 
 
 def _subjects_for(

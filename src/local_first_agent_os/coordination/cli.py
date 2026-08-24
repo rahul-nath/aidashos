@@ -69,6 +69,7 @@ from .dispatch import (
     supersede_dispatch_intent,
 )
 from .dispatcher_loop import run_ledger_dispatcher
+from .doctrine_staleness import list_doctrine_stale_reviews
 from .execution import (
     LEASE_TERMINAL_STATUSES,
     WORK_ABANDONED_AFTER_SECONDS,
@@ -333,7 +334,7 @@ def build_mcp_server():
             "  5. claim_task → submit_artifact → evaluate_artifact\n"
             "  6. request_tool_permission (for any sensitive tool)\n"
             "  7. submit_approval_request for: PURCHASE / EXTERNAL_COMMS / "
-            "CODE_MERGE / MODEL_ESCALATION\n"
+            "CODE_MERGE / MODEL_ESCALATION / REVIEW_ESCALATION\n"
             "  8. complete_pow_wow → check_stagnation → complete_saga\n\n"
             "POLICY: roles do not imply permissions. A CEO agent can recommend; it cannot pay. "
             "A Staff Engineer can approve a plan; it cannot bypass file claims.\n\n"
@@ -455,6 +456,7 @@ def build_mcp_server():
     mcp.tool(name="cancel_dispatch_intent")(cancel_dispatch_intent)
     mcp.tool(name="supersede_dispatch_intent")(supersede_dispatch_intent)
     mcp.tool(name="list_dispatch_intents")(list_dispatch_intents)
+    mcp.tool(name="list_doctrine_stale_reviews")(list_doctrine_stale_reviews)
     mcp.tool(name="open_execution_lease")(open_execution_lease)
     mcp.tool(name="heartbeat_execution_lease")(heartbeat_execution_lease)
     mcp.tool(name="request_execution_cancel")(request_execution_cancel)
@@ -946,6 +948,8 @@ def build_parser() -> argparse.ArgumentParser:
     ldi = sub.add_parser("list_dispatch_intents")
     ldi.add_argument("--status")
     ldi.add_argument("--parent-intent-id")
+
+    sub.add_parser("list_doctrine_stale_reviews")
 
     oel = sub.add_parser("open_execution_lease")
     oel.add_argument("idempotency_key")
@@ -1467,6 +1471,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             status_filter=args.status,
             parent_intent_id=args.parent_intent_id,
         )
+    elif cmd == "list_doctrine_stale_reviews":
+        out = list_doctrine_stale_reviews()
     elif cmd == "open_execution_lease":
         out = open_execution_lease(
             idempotency_key=args.idempotency_key,

@@ -195,7 +195,7 @@ def test_staff_review_must_name_the_exact_approved_commit(monkeypatch: Any) -> N
         }
     }
 
-    with pytest.raises(ValueError, match="provenance is incomplete"):
+    with pytest.raises(ValueError, match="staff_review_commit_mismatch"):
         merge_review.require_staff_review_provenance(approval, settings=object())
 
 
@@ -252,5 +252,5 @@ def test_staff_review_must_match_current_engineering_doctrine(monkeypatch: Any) 
         }
     }
 
-    with pytest.raises(ValueError, match="current engineering doctrine"):
+    with pytest.raises(ValueError, match="doctrine_text_drift"):
         merge_review.require_staff_review_provenance(approval, settings=object())

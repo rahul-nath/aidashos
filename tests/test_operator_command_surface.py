@@ -52,9 +52,7 @@ _CANDIDATE_OPERATOR_DOCS = (
 )
 
 _OPERATOR_DOCS = tuple(
-    relative
-    for relative in _CANDIDATE_OPERATOR_DOCS
-    if (_REPOSITORY_ROOT / relative).exists()
+    relative for relative in _CANDIDATE_OPERATOR_DOCS if (_REPOSITORY_ROOT / relative).exists()
 )
 
 # Only fenced bash blocks. Prose that names the command in backticks is

@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import re
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -31,7 +31,15 @@ from .archetype_planners import ArchetypeMilestoneTemplate, plan_saas_archetype
 from .constants import CLI_AGENT_RUN_ARTIFACT_TYPE, DELEGATED_TASK_RUN_ARTIFACT_TYPE
 from .pow_wow import PowWowRunResult, PowWowTaskSpec
 from .staffing import JudgmentRole, Tier
-from .work_units.design_doc import parse_declared_permission_envelope
+from .work_units.design_doc import (
+    DocumentSection,
+    canonical_heading,
+    declared_target_project_id,
+    mask_fences,
+    normalize_heading,
+    parse_declared_permission_envelope,
+    split_document_sections,
+)
 from .work_units.permissions import (
     ACTION_CAPABILITIES,
     BASELINE_AUTONOMOUS_ACTIONS,
@@ -63,6 +71,13 @@ class SparseGawdDraft:
     project: str
     goal: str
     raw_text: str
+    # Two different facts, deliberately two fields. `project` is the human title
+    # off the `**Project:**` banner ("Pocket Tracker"); this is the registered
+    # project id the draft declares on its `Target project:` line
+    # ("pocket_tracker"). They were one field until the finalized document went
+    # to the compiler, which reads `Target project:` as an id and refused every
+    # title ever written there.
+    target_project_id: str | None = None
     theory: str = ""
     why: str = ""
     golden_flow: tuple[str, ...] = ()
@@ -317,19 +332,23 @@ def create_sparse_gawd_draft_file(
 def parse_sparse_gawd_draft(path: Path) -> SparseGawdDraft:
     source_path = path.expanduser().resolve()
     raw_text = source_path.read_text(encoding="utf-8")
-    sections = _sections(raw_text)
+    # The one section grammar. The compiler parses the finalized document with
+    # `split_document_sections`; the sparse draft is the same document earlier
+    # in its life, and a second splitter here once meant the two disagreed
+    # about what a heading was.
+    sections = split_document_sections(raw_text)
     project = _project_name(raw_text) or _clean_title(source_path.stem)
-    why = _section_body(sections, "why this exists")
-    theory = _section_body(sections, "theory of the system")
-    core_design = _section_body(sections, "core design")
-    scope = _section_body(sections, "this version scope non goals")
-    operational_contract = _section_body(sections, "operational contract")
-    risk = _section_body(sections, "risk synthesis known limitations")
-    golden_flow = _section_lines(sections, "happy path golden flow")
+    why = _section_region(sections, raw_text, "why this exists")
+    theory = _section_region(sections, raw_text, "theory of the system")
+    core_design = _section_region(sections, raw_text, "core design")
+    scope = _section_region(sections, raw_text, "this version scope and non goals")
+    operational_contract = _section_region(sections, raw_text, "operational contract")
+    risk = _section_region(sections, raw_text, "risk synthesis known limitations")
+    golden_flow = _region_lines(sections, raw_text, "happy path golden flow")
     in_scope = _label_lines(scope, "in scope")
     non_goals = _label_lines(scope, "cut") or _label_lines(scope, "non goals")
-    verification = _section_lines(sections, "verification")
-    missing_sections = _missing_sections(sections)
+    verification = _region_lines(sections, raw_text, "verification")
+    missing_sections = _missing_sections(sections, raw_text)
     goal = _first_meaningful_line(why) or _first_meaningful_line(theory) or project
 
     return SparseGawdDraft(
@@ -338,6 +357,7 @@ def parse_sparse_gawd_draft(path: Path) -> SparseGawdDraft:
         project=project,
         goal=goal,
         raw_text=raw_text,
+        target_project_id=_target_project_id(raw_text),
         theory=_plain_text(theory),
         why=_plain_text(why),
         golden_flow=tuple(golden_flow),
@@ -346,9 +366,11 @@ def parse_sparse_gawd_draft(path: Path) -> SparseGawdDraft:
         unit_of_work=_label_text(core_design, "unit of work"),
         lifecycle=tuple(_label_lines(core_design, "lifecycle")),
         data_model=tuple(_label_lines(core_design, "data model")),
-        failure_that_matters=_plain_text(_section_body(sections, "the failure that matters most")),
+        failure_that_matters=_plain_text(
+            _section_region(sections, raw_text, "the failure that matters most")
+        ),
         verification=tuple(verification),
-        execution_milestones=tuple(_section_lines(sections, "execution milestones")),
+        execution_milestones=tuple(_region_lines(sections, raw_text, "execution milestones")),
         service_levels=tuple(_label_lines(operational_contract, "service levels")),
         input_bounds=tuple(_label_lines(operational_contract, "input bounds")),
         interface_contracts=tuple(_label_lines(operational_contract, "interface contracts")),
@@ -357,11 +379,13 @@ def parse_sparse_gawd_draft(path: Path) -> SparseGawdDraft:
         dependencies=tuple(_label_lines(operational_contract, "dependencies")),
         security_access=tuple(_label_lines(operational_contract, "security access")),
         backpressure_cost=tuple(_label_lines(operational_contract, "backpressure cost")),
-        rollout_migration_rollback=tuple(_section_lines(sections, "rollout migration rollback")),
+        rollout_migration_rollback=tuple(
+            _region_lines(sections, raw_text, "rollout migration rollback")
+        ),
         risk_synthesis=tuple(_label_lines(risk, "risk synthesis")),
         known_limitations=tuple(_label_lines(risk, "known limitations")),
-        decisions=tuple(_section_lines(sections, "decision log")),
-        deferred=tuple(_section_lines(sections, "if i had 2 more weeks")),
+        decisions=tuple(_region_lines(sections, raw_text, "decision log")),
+        deferred=tuple(_region_lines(sections, raw_text, "if i had 2 more weeks")),
         unresolved_questions=tuple(missing_sections),
     )
 
@@ -789,9 +813,16 @@ def append_required_artifacts_section(markdown: str, rendered: str) -> str:
 
     An operator who wrote the section themselves outranks the derivation, and a
     second heading would be a duplicate section rather than a stronger promise.
+    Detection asks the grammar for a level-2 section, never the text for a
+    substring: the template now mentions the heading in prose while teaching
+    it, and a mention is not a declaration.
     """
 
-    if not rendered.strip() or _REQUIRED_ARTIFACTS_HEADING in markdown:
+    already_declared = any(
+        section.level == 2 and _resolved_heading(section.heading) == "required artifacts"
+        for section in split_document_sections(markdown)
+    )
+    if not rendered.strip() or already_declared:
         return markdown
     return f"{markdown.rstrip()}\n\n{rendered}\n"
 
@@ -958,8 +989,7 @@ def merge_pow_wow_result_into_gawd_review_markdown(
             senior_text,
         ).strip()
         senior_section = (
-            "## Senior Spec Completion (Model Output)\n"
-            f"{_as_quoted_transcript(senior_body)}\n\n"
+            f"## Senior Spec Completion (Model Output)\n{_as_quoted_transcript(senior_body)}\n\n"
         )
         markdown = markdown.replace(
             "## Permission Envelope", f"{senior_section}## Permission Envelope", 1
@@ -1355,7 +1385,19 @@ def render_gawd_review_markdown(draft: SparseGawdDraft, envelope: PermissionEnve
         "",
         # Declared unambiguously rather than left to the banner above, which is a
         # display line and parses as a pipe-separated blob.
-        f"Target project: {draft.project}",
+        #
+        # The id, never `draft.project`. The banner holds a human title, the
+        # compiler reads this line as a registered project id, and writing the
+        # title here made every finalized document fail to compile with "target
+        # project 'Pocket Tracker' is not registered" - a complaint about a name
+        # nobody had typed on this line.
+        #
+        # An undeclared id leaves the line present and empty on purpose. Dropping
+        # the line instead would hand the compiler its `Project:` alias, which
+        # falls back to the banner and reproduces exactly the failure above;
+        # empty makes it report that the document declares no target project,
+        # which is both true and the sentence that names the fix.
+        f"Target project: {draft.target_project_id or ''}".rstrip(),
         "",
         "## 1. Theory of the System",
         draft.theory or "A scoped build saga driven by a durable GAWD intake contract.",
@@ -1635,6 +1677,12 @@ wrong: `REVIEW` defaults to `review.agent`, which cannot produce an
 `operator_approval`, so an operator gate needs `Executor: review.operator` and
 `Approval: required`.
 
+A plan with an IMPLEMENT milestone must also state its delivery contract.
+Intake derives a `## Required Artifacts` section from the declared phases when
+it finalizes this draft, so leave none here and the accurate one is appended
+for you. A document written by hand for `compile_design_doc` directly must
+declare its own, or the compiler refuses with `missing_delivery_contract`.
+
 ## 9. Operational Contract
 
 **Service levels.**
@@ -1756,22 +1804,31 @@ def render_sparse_gawd_draft(
         "**Project:** _PROJECT NAME_",
         f"**Project:** {safe_project}",
     )
-    matches = list(re.finditer(r"^##\s+(.+?)\s*$", rendered, flags=re.MULTILINE))
+    # The writer walks the same section list the parser reads, and matches
+    # keys the same way: canonical heading, exact after normalization. The
+    # walkthru's keys are the template's own headings, so an accepted answer
+    # lands under the section it was asked for and nowhere else.
+    sections = split_document_sections(rendered)
     replacements: list[tuple[int, int, str]] = []
-    for index, match in enumerate(matches):
-        heading = _normalize_heading(match.group(1))
+    for index, section in enumerate(sections):
+        if section.level != 2:
+            continue
+        resolved = _resolved_heading(section.heading)
         body = next(
             (
                 value.strip()
                 for key, value in section_bodies.items()
-                if _heading_matches(heading, _normalize_heading(key)) and value.strip()
+                if _resolved_heading(key) == resolved and value.strip()
             ),
             None,
         )
         if body is None:
             continue
-        body_start = match.end()
-        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(rendered)
+        body_start = section.span.end - len(section.body)
+        body_end = next(
+            (later.span.start for later in sections[index + 1 :] if later.level <= 2),
+            len(rendered),
+        )
         replacements.append((body_start, body_end, f"\n\n{body}\n\n"))
     for start, end, replacement in reversed(replacements):
         rendered = rendered[:start] + replacement + rendered[end:]
@@ -1783,40 +1840,50 @@ def _parse_draft_id_from_path(path: Path) -> str:
     return match.group(1) if match else uuid4().hex
 
 
-def _sections(text: str) -> dict[str, str]:
-    matches = list(re.finditer(r"^##\s+(.+?)\s*$", text, flags=re.MULTILINE))
-    sections: dict[str, str] = {}
-    for index, match in enumerate(matches):
-        start = match.end()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        sections[_normalize_heading(match.group(1))] = text[start:end].strip()
-    return sections
+def _resolved_heading(name: str) -> str:
+    """One heading name, folded to the vocabulary's canonical spelling.
+
+    Falls back to the bare normalized form for headings outside the vocabulary
+    (the template's "Time Budget", for one), so those still compare by exact
+    normalized equality rather than not at all.
+    """
+
+    normalized = normalize_heading(name)
+    return canonical_heading(normalized) or normalized
 
 
-def _normalize_heading(heading: str) -> str:
-    cleaned = re.sub(r"^\d+\.\s*", "", heading.strip().lower())
-    cleaned = cleaned.replace("&", "and")
-    return re.sub(r"[^a-z0-9]+", " ", cleaned).strip()
+def _section_region(sections: Sequence[DocumentSection], text: str, name: str) -> str:
+    """The named level-2 section's text, subsections included.
 
+    `split_document_sections` cuts a section's `body` at the next heading of
+    any level, which is what the compiler wants: a `### Milestone` block is its
+    own section there. The sparse draft wants the operator's whole answer, and
+    an operator who writes milestone blocks under `## 8. Execution Milestones`
+    wrote them inside that answer. So the region runs from the section's body
+    to the next heading of level two or lower, and subsection headings are
+    ordinary lines of it.
 
-def _section_body(sections: dict[str, str], name: str) -> str:
-    normalized = _normalize_heading(name)
-    for heading, body in sections.items():
-        if _heading_matches(heading, normalized):
-            return body
+    Selection is by canonical heading, exact after normalization: the same rule
+    the compiler applies, because these are the same document at two moments.
+    """
+
+    target = _resolved_heading(name)
+    for index, section in enumerate(sections):
+        if section.level != 2:
+            continue
+        if _resolved_heading(section.heading) != target:
+            continue
+        body_start = section.span.end - len(section.body)
+        region_end = next(
+            (later.span.start for later in sections[index + 1 :] if later.level <= 2),
+            len(text),
+        )
+        return text[body_start:region_end].strip()
     return ""
 
 
-def _heading_matches(actual: str, expected: str) -> bool:
-    actual_without_and = re.sub(r"\band\b", "", actual)
-    expected_without_and = re.sub(r"\band\b", "", expected)
-    actual_key = re.sub(r"\s+", " ", actual_without_and).strip()
-    expected_key = re.sub(r"\s+", " ", expected_without_and).strip()
-    return expected_key in actual_key or actual_key in expected_key
-
-
-def _section_lines(sections: dict[str, str], name: str) -> list[str]:
-    return _meaningful_lines(_section_body(sections, name))
+def _region_lines(sections: Sequence[DocumentSection], text: str, name: str) -> list[str]:
+    return _meaningful_lines(_section_region(sections, text, name))
 
 
 def _project_name(text: str) -> str:
@@ -1829,6 +1896,38 @@ def _project_name(text: str) -> str:
     return value
 
 
+def _target_project_id(text: str) -> str | None:
+    """The registered project id the draft declares, or ``None`` if it has none.
+
+    Read with the compiler's own reader rather than a local regex, because the
+    finalized document this intake renders is compiled by that reader: the id
+    written out has to be the id read back, and two readers of one line only
+    agree until one of them is edited.
+
+    An untouched template blank is not a declaration. The compiler would take
+    ``_REGISTERED PROJECT ID_`` at its word and report that no such project is
+    registered, which is true and useless; ``None`` instead makes the finalized
+    document say it declares nothing, and the compiler then names the line the
+    author still has to fill in.
+    """
+
+    declared = declared_target_project_id(text)
+    if declared is None or _is_template_blank(declared):
+        return None
+    return declared
+
+
+def _is_template_blank(value: str) -> bool:
+    """Whether a field still holds the sparse template's own instruction text.
+
+    Matched on the words rather than on the surrounding underscores, which are
+    also how Markdown writes emphasis: an author who italicizes a real id has
+    still declared it.
+    """
+
+    return re.sub(r"[^A-Za-z0-9]+", " ", value).strip().upper() == "REGISTERED PROJECT ID"
+
+
 def _label_text(body: str, label: str) -> str:
     pattern = re.compile(rf"\*\*{re.escape(label)}\.\*\*\s*(.+)", flags=re.IGNORECASE)
     for line in body.splitlines():
@@ -1839,17 +1938,17 @@ def _label_text(body: str, label: str) -> str:
 
 
 def _label_lines(body: str, label: str) -> list[str]:
-    normalized_label = _normalize_heading(label)
+    normalized_label = normalize_heading(label)
     lines = body.splitlines()
     selected: list[str] = []
     active = False
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("**") and stripped.endswith("**"):
-            active = normalized_label in _normalize_heading(stripped.strip("* "))
+            active = normalized_label in normalize_heading(stripped.strip("* "))
             continue
         if stripped.startswith("**"):
-            active = normalized_label in _normalize_heading(stripped.strip("* "))
+            active = normalized_label in normalize_heading(stripped.strip("* "))
             text = re.sub(r"^\*\*.+?\*\*\s*", "", stripped)
             if active and text:
                 selected.append(_clean_line(text))
@@ -1873,17 +1972,13 @@ def _meaningful_lines(body: str) -> list[str]:
 
     Skipping them structurally rather than naming them in the placeholder set
     below is what keeps that set from having to grow by one entry per line of
-    every example the template ever shows.
+    every example the template ever shows. The skipping itself is
+    `mask_fences`, the same quotation rule the compiler's parser applies, so
+    the sparse reader and the compiler cannot disagree about where a fence is.
     """
 
     selected: list[str] = []
-    fenced = False
-    for line in body.splitlines():
-        if line.strip().startswith("```"):
-            fenced = not fenced
-            continue
-        if fenced:
-            continue
+    for line in mask_fences(body).splitlines():
         if cleaned := _clean_line(line):
             selected.append(cleaned)
     return selected
@@ -1943,6 +2038,11 @@ def _clean_line(line: str) -> str:
         "write where this design stops being sufficient.",
         "d1 - write the first decision and rationale.",
         "write deferred work here.",
+        "a plan with an implement milestone must also state its delivery contract.",
+        "intake derives a `## required artifacts` section from the declared phases when",
+        "it finalizes this draft, so leave none here and the accurate one is appended",
+        "for you. a document written by hand for `compile_design_doc` directly must",
+        "declare its own, or the compiler refuses with `missing_delivery_contract`.",
     }
     if cleaned.lower() in placeholders:
         return ""
@@ -1951,19 +2051,19 @@ def _clean_line(line: str) -> str:
     return cleaned
 
 
-def _missing_sections(sections: dict[str, str]) -> list[str]:
+def _missing_sections(sections: Sequence[DocumentSection], text: str) -> list[str]:
     required = (
         "theory of the system",
         "why this exists",
         "happy path golden flow",
-        "this version scope non goals",
+        "this version scope and non goals",
         "core design",
         "the failure that matters most",
         "verification",
     )
     missing = []
     for section in required:
-        if not _section_lines(sections, section):
+        if not _region_lines(sections, text, section):
             missing.append(section)
     return missing
 

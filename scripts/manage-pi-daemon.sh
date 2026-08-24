@@ -31,7 +31,8 @@ case "$(uname -s)" in
   Darwin)
     label="com.rahul.local-first-agent.pi-daemon"
     domain="gui/$(id -u)"
-    service="$HOME/Library/LaunchAgents/$label.plist"
+    . "$ROOT/scripts/launchd-agent-dir.sh"
+    service="$LOCAL_AGENT_LAUNCHD_DIR/$label.plist"
     render() { uv run python "$ROOT/scripts/render-pi-daemon-service.py" launchd "$ROOT" "$UV_BIN" "$service"; }
     case "$action" in
       install) render; stop_autostart_daemon; launchctl bootout "$domain/$label" 2>/dev/null || true; launchctl bootstrap "$domain" "$service" ;;

@@ -12,6 +12,7 @@ import pytest
 
 from local_first_agent_os.harness_readiness import (
     HarnessNotReady,
+    HarnessReadiness,
     HarnessReady,
     HarnessUnknown,
     TierRestaffed,
@@ -420,3 +421,146 @@ def test_the_door_starts_the_run_when_a_tier_merely_moved(
 
     assert result["ok"] is True, "a covered tier must not stop the run"
     assert result["work_unit_id"] == "w1"
+
+
+# --- The door and the dispatcher tell one story about one outage ---------------
+
+
+def _matrix_staffing():
+    """Two vendors, each pairing declaring the other as its way out."""
+
+    from local_first_agent_os.staffing import FrontierPairing, Staffing
+
+    claude_only = FrontierPairing(
+        name="claude-only",
+        senior=BenchSlot(harness=Harness.CLAUDE, model="claude-opus-5", capacity=2),
+        staff=BenchSlot(harness=Harness.CLAUDE, model="claude-fable-5", capacity=1),
+        fallback=("codex-only",),
+    )
+    codex_only = FrontierPairing(
+        name="codex-only",
+        senior=BenchSlot(harness=Harness.CODEX, model="gpt-5.6-terra", capacity=2),
+        staff=BenchSlot(harness=Harness.CODEX, model="gpt-5.6-sol", capacity=1),
+        fallback=("claude-only",),
+    )
+    return Staffing(
+        pairings={p.name: p for p in (claude_only, codex_only)},
+        seated=claude_only,
+        solo={Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4)},
+    )
+
+
+def test_a_logged_out_vendor_moves_the_whole_pair_at_the_door() -> None:
+    """The door restaffs by pairing, exactly as the dispatch path does.
+
+    It used to restaff per tier onto a ready peer's slot, so one outage got two
+    accounts: the door told a human that senior had moved onto the staff seat's
+    model, while the dispatcher moved the pair to a pairing an operator had
+    actually declared and checked. The door's version is the one a human reads
+    before granting execution, so it was the more expensive of the two to have
+    wrong.
+    """
+
+    plan = plan_tier_staffing(
+        bench=_matrix_staffing(),
+        states=(
+            HarnessNotReady(harness=FrontierHarness.CLAUDE, detail="logged out", remedy="log in"),
+            HarnessReady(harness=FrontierHarness.CODEX),
+        ),
+    )
+    moved = {item.tier: item for item in plan if item.tier is not Tier.JUNIOR}
+
+    senior, staff = moved[Tier.SENIOR], moved[Tier.STAFF]
+    assert isinstance(senior, TierRestaffed) and isinstance(staff, TierRestaffed)
+    assert (senior.slot.harness, senior.slot.model) == (Harness.CODEX, "gpt-5.6-terra")
+    assert (staff.slot.harness, staff.slot.model) == (Harness.CODEX, "gpt-5.6-sol")
+    assert "the pair moves to pairing 'codex-only'" in senior.detail
+    assert staffing_refusals(plan) == ()
+
+
+def test_an_unprobed_fallback_is_not_moved_onto() -> None:
+    """`HarnessUnknown` on the escape is not evidence the escape works.
+
+    Trading a refusal we understand for a run we do not is what
+    `_ready_frontier_peer` always refused, and the pairing path inherits the
+    rule rather than restating it loosely: a candidate pairing needs every
+    vendor it depends on to have answered ready.
+    """
+
+    plan = plan_tier_staffing(
+        bench=_matrix_staffing(),
+        states=(
+            HarnessNotReady(harness=FrontierHarness.CLAUDE, detail="logged out", remedy="log in"),
+            HarnessUnknown(harness=FrontierHarness.CODEX, detail="probe did not run"),
+        ),
+    )
+    frontier = [item for item in plan if item.tier is not Tier.JUNIOR]
+
+    assert all(isinstance(item, TierUnstaffable) for item in frontier)
+    assert len(staffing_refusals(plan)) == 2
+
+
+def test_an_unprobed_seated_vendor_is_reported_rather_than_acted_on() -> None:
+    """Not knowing is not a reason to move a seat off the operator's choice."""
+
+    plan = plan_tier_staffing(
+        bench=_matrix_staffing(),
+        states=(
+            HarnessUnknown(harness=FrontierHarness.CLAUDE, detail="probe did not run"),
+            HarnessReady(harness=FrontierHarness.CODEX),
+        ),
+    )
+    frontier = [item for item in plan if item.tier is not Tier.JUNIOR]
+
+    assert all(isinstance(item, TierServed) for item in frontier)
+
+
+def test_the_door_probes_the_escapes_too() -> None:
+    """A door that probed only the seated vendors could never use a fallback.
+
+    Every escape would come back `HarnessUnknown`, the planner would decline to
+    move onto it - correctly - and the door would refuse an outage a declared,
+    working fallback could have absorbed.
+    """
+
+    staffing = _matrix_staffing()
+
+    assert frontier_harnesses_on_bench(staffing) == frozenset(
+        {FrontierHarness.CLAUDE, FrontierHarness.CODEX}
+    )
+    # The seated pairing alone names only claude; the codex half is reachable
+    # solely through the fallback declaration.
+    assert staffing.seated.frontier_harnesses() == frozenset({FrontierHarness.CLAUDE})
+
+
+def test_the_operator_door_passes_one_whole_staffing_to_probe_and_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The command must not erase the pairing before either decision sees it."""
+
+    from local_first_agent_os.work_units import commands
+
+    staffing = _matrix_staffing()
+    states = (HarnessReady(harness=FrontierHarness.CODEX),)
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(commands, "load_staffing", lambda _path: staffing)
+
+    def _availability(received: object) -> tuple[HarnessReadiness, ...]:
+        seen["availability"] = received
+        return states
+
+    def _plan(*, bench: object, states: object) -> tuple[TierStaffing, ...]:
+        seen["plan_bench"] = bench
+        seen["plan_states"] = states
+        return ()
+
+    monkeypatch.setattr(commands, "check_harness_availability", _availability)
+    monkeypatch.setattr(commands, "plan_tier_staffing", _plan)
+
+    assert commands._harness_refusal() is None
+    assert seen == {
+        "availability": staffing,
+        "plan_bench": staffing,
+        "plan_states": states,
+    }

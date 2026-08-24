@@ -88,7 +88,7 @@ dev = [
     # line; declared here so a dependency dropping it is a resolver failure
     # rather than an import error in a test nobody expected to be fragile.
     "pyyaml>=6.0.3",
-    "ruff>=0.15.12",
+    "ruff==0.15.12",
 ]
 
 [tool.pytest.ini_options]

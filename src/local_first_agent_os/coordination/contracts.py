@@ -74,6 +74,7 @@ class CoordinationCommandName(StrEnum):
     LATEST_REPO_AUDIT = "latest_repo_audit"
     LIST_APPROVAL_REQUESTS = "list_approval_requests"
     LIST_DISPATCH_INTENTS = "list_dispatch_intents"
+    LIST_DOCTRINE_STALE_REVIEWS = "list_doctrine_stale_reviews"
     LIST_EXECUTION_LEASES = "list_execution_leases"
     LIST_EXECUTION_CHECKPOINTS = "list_execution_checkpoints"
     LIST_EXECUTION_EVENTS = "list_execution_events"

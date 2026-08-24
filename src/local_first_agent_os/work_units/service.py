@@ -11,6 +11,7 @@ fact the transition engine validates.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -458,12 +459,31 @@ def submit_work_unit_decision(
     *,
     decided_by: str = "operator",
     payload: dict[str, Any] | None = None,
+    resume_refusal: Callable[[], str | None] | None = None,
 ) -> dict[str, Any]:
-    """Resolve one named operator decision.
+    """Resolve one named operator decision, and let it move the work it unblocks.
 
     The request ID is required and validated. A decision that names another
     request, another WorkUnit, or an already-resolved request is rejected, so a
     message that merely sounds like approval cannot unblock a milestone.
+
+    A decision that unblocks a ``BLOCKED`` WorkUnit does not stop at being
+    recorded. The durable wake below only reaches a milestone that is still
+    parked inside a live root execution; a blocked unit's epoch has ended and
+    nothing is listening, so the answer used to land and the unit stayed parked
+    until an operator also typed ``resume_work_unit``. Now the resolution
+    leaves a pending ``RESUME`` row in the enqueue outbox, and the resident
+    drainer delivers it through the same path that command takes. The payload's
+    ``resume`` field reports what happened; absent means the decision unblocks
+    nothing.
+
+    ``resume_refusal`` is the door's refusal gate, consulted lazily and only
+    when a resume would actually be enqueued. It lives at the door and arrives
+    injected for the same reason `_harness_refusal` documents: this function is
+    called by tests and the API and must not spawn probe subprocesses. A gate
+    that answers with a reason still resolves the decision - an operator's
+    answer must never be lost - but the resume is reported rather than
+    enqueued.
     """
 
     request = repo.get_decision_request(request_id)
@@ -480,6 +500,14 @@ def submit_work_unit_decision(
             "decision": request.decision.value if request.decision is not None else None,
             "applied": False,
             "reason": f"request is already {request.status.value}",
+            # Replayed on purpose: the enqueue runs in its own transaction
+            # after the fact commits, so a crash between the two loses only the
+            # delivery. Re-submitting the decision is the documented repair,
+            # and it heals here because this helper re-derives everything from
+            # the durable request row rather than from this call's arguments.
+            "resume": _resume_delivery_after_decision(
+                work_unit_id, request_id, resume_refusal=resume_refusal
+            ),
         }
     executions = {
         execution.milestone_execution_id: execution
@@ -529,6 +557,77 @@ def submit_work_unit_decision(
         "applied": outcome.applied,
         "milestone_key": execution.stable_key,
         "sequence_number": outcome.event.sequence_number,
+        "resume": _resume_delivery_after_decision(
+            work_unit_id, request_id, resume_refusal=resume_refusal
+        ),
+    }
+
+
+def _resume_delivery_after_decision(
+    work_unit_id: str,
+    request_id: str,
+    *,
+    resume_refusal: Callable[[], str | None] | None,
+) -> dict[str, Any] | None:
+    """Enqueue the resume this resolved decision earns, or say why not.
+
+    ``None`` means the decision unblocks nothing: it is unresolved, its outcome
+    is not one that lifts a block, or the WorkUnit is not ``BLOCKED``. Only
+    `RetryOverridden` qualifies for now; a denial upholds the budget and a
+    clarification answers a question, and neither is permission to run. An
+    ``APPROVAL`` on a WorkUnit that halted ``WAITING_FOR_OPERATOR`` has the
+    same delivery gap but different unblocking semantics, so extending this
+    predicate is a decision for its own change, not a case quietly added here.
+
+    Everything is re-read from the durable request row rather than taken from
+    the caller, so the fresh resolution and the already-resolved replay are the
+    same operation, and `repo.enqueue_resume` coalesces, so calling it twice
+    ensures one delivery rather than two.
+
+    The WorkUnit-status gate is why a ``WAITING_FOR_OPERATOR`` unit keeps its
+    existing durable wake untouched: its milestone is parked inside a live root
+    execution, and starting a rival continuation under it is exactly what a
+    resume of a running unit must not do.
+    """
+
+    request = repo.get_decision_request(request_id)
+    if (
+        request is None
+        or request.status is not DecisionRequestStatus.RESOLVED
+        or request.decision is None
+    ):
+        return None
+    outcome = decision_outcome(
+        request.request_kind,
+        request.decision,
+        request.decision_payload,
+        decided_by=request.decided_by or "operator",
+    )
+    if not isinstance(outcome, RetryOverridden):
+        return None
+    unit = repo.get_work_unit(work_unit_id)
+    if unit.status is not WorkUnitStatus.BLOCKED:
+        return None
+    refusal = resume_refusal() if resume_refusal is not None else None
+    if refusal is not None:
+        return {
+            "enqueued": False,
+            "reason": f"{refusal}; the decision is recorded, resume manually once cleared",
+        }
+    if not repo.enqueue_resume(work_unit_id):
+        return {
+            "enqueued": False,
+            "reason": (
+                "a pending START delivery already exists for this work unit and "
+                "will run the same root workflow"
+            ),
+        }
+    return {
+        "enqueued": True,
+        "reason": (
+            "the approved override unblocks this BLOCKED work unit; a pending "
+            "RESUME delivery awaits the enqueue drainer"
+        ),
     }
 
 

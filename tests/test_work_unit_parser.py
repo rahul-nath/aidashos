@@ -275,3 +275,242 @@ def test_the_banner_alone_names_the_project_it_meant() -> None:
     )
 
     assert banner_only.declared_target_project_id == "local_first_agent_os"
+
+
+# --------------------------------------------------------------------------- #
+# Fenced text is quotation
+# --------------------------------------------------------------------------- #
+
+
+def _parse(text: str):
+    return parse_design_doc(text, design_doc_id="doc", source_path=None)
+
+
+def test_a_fenced_milestone_is_an_example_not_a_declaration() -> None:
+    """The sparse template's own trap, caught where the template promised.
+
+    The template fences a `### Milestone 0:` example and its comment says the
+    fence keeps it an example. Until fences became quotation that was false:
+    every draft compiled with a fake PLAN milestone named "Write the title as
+    an outcome, not a task" that nobody wrote.
+    """
+
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+## Authoring Notes
+
+Copy the shape below, once per milestone.
+
+```markdown
+### Milestone 0: Write the title as an outcome, not a task
+
+Phase: PLAN
+Acceptance: one checkable sentence per line
+Artifacts: implementation_plan
+```
+"""
+    )
+
+    parsed = _parse(document)
+
+    keys = [candidate.declared_key for candidate in parsed.milestone_candidates]
+    assert "0" not in keys
+    assert keys == ["a", "b", "c", "d", "e", "f"]
+
+
+def test_a_fenced_section_heading_is_not_a_section_boundary() -> None:
+    """A quoted `## Permission Envelope` must not duplicate the real one."""
+
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+## Permission Envelope
+
+Autonomous permissions:
+- read_repo_context
+
+## Review Transcript
+
+The senior's reply, quoted verbatim:
+
+```markdown
+I restated the contract.
+
+## Permission Envelope
+
+Autonomous permissions:
+- deploy
+```
+"""
+    )
+
+    parsed = _parse(document)
+
+    envelope_sections = [
+        section for section in parsed.sections if section.kind is SectionKind.PERMISSION_ENVELOPE
+    ]
+    assert len(envelope_sections) == 1
+    assert not any(item.code == "duplicate_permission_envelope" for item in parsed.diagnostics)
+    assert parsed.permission_envelope is not None
+    assert all(action.value != "deploy" for action in parsed.permission_envelope.autonomous)
+
+
+def test_a_fenced_field_inside_a_milestone_body_stays_an_example() -> None:
+    document = ACCEPTANCE_DESIGN_DOC.replace(
+        "Phase: PLAN\n",
+        """Phase: PLAN
+Description: the field syntax is, for example:
+
+```text
+Executor: review.operator
+Approval: required
+```
+
+""",
+        1,
+    )
+
+    parsed = _parse(document)
+
+    milestone = next(c for c in parsed.milestone_candidates if c.declared_key == "a")
+    assert milestone.executor_kind is None
+    assert milestone.requires_operator_approval is False
+
+
+def test_an_unterminated_fence_quotes_to_the_end_of_the_document() -> None:
+    """What the fence means in rendered Markdown, applied rather than repaired."""
+
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+## Trailing Example
+
+```markdown
+### Milestone 99: never real
+
+Phase: IMPLEMENT
+Acceptance: never
+"""
+    )
+
+    parsed = _parse(document)
+
+    assert "99" not in [candidate.declared_key for candidate in parsed.milestone_candidates]
+
+
+def test_fence_masking_does_not_shift_source_spans() -> None:
+    """Diagnostics must keep pointing at real characters of the original text."""
+
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+```text
+a fenced digression long enough to shift offsets if masking ever changed length
+```
+
+### Milestone Z: declared after the fence
+
+Phase: IMPLEMENT
+Depends on: nothing_declares_this
+Acceptance: compiles
+"""
+    )
+
+    parsed = _parse(document)
+
+    diagnostic = next(item for item in parsed.diagnostics if item.code == "unresolved_dependency")
+    assert diagnostic.span is not None
+    assert "Milestone Z" in document[diagnostic.span.start : diagnostic.span.end]
+
+
+# --------------------------------------------------------------------------- #
+# Headings match exactly, or not at all
+# --------------------------------------------------------------------------- #
+
+
+def test_a_heading_containing_a_known_phrase_is_not_that_section() -> None:
+    """The substring traps, closed.
+
+    Each of these classified as a real section because it contains a known
+    phrase: a proposed envelope became the envelope, an exclusion list became
+    requirements, a class name became rollout policy.
+    """
+
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+## Permission Envelope (Proposed)
+
+Autonomous permissions:
+- deploy
+
+## Not in scope
+
+- Everything here is excluded.
+
+## RollbackAdapter
+
+A class, not a rollout plan.
+"""
+    )
+
+    parsed = _parse(document)
+
+    assert parsed.permission_envelope is None
+    assert "Everything here is excluded." not in parsed.requirements
+    assert parsed.rollout == ()
+    unknown = {section.heading for section in parsed.unknown_sections}
+    assert {"Permission Envelope (Proposed)", "Not in scope", "RollbackAdapter"} <= unknown
+
+
+def test_an_alias_heading_classifies_and_names_its_canonical_form() -> None:
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+## Open Questions
+
+- BLOCKING: which registry does this bind to?
+"""
+    )
+
+    parsed = _parse(document)
+
+    assert any("which registry" in item for item in parsed.unresolved_questions)
+    alias = next(item for item in parsed.diagnostics if item.code == "alias_heading")
+    assert alias.severity is DiagnosticSeverity.INFO
+    assert "unresolved questions" in alias.message
+
+
+def test_a_canonical_heading_emits_no_alias_diagnostic() -> None:
+    parsed = _parse(ACCEPTANCE_DESIGN_DOC)
+
+    assert not any(item.code == "alias_heading" for item in parsed.diagnostics)
+
+
+def test_a_dated_audit_heading_is_unknown_by_design() -> None:
+    """The date belongs in the body; an exact table does not enumerate days."""
+
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+## Current State Verification - 2026-08-17
+
+- The runtime is stopped.
+"""
+    )
+
+    parsed = _parse(document)
+
+    assert "The runtime is stopped." not in parsed.assumptions
+    assert any(
+        section.heading == "Current State Verification - 2026-08-17"
+        for section in parsed.unknown_sections
+    )

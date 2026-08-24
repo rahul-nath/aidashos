@@ -24,9 +24,28 @@ PI_DAEMON_PORT="${LOCAL_AGENT_PI_DAEMON_PORT:-8766}"
 DAEMON_DIR="${LOCAL_AGENT_DAEMON_DIR:-$HOME/.local-agent/daemon}"
 RUN_DIR="$ROOT/.local_agent/run"
 
+# `--force` skips the ledger question below. An unrecognised argument is an
+# error rather than something to ignore, because a typo that quietly became an
+# ordinary stop would be the exact thing this script now asks before doing.
+FORCE=false
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=true ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      echo "Usage: stop-agent-runtime.sh [--force]" >&2
+      exit 2
+      ;;
+  esac
+done
+
 LAUNCH_LABELS=(
   com.rahul.local-first-agent.session-daemon
   com.rahul.local-first-agent.lifecycle-maintenance
+  # Installed by scripts/launchd/install.sh and never bootstrapped by the start
+  # script, which brings Postgres up through Docker Compose instead. It is on
+  # this list anyway: a stop that leaves a loaded agent behind is not a stop.
+  com.rahul.local-first-agent.postgres
   com.rahul.local-first-agent.pi-daemon
   com.rahul.local-first-agent.whisper
   com.rahul.local-first-agent.llama
@@ -74,8 +93,10 @@ wait_for_exit() {
 }
 
 # Eject launchd-managed daemons from the user domain so they don't respawn
-# under us when we kill their PIDs below. Per-session: at next login, launchd
-# re-bootstraps from ~/Library/LaunchAgents.
+# under us when we kill their PIDs below. This is durable rather than
+# per-session: the plists live outside ~/Library/LaunchAgents, so nothing
+# re-bootstraps them at the next login and only start-agent-runtime.sh brings
+# them back.
 bootout_launch_agents() {
   local label
   for label in "${LAUNCH_LABELS[@]}"; do
@@ -149,6 +170,63 @@ stop_repo_llama_processes() {
   done
 }
 
+# Whether the runtime is doing work, asked of the coordination ledger. The
+# answer is the first line of the output; every line after it names the facts
+# that produced it. A check that could not run at all is folded into `unknown`
+# here, so the caller below branches on one vocabulary rather than on a word and
+# an exit status separately.
+runtime_activity() {
+  local report errors
+  errors="$(mktemp)"
+  if report="$(uv run local-agent runtime-activity 2>"$errors")"; then
+    printf '%s\n' "$report"
+  else
+    printf 'unknown\nthe runtime activity check could not run:\n%s\n' "$(cat "$errors")"
+  fi
+  rm -f "$errors"
+}
+
+# Everything below this point is destructive: it boots out both resident loops,
+# kills the model servers and the daemons, and stops Postgres. A milestone
+# executing right now coordinates through the ledger that goes down with them,
+# and its frontier process has already spent quota, so a stop taken at the wrong
+# moment destroys that work rather than deferring it.
+#
+# The terminal hook has asked this question since the runtime lifetime work, but
+# it asked on the path where a closing terminal fired the stop by accident. That
+# path is gone: nothing starts or stops this runtime by itself any more, so this
+# script is the only way to stop it and therefore the only place left to ask.
+#
+# `unknown` refuses alongside `busy`, which is the whole point rather than
+# caution. An unreadable ledger is not evidence of idleness, and only evidence
+# of idleness may authorise a destructive stop: refusing costs an idle runtime
+# nobody needed, and proceeding costs the work.
+refuse_unless_idle() {
+  local report answer
+  report="$(runtime_activity)"
+  answer="$(printf '%s\n' "$report" | head -n 1)"
+
+  if [ "$answer" = "idle" ]; then
+    return 0
+  fi
+
+  local reason
+  case "$answer" in
+    busy) reason="work is in flight" ;;
+    *) reason="whether work is in flight could not be determined" ;;
+  esac
+
+  {
+    printf 'Refusing to stop (%s): %s.\n' "$answer" "$reason"
+    printf '\n'
+    printf '%s\n' "$report" | tail -n +2
+    printf '\n'
+    printf 'Ask again:   (cd %s && uv run local-agent runtime-activity)\n' "$ROOT"
+    printf 'Stop anyway: %s/scripts/stop-agent-runtime.sh --force\n' "$ROOT"
+  } >&2
+  exit 1
+}
+
 flush_session_memory() {
   if curl --connect-timeout 2 --max-time 5 -fsS "http://127.0.0.1:${SESSION_DAEMON_PORT}/health" >/dev/null 2>&1; then
     echo "Flushing session memory"
@@ -167,6 +245,14 @@ stop_compose_services() {
   echo "Stopping local Docker Compose infrastructure"
   docker compose stop "${COMPOSE_SERVICES[@]}" >/dev/null 2>&1 || true
 }
+
+# Before the flush, not after it: the flush writes, and a stop this script is
+# about to refuse should not have moved anything first.
+if [ "$FORCE" = "true" ]; then
+  echo "Stopping without asking the ledger (--force)."
+else
+  refuse_unless_idle
+fi
 
 flush_session_memory
 

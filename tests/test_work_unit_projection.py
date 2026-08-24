@@ -57,6 +57,9 @@ def test_the_view_carries_everything_the_cockpit_must_show(work_unit_ledger: Pat
     assert view.status is WorkUnitStatus.SUCCEEDED
     assert [item.phase for item in view.phases] == list(ORDERED_PHASES)
     assert [item.stable_key for item in view.milestones] == ["a", "b", "c", "d", "e", "f"]
+    planned = next(item for item in view.milestones if item.stable_key == "a")
+    assert isinstance(planned.description, str)
+    assert planned.acceptance_criteria == ("a written implementation plan exists",)
     assert view.blocking.kind == "NONE"
     assert view.pending_decisions == ()
     assert {item.artifact_type for item in view.artifacts} == {

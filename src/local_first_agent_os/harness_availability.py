@@ -44,7 +44,6 @@ import contextlib
 import logging
 import re
 from collections.abc import Iterable
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -65,6 +64,7 @@ from .staffing import (
     BenchSlot,
     FrontierHarness,
     LocalHarness,
+    Staffing,
     Tier,
     classify_harness,
 )
@@ -155,9 +155,7 @@ def _lease_failure_text(result: Any) -> str:
     capture = result.get("command_capture")
     if not isinstance(capture, dict):
         return ""
-    return "\n".join(
-        str(capture.get(field) or "") for field in ("stdout", "stderr")
-    ).strip()
+    return "\n".join(str(capture.get(field) or "") for field in ("stdout", "stderr")).strip()
 
 
 def _harness_of(worker_id: str) -> FrontierHarness | None:
@@ -343,7 +341,7 @@ def read_spent_quotas(
 
 
 def check_harness_availability(
-    bench: Bench | None = None,
+    bench: Bench | Staffing | None = None,
     *,
     now: datetime | None = None,
     cooldown: timedelta = USAGE_LIMIT_COOLDOWN,
@@ -353,6 +351,12 @@ def check_harness_availability(
     Both halves, for a caller that can pay for both: this is what an operator
     door asks, and a door is the one place where spending a second on subprocess
     probes is the cheapest thing in the interaction.
+
+    Handed a `Staffing`, the probe covers every vendor in play - the seated
+    pairing and every pairing it can escape to - because a door that probed only
+    the seated vendors would leave each escape `HarnessUnknown`, and an unknown
+    escape is one the planner correctly declines to move onto. The door would
+    then refuse an outage that a declared, working fallback could have absorbed.
 
     The ledger half being best-effort is what keeps that composition honest. A
     coordination store that cannot be reached is a condition the door already has
@@ -398,16 +402,26 @@ def _unspent_frontier_peer(bench: Bench, spent: frozenset[FrontierHarness]) -> B
     return None
 
 
-def _frontier_models_in_use(bench: Bench, *, excluding: Tier) -> frozenset[str]:
-    """The models other frontier tiers are holding right now."""
+def _frontier_models_in_use(
+    bench: Bench, *, excluding: Tier
+) -> frozenset[tuple[FrontierHarness, str | None]]:
+    """The (harness, model) pairs other frontier tiers are holding right now.
 
-    return frozenset(
-        slot.model
-        for tier, slot in bench.items()
-        if tier is not excluding
-        and slot.model
-        and not isinstance(classify_harness(slot.harness), LocalHarness)
-    )
+    The pair rather than the model alone, for the reason `collapsed_cross_checks`
+    already gives: `None` is a model - the harness's own default - and not the
+    absence of one. A comparison that dropped it could not see two seats running
+    one CLI's default.
+    """
+
+    in_use: set[tuple[FrontierHarness, str | None]] = set()
+    for tier, slot in bench.items():
+        if tier is excluding:
+            continue
+        kind = classify_harness(slot.harness)
+        if isinstance(kind, LocalHarness):
+            continue
+        in_use.add((kind, slot.model))
+    return frozenset(in_use)
 
 
 def _replacement_for(
@@ -415,50 +429,124 @@ def _replacement_for(
 ) -> BenchSlot | None:
     """Where a spent tier goes, and on which model once it gets there.
 
-    Two decisions, and only the first one used to be made. `_unspent_frontier_peer`
-    answers the harness question by handing back another tier's whole slot, model
-    included - so a spent senior landed on the staff seat's model and the bench
-    ran one model implementing and reviewing its own change. `collapsed_cross_checks`
-    then reported that the cross-check was gone, which is the correct thing to say
-    and not the same as keeping it.
+    Two decisions, and they are asked in the order an operator declared them.
+    The tier's own `backup_models` answer both at once, because a backup names
+    its harness as well as its model; only when none applies does
+    `_unspent_frontier_peer` answer the harness question by handing back another
+    tier's whole slot.
 
-    The model question is answered from the spent tier's own `backup_models`,
-    which is what finally reads that field. A backup is taken only when it
-    differs from every model another frontier tier holds, because the entire
-    reason to prefer it over the peer's model is that it restores some variance
-    between implementer and reviewer; a backup that names the peer's own model
-    buys nothing and is skipped rather than applied.
+    That order is what makes the backup an escape rather than a garnish. It used
+    to run the other way: the peer decided the harness and a backup could only
+    override the model, so a bench whose every frontier slot named one spent
+    vendor found no peer, returned `None` before reading a backup at all, and
+    reported `TierUnstaffable` while holding a written-down way out. Which is
+    exactly the bench an operator writes during an outage, so the escape hatch
+    was unreachable in the one situation it exists for.
 
-    The backup ids are model names for whichever harness replaces the tier, and
-    like every model id in this system they are unvalidated and passed verbatim -
+    A backup is skipped when its harness is spent, when its harness is local
+    (the substitution `_unspent_frontier_peer` refuses, for the reason
+    `TierRestaffed` gives), or when its model is one another frontier tier
+    already holds. The last of those is the variance rule the peer path also
+    serves: the reason to prefer a backup over the peer's own model is that it
+    keeps implementer and reviewer apart, and a backup naming the peer's model
+    buys nothing.
+
+    Model ids are unvalidated and passed verbatim, as everywhere in this system -
     the operator proves them with the probe `configs/staffing.toml` documents. An
-    id that cannot run on the replacement harness fails at spawn, exactly as a
-    typo in the primary model does.
+    id that cannot run on its declared harness fails at spawn, exactly as a typo
+    in the primary model does. What can no longer happen is a *correct* id
+    reaching the wrong CLI.
 
     Falls back to the peer's own slot when the tier declares no usable backup, so
     a bench that says nothing behaves exactly as it did.
     """
 
-    peer = _unspent_frontier_peer(bench, spent)
-    if peer is None:
-        return None
     configured = bench.get(tier)
-    if configured is None:
-        return peer
-    in_use = _frontier_models_in_use(bench, excluding=tier)
-    for candidate in configured.backup_models:
-        if candidate and candidate not in in_use:
-            return replace(peer, model=candidate)
-    return peer
+    if configured is not None:
+        in_use = _frontier_models_in_use(bench, excluding=tier)
+        for candidate in configured.backup_models:
+            kind = classify_harness(candidate.harness)
+            if isinstance(kind, LocalHarness) or kind in spent:
+                continue
+            if (kind, candidate.model) in in_use:
+                continue
+            # Built from the configured slot rather than from a peer, because
+            # this path has no peer to borrow from. Capacity is the tier's own
+            # either way - `TierRestaffed.slot` says how many of a tier may run
+            # is a statement about the tier - and the effort knob comes from the
+            # backup, since it is a word in the replacement provider's
+            # vocabulary and not the spent one's.
+            return BenchSlot(
+                harness=candidate.harness,
+                model=candidate.model,
+                capacity=configured.capacity,
+                reasoning_effort=candidate.reasoning_effort,
+            )
+    return _unspent_frontier_peer(bench, spent)
+
+
+def _paired_tier_staffing(
+    staffing: Staffing, spent: frozenset[FrontierHarness], *, hours: int
+) -> dict[Tier, TierStaffing]:
+    """The two frontier seats, staffed as the one decision they are declared as.
+
+    The pair moves together or not at all. That is not a preference, it is the
+    operator's matrix (2026-08-23): when codex goes out, staff moves from Opus
+    to Fable even though claude is fine, because "who reviews the implementer"
+    changed the moment the implementer did. Per-tier restaffing could not say
+    that - it only moved seats whose own harness was spent, so the untouched
+    seat kept a reviewer chosen against an implementer that was no longer
+    there.
+
+    Where the pair goes is `Staffing.pairing_avoiding`: the first declared
+    fallback pairing that avoids every spent harness. The landing is therefore
+    itself a checked `FrontierPairing` - implementer and reviewer arrive
+    together, already proven distinct - rather than whatever two independent
+    escapes happened to compose.
+
+    Nothing declared avoiding the outage means both seats report
+    `TierUnstaffable` together. Half-staffing the pair - implementing with no
+    reviewer standing behind it - is the failure mode the pairing type exists
+    to remove, so it is not produced here either.
+    """
+
+    seats = staffing.seated.seats()
+    touched = sorted(kind.value for kind in staffing.seated.frontier_harnesses() & spent)
+    if not touched:
+        return {tier: TierServed(tier=tier, configured=slot) for tier, slot in seats.items()}
+    detail = (
+        f"{', '.join(touched)} reported a usage limit within the last {hours}h"
+        f" and the pair staffs together"
+    )
+    target = staffing.pairing_avoiding(spent)
+    if target is None:
+        chain = ", ".join(staffing.seated.fallback) or "none declared"
+        return {
+            tier: TierUnstaffable(
+                tier=tier,
+                configured=slot,
+                detail=f"{detail}; no fallback pairing avoids it (chain: {chain})",
+            )
+            for tier, slot in seats.items()
+        }
+    return {
+        tier: TierRestaffed(
+            tier=tier,
+            configured=slot,
+            replacement=target.seats()[tier],
+            detail=f"{detail}; the pair moves to pairing {target.name!r}",
+        )
+        for tier, slot in seats.items()
+    }
 
 
 def staffing_around_spent_quotas(
-    bench: Bench,
+    bench: Bench | Staffing,
     spent: frozenset[FrontierHarness],
     *,
     cooldown: timedelta = USAGE_LIMIT_COOLDOWN,
 ) -> tuple[TierStaffing, ...]:
-    """How a bench staffs one dispatch, given only what the record reported.
+    """How this staffing runs one dispatch, given only what the record reported.
 
     Separate from `plan_tier_staffing` because the evidence is. That one is handed
     `HarnessReadiness` and answers "may this run start on this machine"; this one
@@ -467,15 +555,21 @@ def staffing_around_spent_quotas(
     `HarnessReady` for every harness nobody probed, which is a claim about being
     signed in that no ledger row supports.
 
-    Total over the bench it is given and over nothing else. `plan_tier_staffing`
-    accepts a whole bench or None - handed a partial one, `resolve_bench` raises
-    on the first tier the operator left out, because a door refusing a run wants
-    the complete staffing question answered. A dispatch holds whatever bench its
-    runner was built with and has no standing to demand more of it, so this walks
-    the tiers that exist and invents nothing.
+    Handed a `Staffing` - which is what the dispatch path loads - the two
+    frontier seats are decided as a pair through `_paired_tier_staffing`, and
+    only the solo tiers walk the per-tier rule below. Handed a bare `Bench`,
+    every tier walks it: a bench carries no pairing declarations, so per-tier is
+    all it can honestly support, and callers that hold one (partial synthetic
+    benches in tests, mostly) keep the pre-pairing behavior - a spent tier moves
+    to its own harness-typed `backup_models` entry first and an unspent peer's
+    slot second.
+
+    Total over the tiers it is given and over nothing else. A dispatch holds
+    whatever staffing its runner was built with and has no standing to demand
+    more of it, so this walks the tiers that exist and invents nothing.
 
     `TierUnstaffable` is reachable here and is not a refusal. It says the
-    configured harness is spent and no peer on this bench is any better, and
+    configured seating is spent and nothing declared is any better, and
     `effective_bench` keeps the configured slot for exactly that case, so the
     dispatch goes where it would have gone anyway. Refusing mid-run would strand
     work the door already admitted; a caller is expected to say it out loud
@@ -483,8 +577,15 @@ def staffing_around_spent_quotas(
     """
 
     hours = int(cooldown.total_seconds() // 3600)
+    paired: dict[Tier, TierStaffing] = {}
+    if isinstance(bench, Staffing):
+        paired = _paired_tier_staffing(bench, spent, hours=hours)
+        bench = bench.bench
     plan: list[TierStaffing] = []
     for tier in Tier:
+        if tier in paired:
+            plan.append(paired[tier])
+            continue
         slot = bench.get(tier)
         if slot is None:
             continue
@@ -499,7 +600,10 @@ def staffing_around_spent_quotas(
                 TierUnstaffable(
                     tier=tier,
                     configured=slot,
-                    detail=f"{detail} and no other harness on this bench is unspent",
+                    detail=(
+                        f"{detail}, this tier declares no backup on an unspent harness, "
+                        "and no other harness on this bench is unspent"
+                    ),
                 )
             )
             continue
@@ -521,7 +625,7 @@ back early by any amount that matters.
 
 
 def build_quota_claim_gate(
-    bench: Bench,
+    bench: Bench | Staffing,
     *,
     settings: Settings | None = None,
     ttl_seconds: float = QUOTA_GATE_TTL_SECONDS,
@@ -529,23 +633,28 @@ def build_quota_claim_gate(
     clock: Any = None,
     now_fn: Any = None,
 ) -> Any:
-    """Answer, for one tier, whether the bench can staff it at this moment.
+    """Answer, for one tier, whether the staffing can seat it at this moment.
 
     This is the "bench answers first" half that `_NO_FAULT_OUTCOMES` names as the
     precondition for exempting `USAGE_LIMIT` from the attempt budget. A tier
-    whose configured harness is spent and whose bench offers no unspent peer is
-    `TierUnstaffable`, and claiming an intent for it can only produce one
-    outcome: a dispatch into a harness that will refuse, charged to the
-    milestone.
+    whose seating is spent with nothing declared to move to is `TierUnstaffable`,
+    and claiming an intent for it can only produce one outcome: a dispatch into
+    a harness that will refuse, charged to the milestone.
+
+    Handed a `Staffing`, the answer is pair-shaped exactly as the restaffing is:
+    the two frontier seats become unclaimable together and claimable together,
+    because a pair that could claim implementation while review was unstaffable
+    would run the half-escape the pairing type exists to remove.
 
     Returns a callable rather than a value because the answer expires. A local
-    harness is always claimable, and so is a tier this bench does not staff -
+    harness is always claimable, and so is a tier this staffing does not seat -
     refusing there would strand work over a quota that cannot apply to it.
     """
 
     import time as _time
 
     monotonic = clock or _time.monotonic
+    resolved: Bench = bench.bench if isinstance(bench, Staffing) else bench
     state: dict[str, Any] = {"read_at": None, "spent": frozenset()}
 
     def spent_now() -> frozenset[FrontierHarness]:
@@ -576,7 +685,7 @@ def build_quota_claim_gate(
             tier = Tier(tier_value)
         except ValueError:
             return True
-        slot = bench.get(tier)
+        slot = resolved.get(tier)
         if slot is None:
             return True
         if isinstance(classify_harness(slot.harness), LocalHarness):

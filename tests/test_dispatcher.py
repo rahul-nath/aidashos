@@ -766,13 +766,15 @@ def test_approved_gawd_dispatcher_runs_fake_frontier_clis_end_to_end(
     )
     (runtime.settings.config_dir / "staffing.toml").write_text(
         """
-[bench.staff]
+seated_pairing = "two-vendor"
+
+[pairings.two-vendor.staff]
 harness = "codex"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 capacity = 1
 
-[bench.senior]
+[pairings.two-vendor.senior]
 harness = "claude"
 capacity = 3
 
@@ -920,13 +922,15 @@ def test_recovery_staff_review_reuses_exact_commit_and_stamps_host_provenance(
     _write_linked_projects(runtime.settings.config_dir, target)
     (runtime.settings.config_dir / "staffing.toml").write_text(
         """
-[bench.staff]
+seated_pairing = "two-vendor"
+
+[pairings.two-vendor.staff]
 harness = "codex"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 capacity = 1
 
-[bench.senior]
+[pairings.two-vendor.senior]
 harness = "claude"
 capacity = 3
 

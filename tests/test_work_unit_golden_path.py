@@ -144,22 +144,34 @@ def _golden_path_config_dir(root: Path, target: Path) -> Path:
     # `pi` was launched as `claude --model gemma4`. Staffing every tier locally is
     # what makes this drive prove the fix instead of spending somebody's
     # subscription.
+    #
+    # Two different local models, because a shared seat is unrepresentable and
+    # this bench has two. `glimmer` is the registry's `deliberator`, "the first
+    # entry in this file whose model is chosen for judgment rather than for
+    # speed", so it holds the critic seat - the same shape the frontier seating
+    # uses when it puts the better critic on review.
+    #
+    # This is why the fixture copies `model_registry.toml` above: both server
+    # names have to resolve to a role the ModelManager routes, and
+    # `role_for_server_name` is what does it.
     (config_dir / "staffing.toml").write_text(
         """
-[bench.junior]
-harness = "pi"
-model = "gemma4"
-capacity = 4
+seated_pairing = "all-local"
 
-[bench.senior]
+[pairings.all-local.senior]
 harness = "pi"
 model = "gemma4"
 capacity = 2
 
-[bench.staff]
+[pairings.all-local.staff]
+harness = "pi"
+model = "glimmer"
+capacity = 1
+
+[bench.junior]
 harness = "pi"
 model = "gemma4"
-capacity = 1
+capacity = 4
 """.strip()
         + "\n",
         encoding="utf-8",

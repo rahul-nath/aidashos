@@ -170,6 +170,11 @@ class PowWowExecutionContext:
     recovery_original_task_contract: str | None = None
     recovery_permission_envelope: str | None = None
     task_ids_by_name: Mapping[str, str] | None = None
+    # The commit this run's worktrees must branch from, resolved by the
+    # work-unit engine from the milestone's dependency's settled result and
+    # carried on the intent row. None means branch from HEAD, the historical
+    # behavior and the correct one for a milestone without dependencies.
+    base_commit_sha: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return asdict(self)

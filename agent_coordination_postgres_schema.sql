@@ -301,10 +301,18 @@ CREATE TABLE IF NOT EXISTS dispatch_intents (
     -- Defaulted to '[]' rather than to a permissive set, because an intent
     -- submitted before this column existed has declared nothing, and nothing
     -- must read as the narrowest authority.
-    permitted_capabilities TEXT NOT NULL DEFAULT '[]'
+    permitted_capabilities TEXT NOT NULL DEFAULT '[]',
+    -- The commit this intent's worktree must branch from: the settled commit
+    -- of the milestone it depends on. The dependency edge used to be a bare
+    -- ordering signal, so every chained milestone's worktree was seeded from
+    -- the target repo's HEAD and never contained its predecessor's work.
+    -- NULL means seed from HEAD, which is exactly the pre-column behavior and
+    -- the correct reading for every intent submitted before it existed.
+    base_commit_sha TEXT
 );
 ALTER TABLE dispatch_intents
     ADD COLUMN IF NOT EXISTS permitted_capabilities TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE dispatch_intents ADD COLUMN IF NOT EXISTS base_commit_sha TEXT;
 CREATE INDEX IF NOT EXISTS idx_dispatch_intents_status
     ON dispatch_intents(status, created_at);
 ALTER TABLE dispatch_intents ADD COLUMN IF NOT EXISTS fanout INTEGER NOT NULL DEFAULT 1;
@@ -764,6 +772,12 @@ CREATE INDEX IF NOT EXISTS idx_work_unit_decision_requests_status
 -- database are separate physical databases. A WorkUnit row and its intent to
 -- start are committed together here; an idempotent dispatcher then hands the
 -- explicit workflow ID to DBOS and marks the row delivered only afterwards.
+--
+-- `kind` says which delivery the row asks for: 'START' is the first root
+-- execution, 'RESUME' is a continuation of a halted one, written when an
+-- operator decision unblocks a BLOCKED WorkUnit. The unique index below keeps
+-- at most one row per WorkUnit, so a delivered row is reborn as a pending
+-- RESUME rather than joined by a sibling, and repeated resume intents coalesce.
 CREATE TABLE IF NOT EXISTS work_unit_enqueue_outbox (
     outbox_id TEXT PRIMARY KEY,
     work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id),
@@ -772,12 +786,14 @@ CREATE TABLE IF NOT EXISTS work_unit_enqueue_outbox (
     compiled_plan_revision_id TEXT NOT NULL,
     compiled_plan_hash TEXT NOT NULL,
     lifecycle_profile_version INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'START',
     status TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
     last_error TEXT,
     created_at DOUBLE PRECISION NOT NULL,
     delivered_at DOUBLE PRECISION
 );
+ALTER TABLE work_unit_enqueue_outbox ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'START';
 CREATE UNIQUE INDEX IF NOT EXISTS idx_work_unit_enqueue_outbox_unit
     ON work_unit_enqueue_outbox(work_unit_id);
 CREATE INDEX IF NOT EXISTS idx_work_unit_enqueue_outbox_status

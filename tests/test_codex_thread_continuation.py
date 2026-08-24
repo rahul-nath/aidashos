@@ -214,9 +214,7 @@ def test_compatible_reader_thread_becomes_resume_existing(tmp_path: Path) -> Non
             )
         )
     )
-    expected_target_permission = executor._permission_envelope_sha256(
-        _implementation_task()
-    )
+    expected_target_permission = executor._permission_envelope_sha256(_implementation_task())
     assert decision == ResumeExisting(
         thread_id=thread_id,
         source_task_name="senior_read",
@@ -272,9 +270,7 @@ def test_resume_refuses_an_unrecognized_source_permission_envelope(tmp_path: Pat
         source_revision="b" * 40,
     )
 
-    assert decision == StartFreshBounded(
-        "continuation source permission envelope mismatch"
-    )
+    assert decision == StartFreshBounded("continuation source permission envelope mismatch")
 
 
 def test_resume_command_keeps_reading_as_typed_disputable_evidence(tmp_path: Path) -> None:

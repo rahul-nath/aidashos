@@ -401,9 +401,7 @@ class ReasoningPolicy(BaseModel):
             return value
         match = REASONING_SHORTHAND.match(value.strip())
         if match is None:
-            raise ValueError(
-                f"reasoning must be 'off', 'full', or 'bounded(N)'; got {value!r}"
-            )
+            raise ValueError(f"reasoning must be 'off', 'full', or 'bounded(N)'; got {value!r}")
         keyword, budget = match.groups()
         if keyword:
             return {"mode": keyword}
@@ -530,6 +528,7 @@ class ModelSpec(BaseModel):
                     strength = "low" if budget <= 256 else "medium"
             return {"chat_template_kwargs": {"reasoning_strength": strength}}
         assert_never(self.reasoning_dialect)
+
     # Long-edge pixel budget for images sent to this model. Beyond a model's own
     # internal cap the extra pixels are discarded after costing decode time, so
     # the ceiling belongs to the destination model rather than the caller.
@@ -1048,6 +1047,7 @@ class ApprovalRequestType(StrEnum):
     EXTERNAL_COMMS = "EXTERNAL_COMMS"
     CODE_MERGE = "CODE_MERGE"
     MODEL_ESCALATION = "MODEL_ESCALATION"
+    REVIEW_ESCALATION = "REVIEW_ESCALATION"
     GENERAL = "GENERAL"
 
 
@@ -1726,7 +1726,6 @@ SKILLS: list[SkillSpec] = [
 # ---------------------------------------------------------------------------
 # Canonical saga stages
 # ---------------------------------------------------------------------------
-
 
 
 # ---------------------------------------------------------------------------

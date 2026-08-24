@@ -876,6 +876,167 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "IntegrationAccepted": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "message": {
+            "default": "The approved request was handed to the refinery.",
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "state": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "State",
+            "type": "string"
+          },
+          "target_project_id": {
+            "title": "Target Project Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "request_id",
+          "target_project_id",
+          "state",
+          "message"
+        ],
+        "title": "IntegrationAccepted",
+        "type": "object"
+      },
+      "IntegrationBlocked": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Request Id"
+          },
+          "state": {
+            "const": "blocked",
+            "default": "blocked",
+            "title": "State",
+            "type": "string"
+          },
+          "target_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Project Id"
+          }
+        },
+        "required": [
+          "approval_id",
+          "request_id",
+          "target_project_id",
+          "state",
+          "message"
+        ],
+        "title": "IntegrationBlocked",
+        "type": "object"
+      },
+      "IntegrationComplete": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "message": {
+            "default": "The approved request is already integrated.",
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "state": {
+            "const": "complete",
+            "default": "complete",
+            "title": "State",
+            "type": "string"
+          },
+          "target_project_id": {
+            "title": "Target Project Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "request_id",
+          "target_project_id",
+          "state",
+          "message"
+        ],
+        "title": "IntegrationComplete",
+        "type": "object"
+      },
+      "IntegrationRunning": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_id": {
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "message": {
+            "default": "The refinery is already integrating this request.",
+            "title": "Message",
+            "type": "string"
+          },
+          "request_id": {
+            "title": "Request Id",
+            "type": "string"
+          },
+          "state": {
+            "const": "running",
+            "default": "running",
+            "title": "State",
+            "type": "string"
+          },
+          "target_project_id": {
+            "title": "Target Project Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "request_id",
+          "target_project_id",
+          "state",
+          "message"
+        ],
+        "title": "IntegrationRunning",
+        "type": "object"
+      },
       "IntentFacts": {
         "additionalProperties": false,
         "description": "One dispatch intent, for the window before any lease exists.\n\nDeliberately smaller than ``LeaseFacts``. An intent has no agent, no\nsupervisor, and no persistence lane, and the previous flattened shape made the\ncockpit render four empty rows claiming otherwise.",
@@ -1298,6 +1459,14 @@
       },
       "MilestoneView": {
         "properties": {
+          "acceptance_criteria": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Acceptance Criteria",
+            "type": "array"
+          },
           "attempt": {
             "title": "Attempt",
             "type": "integer"
@@ -1320,6 +1489,11 @@
             },
             "title": "Dependencies",
             "type": "array"
+          },
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
           },
           "dispatch_intent_id": {
             "anyOf": [
@@ -1432,6 +1606,8 @@
           "attempt",
           "requires_operator_approval",
           "milestone_execution_id",
+          "description",
+          "acceptance_criteria",
           "dependencies",
           "required_artifacts",
           "produced_artifacts",
@@ -1444,6 +1620,117 @@
         ],
         "title": "MilestoneView",
         "type": "object"
+      },
+      "NextCommand": {
+        "description": "One command an operator might run next, and what running it would mean.",
+        "properties": {
+          "command": {
+            "title": "Command",
+            "type": "string"
+          },
+          "intent": {
+            "title": "Intent",
+            "type": "string"
+          },
+          "precondition": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Precondition"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "refusal_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refusal Code"
+          },
+          "status": {
+            "$ref": "#/components/schemas/NextCommandStatus"
+          }
+        },
+        "required": [
+          "command",
+          "intent",
+          "status",
+          "precondition",
+          "reason",
+          "refusal_code"
+        ],
+        "title": "NextCommand",
+        "type": "object"
+      },
+      "NextCommandSet": {
+        "description": "Every next command for one printed result, plus the headline above them.",
+        "properties": {
+          "commands": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/NextCommand"
+            },
+            "title": "Commands",
+            "type": "array"
+          },
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "headline": {
+            "title": "Headline",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": "next_commands.v1",
+            "default": "next_commands.v1",
+            "title": "Schema Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "headline",
+          "detail",
+          "commands"
+        ],
+        "title": "NextCommandSet",
+        "type": "object"
+      },
+      "NextCommandStatus": {
+        "description": "Whether the operator can run this now, and if not, why not.",
+        "enum": [
+          "READY",
+          "REFUSED",
+          "UNPROVED"
+        ],
+        "title": "NextCommandStatus",
+        "type": "string"
       },
       "OperatorDecision": {
         "description": "The wire spelling of an operator's answer.\n\nKept because it is what HTTP carries and what the decision row stores. It is\ndeliberately *not* what the lifecycle reasons about: on its own it cannot say\nwhich kind of request it belongs to, so an `ANSWERED` and an `APPROVED` are\ninterchangeable to any code holding one. `decision_outcome` turns this into\nthe typed pairing below at the one boundary where the two are both known.",
@@ -2194,6 +2481,26 @@
           "prompt"
         ],
         "title": "QuestionRequest",
+        "type": "object"
+      },
+      "ResumeDeliveryView": {
+        "additionalProperties": false,
+        "description": "What a decision that unblocks a BLOCKED WorkUnit did about resuming it.",
+        "properties": {
+          "enqueued": {
+            "title": "Enqueued",
+            "type": "boolean"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "enqueued",
+          "reason"
+        ],
+        "title": "ResumeDeliveryView",
         "type": "object"
       },
       "ReviseWalkthru": {
@@ -3393,7 +3700,7 @@
       },
       "WorkUnitDecisionResult": {
         "additionalProperties": false,
-        "description": "What submitting one operator decision did.\n\n``applied`` false with a ``reason`` is the idempotent case: the request was\nalready resolved, and saying so is not an error.",
+        "description": "What submitting one operator decision did.\n\n``applied`` false with a ``reason`` is the idempotent case: the request was\nalready resolved, and saying so is not an error.\n\n``resume`` is absent for the decisions that unblock nothing; present, it\nsays whether a RESUME delivery now awaits the enqueue drainer and why or\nwhy not.",
         "properties": {
           "applied": {
             "title": "Applied",
@@ -3436,6 +3743,16 @@
             "title": "Request Id",
             "type": "string"
           },
+          "resume": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ResumeDeliveryView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "sequence_number": {
             "anyOf": [
               {
@@ -3459,7 +3776,8 @@
           "applied",
           "milestone_key",
           "sequence_number",
-          "reason"
+          "reason",
+          "resume"
         ],
         "title": "WorkUnitDecisionResult",
         "type": "object"
@@ -4057,6 +4375,128 @@
           }
         },
         "summary": "Apple Notes Sync"
+      }
+    },
+    "/approvals/{approval_id}/integration": {
+      "get": {
+        "operationId": "integration_status_approvals__approval_id__integration_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "approval_id",
+            "required": true,
+            "schema": {
+              "title": "Approval Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "discriminator": {
+                    "mapping": {
+                      "accepted": "#/components/schemas/IntegrationAccepted",
+                      "blocked": "#/components/schemas/IntegrationBlocked",
+                      "complete": "#/components/schemas/IntegrationComplete",
+                      "running": "#/components/schemas/IntegrationRunning"
+                    },
+                    "propertyName": "state"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/IntegrationAccepted"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IntegrationRunning"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IntegrationComplete"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IntegrationBlocked"
+                    }
+                  ],
+                  "title": "Response Integration Status Approvals  Approval Id  Integration Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Integration Status"
+      },
+      "post": {
+        "operationId": "trigger_integration_approvals__approval_id__integration_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "approval_id",
+            "required": true,
+            "schema": {
+              "title": "Approval Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "discriminator": {
+                    "mapping": {
+                      "accepted": "#/components/schemas/IntegrationAccepted",
+                      "blocked": "#/components/schemas/IntegrationBlocked",
+                      "complete": "#/components/schemas/IntegrationComplete",
+                      "running": "#/components/schemas/IntegrationRunning"
+                    },
+                    "propertyName": "state"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/components/schemas/IntegrationAccepted"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IntegrationRunning"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IntegrationComplete"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IntegrationBlocked"
+                    }
+                  ],
+                  "title": "Response Trigger Integration Approvals  Approval Id  Integration Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Trigger Integration"
       }
     },
     "/authoring/design-docs/compile": {
@@ -5116,6 +5556,46 @@
           }
         },
         "summary": "Work Unit Events"
+      }
+    },
+    "/work-units/{work_unit_id}/next-commands": {
+      "get": {
+        "description": "What an operator does next, derived rather than written twice.\n\nThe terminal has printed this block since the next-command affordance\nshipped; the cockpit had no equivalent, so an operator reading a BLOCKED\npill in the browser was told the work stopped and not what to do about\nit. `next_commands_for_view` is a pure function of the same view this\nAPI already serves, so exposing it costs one route and keeps one rule\ntable answering both surfaces.",
+        "operationId": "work_unit_next_commands_work_units__work_unit_id__next_commands_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "work_unit_id",
+            "required": true,
+            "schema": {
+              "title": "Work Unit Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NextCommandSet"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Work Unit Next Commands"
       }
     },
     "/work-units/{work_unit_id}/resume": {

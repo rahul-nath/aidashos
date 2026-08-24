@@ -241,13 +241,15 @@ verification_commands = ["test -f NEXT_STEP.md"]
 
 
 _STAFFING_TWO_SENIOR_SEATS = """
-[bench.staff]
+seated_pairing = "two-vendor"
+
+[pairings.two-vendor.staff]
 harness = "codex"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
 capacity = 1
 
-[bench.senior]
+[pairings.two-vendor.senior]
 harness = "claude"
 capacity = 2
 

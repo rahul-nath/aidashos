@@ -194,6 +194,7 @@ def _insert_dispatch_intent_row(
     idempotency_key: str | None = None,
     notify_workflow_id: str | None = None,
     permitted_capabilities: str = "[]",
+    base_commit_sha: str | None = None,
 ) -> str:
     """Insert one intent, or return the incumbent that already claimed its key.
 
@@ -210,10 +211,10 @@ def _insert_dispatch_intent_row(
             intent_id, tier, kind, prompt, target_project_id, source,
             status, created_at, fanout, allow_tiers, reduce, reducer_tier,
             parent_intent_id, intent_role, idempotency_key, notify_workflow_id,
-            permitted_capabilities
+            permitted_capabilities, base_commit_sha
         ) VALUES (
             ?, ?, ?, ?, ?, ?, '{DispatchIntentStatus.PENDING}',
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         ON CONFLICT (idempotency_key) DO NOTHING
         """,
@@ -234,6 +235,7 @@ def _insert_dispatch_intent_row(
             idempotency_key,
             notify_workflow_id,
             permitted_capabilities,
+            base_commit_sha,
         ),
     )
     if idempotency_key is None:
@@ -268,6 +270,7 @@ def submit_dispatch_intent(
     notify_workflow_id: str | None = None,
     *,
     permitted_capabilities: Sequence[str] = (),
+    base_commit_sha: str | None = None,
 ) -> dict[str, Any]:
     """Enqueue a unit of work for the reactor to dispatch to an agent tier.
 
@@ -369,6 +372,7 @@ def submit_dispatch_intent(
                 idempotency_key=idempotency_key,
                 notify_workflow_id=notify_workflow_id,
                 permitted_capabilities=capabilities_json,
+                base_commit_sha=base_commit_sha,
             )
             deduplicated = settled_intent_id != intent_id
             intent_id = settled_intent_id
@@ -844,8 +848,8 @@ def supersede_dispatch_intent(
             f"""
             INSERT INTO dispatch_intents(
                 intent_id, tier, kind, prompt, target_project_id, source,
-                status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, '{DispatchIntentStatus.PENDING}', ?)
+                status, created_at, base_commit_sha
+            ) VALUES (?, ?, ?, ?, ?, ?, '{DispatchIntentStatus.PENDING}', ?, ?)
             """,
             (
                 new_intent_id,
@@ -855,6 +859,7 @@ def supersede_dispatch_intent(
                 new_target_project_id,
                 new_source,
                 t,
+                old["base_commit_sha"],
             ),
         )
         cancel_result = json.dumps(

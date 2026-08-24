@@ -42,13 +42,9 @@ def _append(
 def _codex_reader_lease() -> tuple[str, str, str, str]:
     saga_id = str(create_saga("preserve useful Codex context")["saga_id"])
     pow_wow_id = str(
-        create_pow_wow(saga_id, "IMPLEMENT", "reuse the senior reading", "verified")[
-            "pow_wow_id"
-        ]
+        create_pow_wow(saga_id, "IMPLEMENT", "reuse the senior reading", "verified")["pow_wow_id"]
     )
-    task_id = str(
-        claim_task(pow_wow_id, "senior_read", "read independently")["task_id"]
-    )
+    task_id = str(claim_task(pow_wow_id, "senior_read", "read independently")["task_id"])
     opened = open_execution_lease(
         "reader-lease",
         "test-worker",
@@ -108,9 +104,7 @@ def test_codex_events_project_continuation_and_usage_once() -> None:
         pow_wow = c.execute(
             "SELECT consumed_tokens FROM pow_wows WHERE pow_wow_id=?", (pow_wow_id,)
         ).fetchone()
-        saga = c.execute(
-            "SELECT consumed_tokens FROM sagas WHERE saga_id=?", (saga_id,)
-        ).fetchone()
+        saga = c.execute("SELECT consumed_tokens FROM sagas WHERE saga_id=?", (saga_id,)).fetchone()
     assert pow_wow["consumed_tokens"] == 1_020
     assert saga["consumed_tokens"] == 1_020
 
