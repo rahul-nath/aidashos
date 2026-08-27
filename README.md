@@ -1,10 +1,10 @@
 # aidashos
 
-Durable orchestration of coding agents on your own machine.
-This repository is the whole product.
 
-You write a design document.
-The system compiles it into a fixed plan, runs coding agents against that plan in isolated git worktrees, verifies their output with your project's own test commands, has a different vendor's model review the diff, and stops at an approval gate before anything merges.
+You write a design document. The system compiles it into a fixed plan using AI and runs coding agents against that plan, all on your machine, with any combination of ai you can provide. This repository is the whole product.
+
+## How
+The core system design of this project is durable orchestration of coding agents on your own machine. Your "compiled" design plan is worked on in isolated git worktrees. Each agent verifies its output with your project's own test commands, has a different vendor's agent review the work that was done, and stops at a human approval gate before anything merges.
 
 ## Start here
 
