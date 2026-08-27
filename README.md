@@ -1,6 +1,6 @@
 # aidashos
 
-This a prompt builder for engineering projects. You write a design document. The system compiles it into a fixed plan using AI and runs coding agents against that plan. This all happens on your machine, with any combination of ai agents you can provide via subscription. This repository is the whole product.
+This is a production-grade prompt builder for projects. You write a design document. The system compiles it into a fixed plan using AI and runs coding agents against that plan. This all happens on your machine, with any combination of ai agents you can provide via subscription. This repository is the whole product.
 
 ## How
 The core system design of this project is durable orchestration of coding agents on your own machine. Your "compiled" design plan is worked on in isolated git worktrees. Each agent verifies its output with your project's own test commands, has a different vendor's agent review the work that was done, and stops at a human approval gate before anything merges.
