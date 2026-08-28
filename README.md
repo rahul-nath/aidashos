@@ -248,7 +248,7 @@ It is the same ritual the agents follow.
 ## Safety notes
 
 - No auto-merge, auto-deploy, spend, secret access, or external communications. These fail closed behind ledger approval requests.
-- Agent processes never get ambient shell, raw HTTP, delete, or arbitrary file access. Real-world tool actions run only through an operator allow-list (`configs/workspace_policies.toml`).
+- Real-world tool actions run only through an operator allow-list (`configs/workspace_policies.toml`).
 - [POLICIES.md](POLICIES.md) is the written policy the capability gate reads at runtime, and its content hash is pinned in code.
 
 ## License
