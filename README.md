@@ -1,11 +1,26 @@
 # aidashos
 
-This is a production-grade prompt builder for projects. You write a design document. The system compiles it into a fixed plan using AI and runs coding agents against that plan. This all happens on your machine, with any combination of ai agents you can provide via subscription. This repository is the whole product.
+aidashos is a prompt builder for executing hard projects. You write a design document, and the aidashos compiles your doc into a fixed plan. Coding agents take turns implementing that plan on your machine. This repository is the whole product.
 
-## How
-The core system design of this project is durable orchestration of coding agents on your own machine. Your "compiled" design plan is worked on in isolated git worktrees. Each agent verifies its output with your project's own test commands, has a different vendor's agent review the work that was done, and stops at a human approval gate before anything merges.
+## Who this is for
+You, if you use coding agents and want work to move accountably when running unattended, while also leaving a clear audit trail. 
 
-## Start here
+It is easiest if you drive aidashos from your AI console. But it is a terminal-first project, with a web console alongside projections for reading state and resolving approval gates.
+
+## Where the models come from
+Provide any combination of ai agents, accessed locally or via subscriptions. So you use your normal $20 / month claude / chatgpt monthly plan instead of paying in API request fees, and use local models as slots for basic ops.
+
+## Let an agent install it
+
+Paste [docs/onboarding/BOOT_PROMPT.md](docs/onboarding/BOOT_PROMPT.md) into Claude Code, Codex, or any AI tool with shell access, opened at the repo root.
+It drives the same scripts, one stage at a time so a failure is visible and fixable, and hands the two subscription sign-ins and the large model downloads back to you rather than deciding them for you.
+
+Three prompts run the whole lane: boot the stack, start the runtime and prove it, attach your own tool.
+All three live in [docs/onboarding/prompts.json](docs/onboarding/prompts.json), which is the single source for them.
+The walkthrough quotes that file and the website renders it, so a test (`tests/test_onboarding_prompts.py`) pins all three together and to the scripts they name.
+Nothing here can tell you to run a script this repository does not ship.
+
+### Or if you want to install it
 
 Two commands, in this order:
 
@@ -21,16 +36,6 @@ Windows is not supported yet.
 
 The whole path, start to finish, is [docs/onboarding/ONBOARDING.md](docs/onboarding/ONBOARDING.md), drawn as a DAG in [docs/diagrams/aidashos-onboarding-dag.png](docs/diagrams/aidashos-onboarding-dag.png).
 Stuck at any point, `./scripts/first-run-check.sh` says what is missing and prints the command that fixes it.
-
-## Let an agent install it
-
-Paste [docs/onboarding/BOOT_PROMPT.md](docs/onboarding/BOOT_PROMPT.md) into Claude Code, Codex, or any AI tool with shell access, opened at the repo root.
-It drives the same scripts, one stage at a time so a failure is visible and fixable, and hands the two subscription sign-ins and the large model downloads back to you rather than deciding them for you.
-
-Three prompts run the whole lane: boot the stack, start the runtime and prove it, attach your own tool.
-All three live in [docs/onboarding/prompts.json](docs/onboarding/prompts.json), which is the single source for them.
-The walkthrough quotes that file and the website renders it, so a test (`tests/test_onboarding_prompts.py`) pins all three together and to the scripts they name.
-Nothing here can tell you to run a script this repository does not ship.
 
 ## Drive it from the AI tool you already use
 
@@ -54,20 +59,12 @@ Every step writes a row to a local Postgres ledger as it happens, which is what 
 
 Frontier agents (Claude Code and Codex today, swappable in config) run through their own headless CLIs under your existing subscriptions.
 Local models run through llama.cpp.
-There is no hosted service, no cloud backend, and nothing reports home.
 
-## Who this is for
-
-One engineer who runs coding agents and wants the work to keep moving, accountably, when nobody is watching a screen.
-
-You drive it from a terminal, with a web console alongside for reading state and resolving approval gates.
-You should be comfortable with git, Docker, and editing a TOML file.
-It is a working personal system rather than a product, and if you do not write code it is not aimed at you yet.
-
-Interactive agent cockpits are better when you are watching the screen.
-This is built for the other half of the problem: agent work that runs unattended, repeatedly, and leaves an audit trail.
+By default, there is no hosted service, no cloud backend, and nothing reports home.
 
 ## What it does, concretely
+
+aidashos is durable orchestration of coding agents on your own mac (windows coming soon).
 
 Work starts from a document, not a prompt.
 The document declares goals, milestones, dependencies between them, how each one is verified, and what the agents are permitted to do.
@@ -83,6 +80,8 @@ Artifacts: source_patch
 ```
 
 That compiles into an immutable, hashed plan.
+
+Your "compiled" design plan is sandboxed in git worktrees as agents execute WorkUnit milestones. Each agent verifies its output against your project's test commands, has a different model vendor's agent do the review work, and stops at a human approval gate before anything merges.
 Then:
 
 ```bash
@@ -99,7 +98,7 @@ A staff BLOCK triggers a bounded revision and re-review loop.
 Staff approval stops at a pending `CODE_MERGE` request.
 It never merges, deploys, or completes a milestone on its own.
 
-Work is routed to three tiers.
+Each agent has a role which is based on skill-level and model quality. Work is routed to three tiers.
 Junior is a local model making the cheap judgment calls, senior is the frontier agent that writes code, and staff is a frontier agent from a different vendor that reviews it.
 
 A **cast** is the other shape a dispatch can take, and it varies stance instead of seniority.
@@ -113,10 +112,8 @@ The two seats are never the same vendor, so the reviewer does not share the impl
 
 ## Is there a UI, or is it terminal only?
 
-Three ways in, and the terminal is primary.
-`pi` drives the workflows and `agent-ledger` reads the ledger.
+Three ways in, and the terminal is primary. `pi` drives the workflows on terminal and `agent-ledger` reads the ledger and performs aidashos execution operations.
 
-The third is your own AI tool.
 The coordination ledger is an MCP server (`uv run agent-ledger serve`), so Claude Code, Codex, or any stdio MCP client can operate the system from the tool you already work in.
 Claude Code picks up the repo's `.mcp.json` with no setup; [skills/operate-agent-os/SKILL.md](skills/operate-agent-os/SKILL.md) carries the Codex config block and the operating ritual, including which boundaries an assistant does not cross.
 A dispatched agent inside the system gets a different, read-only surface: three tools and no way to file evidence about its own run.
@@ -133,21 +130,19 @@ It never merges, deploys, or skips a gate, and for anything past resolving a gat
 
 ## Is it durable? Can I shut the laptop and come back?
 
-Yes, and that is the design's whole bet.
-
-Work state lives in Postgres rows rather than in context windows: work units, milestones, dispatch intents, execution leases, checkpoints, and approvals.
+Yes, and that is a big chunk of this project's bet. Work state lives in Postgres rows rather than in context windows: work units, milestones, dispatch intents, execution leases, checkpoints, and approvals. 
 The background loops that drain queues and claim work are supervised, so a reboot comes back with the queue draining rather than with every service healthy and nothing moving.
+
 An agent process that dies with the lid loses only its own context window.
 The crash reconciler reaps its dead lease, and the next dispatch resumes from the ledger.
 
 Closing the laptop mid-run costs that attempt's uncommitted progress, never the system's state.
 
-## What data store backs it? Not SQLite?
+## What data store backs it?
 
-Postgres, running locally in Docker.
-The coordination ledger, the durable workflow engine (DBOS), and the retrieval vectors (pgvector) all live there.
+Postgres, running locally in Docker. The coordination ledger, the durable workflow engine (DBOS), and the retrieval vectors (pgvector) all live there.
 
-SQLite is not an operator ledger, and it cannot become one by configuration.
+No SQLite. SQLite is not an operator ledger, and it cannot become one by configuration.
 The coordination ledger's connection pool is Postgres-only (`coordination/store.py`), so no environment variable points it at a file.
 
 The SQLAlchemy layer is the softer half: `db.py` still builds a SQLite engine if `LOCAL_AGENT_DATABASE_URL` names one, and the vector columns degrade from `halfvec` to plain JSON when it does.
@@ -156,9 +151,10 @@ Nothing shipped is pointed at it, and no config, compose file, or `.env.example`
 
 ## Does it run remotely? Is it containerized?
 
-It runs on your machine, on purpose.
+ai-os runs on your private machine on purpose. There is no cloud deployment plumbing yet; that is up to you.
 
-Postgres and the optional observability stack run in Docker.
+Resources are containerized by default. Postgres and the optional observability stack run in Docker.
+
 The local model server and the frontier CLIs run as host processes, because the model wants your GPU and the CLIs want your logged-in subscriptions.
 A compose profile (`app`) and the Kind manifests under `k8s/` can run the application itself in a container, but the supported everyday mode is the host.
 
@@ -218,8 +214,6 @@ That is not a claim on paper.
 `tests/test_work_unit_golden_path.py` drives a design document to SUCCEEDED with junior, senior, and staff all staffed on the local harness, through the same resident loops `scripts/start-agent-runtime.sh` starts, as real subprocesses.
 Run that lane with `LOCAL_AGENT_RUN_POSTGRES_INTEGRATION=1`.
 
-The reverse is not supported.
-A machine with frontier subscriptions and no local model is missing the half of the system that decides what the subscriptions are allowed to do.
 
 ## What a fresh clone can and cannot do
 
