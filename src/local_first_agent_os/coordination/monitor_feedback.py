@@ -35,6 +35,7 @@ from ..monitor_feedback.signals import (
     MonitorSignal,
     Severity,
 )
+from .contracts import DispatchKind
 from .dispatch import submit_dispatch_intent
 from .outcomes import failure_category
 from .store import connect, now, tx
@@ -239,13 +240,13 @@ class CoordinationReactorLedger:
         result = submit_dispatch_intent(
             tier=rule.tier.value,
             prompt=rule.render_prompt(signal),
-            kind="advisory",
+            kind=DispatchKind.ADVISORY,
             target_project_id=signal.target_project_id,
             source=feedback_intent_source(rule.rule_id, signal.fingerprint),
         )
         if not result.get("ok"):
             # A rejected submit is a programmer error here: the tier came from
-            # the bench and the kind is a literal, so both were validated
+            # the bench and the kind is an enum member, so both were validated
             # before this call could be reached.
             raise RuntimeError(f"feedback intent submission rejected: {result}")
         return str(result["intent_id"])

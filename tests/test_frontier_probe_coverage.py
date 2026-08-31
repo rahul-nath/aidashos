@@ -37,11 +37,11 @@ from local_first_agent_os.staffing import (
     FrontierHarness,
     Harness,
     JudgmentWorkload,
-    Tier,
     WorkloadModelProfile,
     classify_harness,
     spawnable_models,
 )
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 def _declared_model_ids(bench: Bench) -> set[tuple[Harness, str | None]]:
@@ -78,7 +78,7 @@ def test_a_workload_profile_is_offered_under_its_own_name() -> None:
     """Two ids on one seat need two labels, or one failure reads as the other."""
 
     bench: Bench = {
-        Tier.SENIOR: BenchSlot(
+        DispatchTier.SENIOR: BenchSlot(
             harness=Harness.CODEX,
             model="base-model",
             workload_profiles=(
@@ -101,7 +101,7 @@ def test_a_profile_that_only_changes_effort_is_not_probed_twice() -> None:
     """Same id, same answer. A second completion buys nothing and costs quota."""
 
     bench: Bench = {
-        Tier.SENIOR: BenchSlot(
+        DispatchTier.SENIOR: BenchSlot(
             harness=Harness.CODEX,
             model="one-model",
             reasoning_effort="high",
@@ -126,7 +126,7 @@ def test_a_new_workload_needs_no_edit_here_to_be_covered() -> None:
     list somebody remembered to extend.
     """
 
-    bench: Bench = {Tier.SENIOR: BenchSlot(harness=Harness.CODEX, model="only")}
+    bench: Bench = {DispatchTier.SENIOR: BenchSlot(harness=Harness.CODEX, model="only")}
 
     covered = {item.workload for item in spawnable_models(bench)}
     # One id, so one entry survives dedup; the enumeration still visited each.
@@ -145,7 +145,7 @@ def test_the_startup_probe_asks_about_every_spawnable_model(
     """
 
     bench: Bench = {
-        Tier.SENIOR: BenchSlot(
+        DispatchTier.SENIOR: BenchSlot(
             harness=Harness.CODEX,
             model="senior-model",
             workload_profiles=(
@@ -155,9 +155,9 @@ def test_the_startup_probe_asks_about_every_spawnable_model(
                 ),
             ),
         ),
-        Tier.STAFF: BenchSlot(harness=Harness.CLAUDE, model="staff-model"),
+        DispatchTier.STAFF: BenchSlot(harness=Harness.CLAUDE, model="staff-model"),
         # Local, and skipped: there is no CLI to ask.
-        Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4"),
+        DispatchTier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4"),
     }
     asked: list[list[str]] = []
 
@@ -178,7 +178,7 @@ def test_the_startup_probe_asks_about_every_spawnable_model(
 def test_the_probe_still_skips_a_local_harness() -> None:
     """The junior tier proves itself against the model server, not through a CLI."""
 
-    bench: Bench = {Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4")}
+    bench: Bench = {DispatchTier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4")}
 
     frontier = [
         item

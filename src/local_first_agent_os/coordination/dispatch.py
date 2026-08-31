@@ -7,13 +7,13 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
 from ..constants import dispatch_settlement_topic
 from ..contracts import DispatchIntentStatus, MilestoneStatus
-from .contracts import DispatchTerminalStatus
+from .contracts import DispatchKind, DispatchTerminalStatus
 from .milestones import (
     ClaimedMilestone,
     MalformedMilestoneReference,
@@ -34,7 +34,6 @@ from .store import (
 )
 
 _DISPATCH_TIERS = {"junior", "senior", "staff"}
-_DISPATCH_KINDS = {"advisory", "code"}
 
 
 # What lets a quorum parent settle on a child. SUPERSEDED is absent on purpose:
@@ -54,9 +53,18 @@ _DISPATCH_NOT_RESUMABLE = (
     DispatchIntentStatus.SUPERSEDED,
 )
 
+# An operator can cancel work that has not started or has deliberately parked.
+# CLAIMED and IN_PROGRESS are absent because changing their ledger row would not
+# stop the process; the execution-lease cancellation path owns those states.
+_OPERATOR_CANCELABLE_STATUSES = (
+    DispatchIntentStatus.PENDING,
+    DispatchIntentStatus.PAUSED,
+)
+
 
 _DISPATCH_UNSETTLED = sql_status_list(DispatchIntentStatus.PENDING, DispatchIntentStatus.CLAIMED)
 _QUORUM_SETTLING_SQL = sql_status_list(*_QUORUM_SETTLING_STATUSES)
+_OPERATOR_CANCELABLE_SQL = sql_status_list(*_OPERATOR_CANCELABLE_STATUSES)
 
 
 def dispatch_intent_to_dict(r: dict[str, Any]) -> dict[str, Any]:
@@ -180,7 +188,7 @@ def _insert_dispatch_intent_row(
     *,
     intent_id: str,
     tier: str,
-    kind: str,
+    kind: DispatchKind,
     prompt: str,
     target_project_id: str | None,
     source: str | None,
@@ -221,7 +229,7 @@ def _insert_dispatch_intent_row(
         (
             intent_id,
             tier,
-            kind,
+            kind.value,
             prompt,
             target_project_id,
             source,
@@ -259,7 +267,7 @@ def _insert_dispatch_intent_row(
 def submit_dispatch_intent(
     tier: str,
     prompt: str,
-    kind: str = "advisory",
+    kind: DispatchKind | str = DispatchKind.ADVISORY,
     target_project_id: str | None = None,
     source: str | None = None,
     fanout: int = 1,
@@ -271,6 +279,8 @@ def submit_dispatch_intent(
     *,
     permitted_capabilities: Sequence[str] = (),
     base_commit_sha: str | None = None,
+    pairing_assignment: Mapping[str, Any] | None = None,
+    interrupted_recovery: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Enqueue a unit of work for the reactor to dispatch to an agent tier.
 
@@ -302,8 +312,14 @@ def submit_dispatch_intent(
     allow_tiers = allow_tiers or []
     if tier not in _DISPATCH_TIERS:
         return err("invalid_tier", tier=tier, valid=sorted(_DISPATCH_TIERS))
-    if kind not in _DISPATCH_KINDS:
-        return err("invalid_kind", kind=kind, valid=sorted(_DISPATCH_KINDS))
+    try:
+        dispatch_kind = DispatchKind(kind)
+    except ValueError:
+        return err(
+            "invalid_kind",
+            kind=kind,
+            valid=sorted(item.value for item in DispatchKind),
+        )
     if reduce not in _DISPATCH_REDUCES:
         return err("invalid_reduce", reduce=reduce, valid=sorted(_DISPATCH_REDUCES))
     invalid_allow = [item for item in allow_tiers if item not in _DISPATCH_TIERS]
@@ -332,7 +348,7 @@ def submit_dispatch_intent(
                 "invalid_quorum",
                 message="fanout > 1 requires a non-empty allow_tiers list",
             )
-        if kind != "advisory":
+        if dispatch_kind is not DispatchKind.ADVISORY:
             return err(
                 "invalid_quorum",
                 message="quorum dispatch is advisory-only; code fan-out has no merge semantics",
@@ -363,7 +379,7 @@ def submit_dispatch_intent(
                 c,
                 intent_id=intent_id,
                 tier=tier,
-                kind=kind,
+                kind=dispatch_kind,
                 prompt=prompt,
                 target_project_id=target_project_id,
                 source=source,
@@ -376,6 +392,24 @@ def submit_dispatch_intent(
             )
             deduplicated = settled_intent_id != intent_id
             intent_id = settled_intent_id
+            if pairing_assignment is not None:
+                from ..pairing_assignment import PairingAssignment, record_assignment
+
+                record_assignment(
+                    c,
+                    intent_id,
+                    PairingAssignment.from_payload(pairing_assignment),
+                    recorded_at=t,
+                )
+            if interrupted_recovery is not None:
+                from ..interrupted_recovery import RetainedWorktree, record_interrupted_recovery
+
+                record_interrupted_recovery(
+                    c,
+                    intent_id,
+                    RetainedWorktree.from_payload(interrupted_recovery),
+                    recorded_at=t,
+                )
         else:
             # The quorum parent is never claimed or executed; it is the durable
             # umbrella the reducer completes with the reduced answer.
@@ -383,7 +417,7 @@ def submit_dispatch_intent(
                 c,
                 intent_id=intent_id,
                 tier=tier,
-                kind=kind,
+                kind=dispatch_kind,
                 prompt=prompt,
                 target_project_id=target_project_id,
                 source=source,
@@ -402,7 +436,7 @@ def submit_dispatch_intent(
                     c,
                     intent_id=child_id,
                     tier=allow_tiers[index % len(allow_tiers)],
-                    kind=kind,
+                    kind=dispatch_kind,
                     prompt=prompt,
                     target_project_id=target_project_id,
                     source=f"quorum_child:{intent_id}",
@@ -416,7 +450,7 @@ def submit_dispatch_intent(
                 c,
                 intent_id=reducer_intent_id,
                 tier=reducer_tier or tier,
-                kind="advisory",
+                kind=DispatchKind.ADVISORY,
                 prompt=prompt,
                 target_project_id=target_project_id,
                 source=f"quorum_reducer:{intent_id}",
@@ -443,7 +477,7 @@ def submit_dispatch_intent(
         intent_id=intent_id,
         deduplicated=deduplicated,
         tier=tier,
-        kind=kind,
+        kind=dispatch_kind.value,
         target_project_id=target_project_id,
         source=source,
         status=status,
@@ -492,7 +526,7 @@ def claim_next_dispatch_intent(
         params: list[Any] = []
         if tier is not None:
             # Overflow: a single intent whose allow_tiers lists this tier may be
-            # claimed by it even when its home tier differs. Tier names are a
+            # claimed by it even when its home tier differs. DispatchTier names are a
             # closed vocabulary, so the JSON LIKE match cannot false-positive.
             clauses.append("(tier = ? OR (intent_role = 'single' AND allow_tiers LIKE ?))")
             params.extend([tier, f'%"{tier}"%'])
@@ -745,19 +779,26 @@ def cancel_dispatch_intent(
     reason: str | None = None,
     canceled_by: str = "operator",
 ) -> dict[str, Any]:
-    """Cancel a PENDING dispatch intent before any dispatcher can claim it."""
+    """Cancel an unstarted or parked intent without claiming a running process stopped."""
     t = now()
     reason = reason or "canceled"
     with tx() as c:
-        r = c.execute("SELECT * FROM dispatch_intents WHERE intent_id=?", (intent_id,)).fetchone()
+        r = c.execute(
+            "SELECT * FROM dispatch_intents WHERE intent_id=? FOR UPDATE",
+            (intent_id,),
+        ).fetchone()
         if not r:
             return err("not_found", intent_id=intent_id)
-        if DispatchIntentStatus(str(r["status"])) is not DispatchIntentStatus.PENDING:
+        current_status = DispatchIntentStatus(str(r["status"]))
+        if current_status not in _OPERATOR_CANCELABLE_STATUSES:
             return err(
-                "not_pending",
+                "not_cancelable",
                 intent_id=intent_id,
                 current_status=r["status"],
-                message="Only PENDING dispatch intents can be canceled.",
+                message=(
+                    "Only PENDING or PAUSED dispatch intents can be canceled directly; "
+                    "cancel the active execution lease for a running intent."
+                ),
             )
         result = json.dumps(
             {
@@ -771,7 +812,7 @@ def cancel_dispatch_intent(
             f"UPDATE dispatch_intents SET status='{DispatchIntentStatus.CANCELED}', "
             "outcome=?, result=?, "
             "error=?, completed_at=? "
-            f"WHERE intent_id=? AND status='{DispatchIntentStatus.PENDING}'",
+            f"WHERE intent_id=? AND status IN ({_OPERATOR_CANCELABLE_SQL})",
             (TerminalOutcome.OPERATOR_CANCELED.value, result, reason, t, intent_id),
         )
         canceled_children = 0
@@ -810,7 +851,7 @@ def supersede_dispatch_intent(
     old_intent_id: str,
     prompt: str | None = None,
     tier: str | None = None,
-    kind: str | None = None,
+    kind: DispatchKind | str | None = None,
     target_project_id: str | None = None,
     source: str | None = None,
     reason: str | None = None,
@@ -834,7 +875,7 @@ def supersede_dispatch_intent(
                 message="Only PENDING dispatch intents can be superseded.",
             )
         new_tier = tier or old["tier"]
-        new_kind = kind or old["kind"]
+        raw_new_kind = kind or old["kind"]
         new_prompt = prompt if prompt is not None else old["prompt"]
         new_source = source if source is not None else old["source"]
         new_target_project_id = (
@@ -842,8 +883,14 @@ def supersede_dispatch_intent(
         )
         if new_tier not in _DISPATCH_TIERS:
             return err("invalid_tier", tier=new_tier, valid=sorted(_DISPATCH_TIERS))
-        if new_kind not in _DISPATCH_KINDS:
-            return err("invalid_kind", kind=new_kind, valid=sorted(_DISPATCH_KINDS))
+        try:
+            new_kind = DispatchKind(raw_new_kind)
+        except ValueError:
+            return err(
+                "invalid_kind",
+                kind=raw_new_kind,
+                valid=sorted(item.value for item in DispatchKind),
+            )
         c.execute(
             f"""
             INSERT INTO dispatch_intents(
@@ -854,7 +901,7 @@ def supersede_dispatch_intent(
             (
                 new_intent_id,
                 new_tier,
-                new_kind,
+                new_kind.value,
                 new_prompt,
                 new_target_project_id,
                 new_source,

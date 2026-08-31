@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from work_unit_support import ACCEPTANCE_DESIGN_DOC
 
+from local_first_agent_os.ids import sha256_text
 from local_first_agent_os.work_units.compiler import (
     CompilationRejected,
     CompiledPlanOutcome,
@@ -29,7 +30,9 @@ from local_first_agent_os.work_units.plan import (
     CompiledWorkPlan,
     PlanIntegrityError,
     RequiredDelivery,
+    canonical_json,
 )
+from local_first_agent_os.work_units.retry import ChargedFailureBudget, OperatorOnly
 
 
 def _compile(document: str) -> CompiledPlanOutcome | CompilationRejected:
@@ -428,6 +431,39 @@ def test_a_plan_round_trips_through_its_canonical_payload() -> None:
     assert rebuilt.canonical_json() == outcome.plan.canonical_json()
 
 
+def test_retry_policy_is_a_discriminated_sum_in_the_compiled_plan() -> None:
+    outcome = _compile(ACCEPTANCE_DESIGN_DOC)
+    assert isinstance(outcome, CompiledPlanOutcome)
+
+    plan = outcome.plan
+    assert isinstance(plan.milestone("a").failure_policy.retry_policy, ChargedFailureBudget)
+    assert isinstance(plan.milestone("e").failure_policy.retry_policy, OperatorOnly)
+    failure_policies = [item["failure_policy"] for item in plan.to_payload()["milestones"]]
+    assert all("max_attempts" not in policy for policy in failure_policies)
+    assert {policy["retry_policy"]["kind"] for policy in failure_policies} == {
+        "charged_failure_budget",
+        "operator_only",
+    }
+
+
+def test_a_v4_plan_keeps_its_legacy_retry_bytes_and_hash() -> None:
+    outcome = _compile(ACCEPTANCE_DESIGN_DOC)
+    assert isinstance(outcome, CompiledPlanOutcome)
+    payload = outcome.plan.to_payload()
+    payload.pop("plan_hash")
+    payload["schema_version"] = "compiled_work_plan.v4"
+    payload["compiler_version"] = "design_doc_compiler.v3"
+    for milestone in payload["milestones"]:
+        failure_policy = milestone["failure_policy"]
+        retry_policy = failure_policy.pop("retry_policy")
+        failure_policy["max_attempts"] = retry_policy.get("max_charged_failures", 1)
+    payload["plan_hash"] = sha256_text(canonical_json(payload))
+
+    rebuilt = CompiledWorkPlan.from_payload(payload)
+
+    assert rebuilt.to_payload() == payload
+
+
 def test_a_tampered_payload_fails_closed_on_its_declared_hash() -> None:
     outcome = _compile(ACCEPTANCE_DESIGN_DOC)
     assert isinstance(outcome, CompiledPlanOutcome)
@@ -626,7 +662,7 @@ def test_a_document_with_no_declared_target_cannot_be_started() -> None:
     produce different plans in different checkouts.
     """
 
-    document = ACCEPTANCE_DESIGN_DOC.replace("Target project: local_first_agent_os\n", "")
+    document = ACCEPTANCE_DESIGN_DOC.replace("Target project: local-first-agent-os\n", "")
     assert "Target project:" not in document
 
     parsed = parse_design_doc(document, design_doc_id="no-declared-target")
@@ -763,3 +799,63 @@ Denied without explicit approval:
     assert outcome.execution_blockers == ()
     assert outcome.runnable
     assert "publish_deployment" in outcome.plan.milestone("g").tool_policy.permitted_tools
+
+
+def test_prose_under_required_artifacts_is_refused_at_compile_time() -> None:
+    """The document-level half of `unproducible_required_artifact`.
+
+    `## Required Artifacts` is read with `_bullet_lines`, which keeps every
+    non-empty line that is not a heading and does not strip HTML comments, so a
+    sentence under that heading becomes an artifact kind. Nothing validated the
+    document-level list: a real plan compiled VALID and runnable, ran for two and
+    a half hours, and failed at DELIVER with `missing_required_final_artifacts`
+    naming one of its own paragraphs. An HTML comment was worse, turning five
+    entries into seventeen.
+
+    The milestone-level check already refuses artifacts an executor cannot emit,
+    on the reasoning that failing at compile time costs a recompile while failing
+    at runtime costs an agent hour and looks like the agent did poor work. Same
+    rule, other half of the contract.
+    """
+
+    prose = "The terminal evidence is the code and the operator's own eyes."
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + f"""
+
+## Required Artifacts
+
+{prose}
+
+- source_patch
+"""
+    )
+
+    outcome = _compile(document)
+
+    assert isinstance(outcome, CompilationRejected)
+    unknown = [item for item in outcome.diagnostics if item.code == "unknown_required_artifact"]
+    assert len(unknown) == 1, "only the prose line is unknown; source_patch is a real kind"
+    assert prose[:40] in unknown[0].message
+    # The message names the closed vocabulary, so the fix does not need the source.
+    assert "source_patch" in unknown[0].message
+
+
+def test_a_required_artifacts_section_of_only_kinds_compiles() -> None:
+    """The counterpart: a list of nothing but kinds is a valid delivery contract."""
+
+    document = (
+        ACCEPTANCE_DESIGN_DOC
+        + """
+
+## Required Artifacts
+
+- source_patch
+- test_result
+"""
+    )
+
+    outcome = _compile(document)
+
+    assert isinstance(outcome, CompiledPlanOutcome)
+    assert not [item for item in outcome.diagnostics if item.code == "unknown_required_artifact"]

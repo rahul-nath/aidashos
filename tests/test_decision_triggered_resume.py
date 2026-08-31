@@ -24,6 +24,7 @@ from work_unit_support import compile_acceptance_doc
 from local_first_agent_os.work_units import commands, root_workflow, service
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units.events import (
+    ApprovalRequested,
     MilestoneTransition,
     WorkUnitTransition,
 )
@@ -31,6 +32,7 @@ from local_first_agent_os.work_units.execution_recovery import (
     ExecutionLiveness,
     RecoveredExecution,
 )
+from local_first_agent_os.work_units.executors import _BOUNDED_RETRY
 from local_first_agent_os.work_units.lifecycle import (
     FailureClass,
     LifecyclePhase,
@@ -62,7 +64,7 @@ def _exhausted_blocked_unit(design_doc_id: str, *, halt_unit: bool = True) -> tu
     started = repo.start_work_unit(compiled.compiled_plan_revision_id, title="decision resume")
     work_unit_id = started.work_unit.work_unit_id
     repo.mark_enqueue_delivered(work_unit_id)
-    for attempt in range(1, 4):
+    for attempt in range(1, _BOUNDED_RETRY.max_charged_failures + 1):
         for status in (
             MilestoneExecutionStatus.READY,
             MilestoneExecutionStatus.RUNNING,
@@ -109,6 +111,190 @@ def _exhausted_blocked_unit(design_doc_id: str, *, halt_unit: bool = True) -> tu
 
 def _pending_resume_rows() -> list[repo.EnqueueOutboxRow]:
     return [row for row in repo.list_pending_enqueues(10) if row.kind is repo.EnqueueKind.RESUME]
+
+
+def _blocked_within_budget_unit(design_doc_id: str) -> str:
+    """A WorkUnit whose first milestone blocked once, with budget to spare."""
+
+    compiled = compile_acceptance_doc(design_doc_id=design_doc_id)
+    assert compiled.compiled_plan_revision_id is not None
+    started = repo.start_work_unit(compiled.compiled_plan_revision_id, title="plain resume")
+    work_unit_id = started.work_unit.work_unit_id
+    repo.mark_enqueue_delivered(work_unit_id)
+    for status in (MilestoneExecutionStatus.READY, MilestoneExecutionStatus.RUNNING):
+        repo.record_fact(
+            work_unit_id,
+            MilestoneTransition(
+                phase=LifecyclePhase.PLAN,
+                milestone_key=FIRST_MILESTONE,
+                status=status,
+                attempt=1,
+            ),
+        )
+    repo.record_fact(
+        work_unit_id,
+        MilestoneTransition(
+            phase=LifecyclePhase.PLAN,
+            milestone_key=FIRST_MILESTONE,
+            status=MilestoneExecutionStatus.BLOCKED,
+            attempt=1,
+            failure_code="the agent could not finish",
+            failure_class=FailureClass.CORRECTABLE,
+        ),
+    )
+    repo.record_fact(
+        work_unit_id,
+        WorkUnitTransition(status=WorkUnitStatus.RUNNING, current_phase=LifecyclePhase.PLAN),
+    )
+    repo.record_fact(
+        work_unit_id,
+        WorkUnitTransition(
+            status=WorkUnitStatus.BLOCKED,
+            current_phase=LifecyclePhase.PLAN,
+            failure_code="plan_phase_blocked",
+            failure_summary="phase PLAN cannot proceed without intervention",
+        ),
+    )
+    return work_unit_id
+
+
+def test_a_one_shot_resume_without_a_runtime_leaves_a_pending_resume_delivery(
+    work_unit_ledger: Path,
+) -> None:
+    """The regression that parked work unit e5d41f8805f4 on 2026-08-29.
+
+    A plain `resume_work_unit` from a one-shot process marked the milestone
+    READY, answered `ok: true`, and wrote nothing durable, so the continuation
+    waited for nobody. The permitted retry must leave the same pending RESUME
+    row an approved override leaves, so the resident drainer picks it up.
+    """
+
+    work_unit_id = _blocked_within_budget_unit("plain_resume_enqueues")
+
+    resumed = service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+
+    assert resumed["delivered"] is False
+    assert resumed["resume_enqueued"] is True
+    assert "RESUME delivery awaits the enqueue drainer" in str(resumed["reason"])
+    assert [row.work_unit_id for row in _pending_resume_rows()] == [work_unit_id]
+    executions = {item.stable_key: item for item in repo.list_milestone_executions(work_unit_id)}
+    assert executions[FIRST_MILESTONE].status is MilestoneExecutionStatus.READY
+
+
+def test_a_blind_resume_of_a_crashed_execution_still_leaves_the_delivery(
+    monkeypatch: pytest.MonkeyPatch, work_unit_ledger: Path
+) -> None:
+    """The crashed-mid-milestone shape, observed live on c88ff4167c66.
+
+    A milestone workflow that dies writes no block fact, so the unit halts
+    BLOCKED while the milestone row still says RUNNING: nothing is READY and
+    nothing is BLOCKED. A one-shot resume cannot even ask DBOS whether the
+    execution died (NO_RUNTIME), so the READY gate alone would refuse the one
+    delivery that reaches a launched runtime where recovery can answer.
+    """
+
+    compiled = compile_acceptance_doc(design_doc_id="blind_resume_crashed")
+    assert compiled.compiled_plan_revision_id is not None
+    started = repo.start_work_unit(compiled.compiled_plan_revision_id, title="crashed resume")
+    work_unit_id = started.work_unit.work_unit_id
+    repo.mark_enqueue_delivered(work_unit_id)
+    for status in (MilestoneExecutionStatus.READY, MilestoneExecutionStatus.RUNNING):
+        repo.record_fact(
+            work_unit_id,
+            MilestoneTransition(
+                phase=LifecyclePhase.PLAN,
+                milestone_key=FIRST_MILESTONE,
+                status=status,
+                attempt=1,
+            ),
+        )
+    repo.record_fact(
+        work_unit_id,
+        WorkUnitTransition(status=WorkUnitStatus.RUNNING, current_phase=LifecyclePhase.PLAN),
+    )
+    repo.record_fact(
+        work_unit_id,
+        WorkUnitTransition(
+            status=WorkUnitStatus.BLOCKED,
+            current_phase=LifecyclePhase.PLAN,
+            failure_code="plan_phase_blocked",
+            failure_summary="phase PLAN cannot proceed without intervention",
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "recover_dead_execution",
+        lambda _work_unit_id: RecoveredExecution(
+            ExecutionLiveness.NO_RUNTIME,
+            f"work-unit:{work_unit_id}",
+        ),
+    )
+
+    resumed = service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+
+    assert resumed["delivered"] is False
+    assert resumed["resume_enqueued"] is True
+    assert [row.work_unit_id for row in _pending_resume_rows()] == [work_unit_id]
+
+
+def test_a_late_approval_on_a_blocked_unit_leaves_a_pending_resume_delivery(
+    work_unit_ledger: Path,
+) -> None:
+    """An approval wait that elapsed blocks the unit; the answer must move it.
+
+    Observed live on work unit d31b7eaebde0: the approval landed on a dead
+    epoch on 2026-08-23T18:01 and the unit moved only when an operator also
+    typed `resume_work_unit` two and a half hours later.
+    """
+
+    work_unit_id = _blocked_within_budget_unit("late_approval_resumes")
+    request_id = "wud_" + "ab" * 12
+    repo.record_fact(
+        work_unit_id,
+        ApprovalRequested(
+            phase=LifecyclePhase.PLAN,
+            milestone_key=FIRST_MILESTONE,
+            attempt=1,
+            request_id=request_id,
+            prompt="milestone a needs an operator decision",
+        ),
+    )
+
+    result = service.submit_work_unit_decision(
+        work_unit_id, request_id, "APPROVED", f"idem-{request_id}"
+    )
+
+    assert result["applied"] is True
+    assert result["resume"] is not None and result["resume"]["enqueued"] is True
+    assert "the approval unblocks" in result["resume"]["reason"]
+    assert [row.work_unit_id for row in _pending_resume_rows()] == [work_unit_id]
+
+
+def test_a_denied_approval_on_a_blocked_unit_enqueues_nothing(
+    work_unit_ledger: Path,
+) -> None:
+    """A denial is not permission to run, whatever kind of request it answers."""
+
+    work_unit_id = _blocked_within_budget_unit("late_denial_stays_parked")
+    request_id = "wud_" + "cd" * 12
+    repo.record_fact(
+        work_unit_id,
+        ApprovalRequested(
+            phase=LifecyclePhase.PLAN,
+            milestone_key=FIRST_MILESTONE,
+            attempt=1,
+            request_id=request_id,
+            prompt="milestone a needs an operator decision",
+        ),
+    )
+
+    result = service.submit_work_unit_decision(
+        work_unit_id, request_id, "DENIED", f"idem-{request_id}"
+    )
+
+    assert result["applied"] is True
+    assert result["resume"] is None
+    assert _pending_resume_rows() == []
 
 
 def test_an_approved_override_on_a_blocked_unit_leaves_a_pending_resume_delivery(

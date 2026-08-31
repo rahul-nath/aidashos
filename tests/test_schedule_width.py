@@ -114,7 +114,7 @@ def test_every_pace_is_reconciled_rather_than_trusted() -> None:
 
 _DOC = """# Widen this
 
-Target project: local_first_agent_os
+Target project: local-first-agent-os
 {pace_line}
 
 ## Requirements

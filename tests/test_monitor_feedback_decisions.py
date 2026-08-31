@@ -32,7 +32,7 @@ from local_first_agent_os.monitor_feedback.signals import (
     Severity,
     fingerprint_of,
 )
-from local_first_agent_os.staffing import Tier
+from local_first_agent_os.vocabulary import DispatchTier
 
 NOW = 10_000.0
 
@@ -70,7 +70,7 @@ def _catalog(
                 rule_id="diagnose",
                 selector=RuleSelector(signal_kind=LedgerFactKind.MILESTONE_FAILED),
                 response=response,
-                tier=Tier.JUNIOR,
+                tier=DispatchTier.JUNIOR,
                 cooldown_seconds=cooldown,
                 daily_cap=daily_cap,
                 prompt_template="diagnose {error_code}",

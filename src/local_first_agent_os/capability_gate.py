@@ -28,7 +28,8 @@ from .coordination.store import connect, now
 from .policies import get_saga_policy
 from .policy_document import CompiledPolicy, load_policy_document
 from .settings import get_settings
-from .staffing import Tier, load_bench
+from .staffing import load_bench
+from .vocabulary import DispatchTier, ToolPermissionStatus
 
 
 def _require_pow_wow_id(pow_wow_id: str) -> str:
@@ -39,7 +40,13 @@ def _require_pow_wow_id(pow_wow_id: str) -> str:
     return pow_wow_id
 
 
-def policy_principal(agent_name: str, agent_role: str, policy: CompiledPolicy) -> str:
+def policy_principal(
+    agent_name: str,
+    agent_role: str,
+    policy: CompiledPolicy,
+    *,
+    seat: DispatchTier | None = None,
+) -> str:
     """Which section of `POLICIES.md` governs this caller.
 
     The seat, when the document names one. What a grant belongs to is the seat a
@@ -51,10 +58,22 @@ def policy_principal(agent_name: str, agent_role: str, policy: CompiledPolicy) -
     denied the implementer the write its plan had already granted. That is a
     static rule breaking a modular seat, and it cost a demo more than once.
 
-    The role is asked before the bench because a vendor can hold two seats at
-    once, which is what an outage staffing looks like. Seat-named roles come from
-    the compiled plan; a role naming no seat falls through to the bench, which
-    answers only when the vendor holds exactly one.
+    The role is asked first because a role with a section of its own is a
+    deliberate grant to that role - a cast stance named `marketing` is governed
+    by `## Principal: marketing` whatever tier it is staffed on. Seat-named
+    roles from the compiled plan resolve the same way.
+
+    ``seat`` is asked next: the seat the compiled plan bound to the task, when
+    the caller has one in scope. A plan role like ``implementer`` names no seat
+    by itself, and resolving it through the bench answers with whichever seat
+    the vendor statically holds - which is the wrong seat exactly when an
+    outage pairing has the vendor implementing from someone else's chair. The
+    plan knows the seat; the bench only guesses it.
+
+    The bench is the fallback for callers with no plan in scope, and it answers
+    only when the vendor holds exactly one seat, because a vendor holding two
+    is what an outage staffing looks like and either answer would be wrong for
+    the other seat.
 
     Vendor-named sections still work and are checked last, so a document can be
     migrated one principal at a time and an operator who wants to pin a specific
@@ -65,11 +84,13 @@ def policy_principal(agent_name: str, agent_role: str, policy: CompiledPolicy) -
     if role in policy.principals:
         return role
     try:
-        tier = Tier(role)
+        tier = DispatchTier(role)
     except ValueError:
         tier = None
     if tier is not None and tier.value in policy.principals:
         return tier.value
+    if seat is not None and seat.value in policy.principals:
+        return seat.value
     bench = load_bench(get_settings().config_dir / "staffing.toml")
     seats = [tier for tier, slot in bench.items() if slot.harness.value == agent_name]
     if len(seats) == 1 and seats[0].value in policy.principals:
@@ -104,11 +125,18 @@ class AgentCaller:
     and the way to stop a caller from taking it is to not offer it. Every
     principal is constructed where a pow-wow is in scope, so nothing has to
     invent one.
+
+    ``seat`` is the tier the compiled plan bound to the task this caller is
+    acting for, and ``None`` means no plan is in scope - a tool-boundary caller,
+    not a spawned task. The default narrows rather than widens: without a seat,
+    resolution falls through to the bench and the vendor sections, which grant
+    no more than the seat would.
     """
 
     agent_name: str
     agent_role: str
     pow_wow_id: str
+    seat: DispatchTier | None = None
 
     def __post_init__(self) -> None:
         _require_pow_wow_id(self.pow_wow_id)
@@ -129,24 +157,49 @@ class CapabilityGranted:
 class CapabilityDenied:
     """The action may not proceed, and what would change that.
 
-    Carries the request path rather than only a refusal, because the agent that
-    hit this can act on it: every denial here is a capability an operator can
-    grant, and a message that does not say so turns a gate into a dead end.
+    Carries a remedy rather than only a refusal, because the agent that hit
+    this can act on it: every denial here is one an operator can lift, and a
+    message that does not say how turns a gate into a dead end.
+
+    The remedy is a field, not a derived property, because it differs by
+    denial: a policy denial is lifted by a grant, a revocation only by
+    `restore_tool_permission`. When every denial derived the same request-and-
+    grant text, a revoked agent followed it, a second row appeared beside the
+    REVOKED row that kept refusing, and the printed way out led nowhere.
     """
 
     capability: Capability
     reason: str
-
-    @property
-    def remedy(self) -> str:
-        return (
-            f"request it with request_tool_permission("
-            f"tool_name={self.capability.value!r}, reason=...) "
-            "and have an operator run grant_tool_permission"
-        )
+    remedy: str
 
 
 CapabilityVerdict = CapabilityGranted | CapabilityDenied
+
+
+def _grant_remedy(capability: Capability) -> str:
+    """What lifts an ordinary denial: ask, and have an operator grant."""
+
+    return (
+        f"request it with request_tool_permission("
+        f"tool_name={capability.value!r}, reason=...) "
+        "and have an operator run grant_tool_permission"
+    )
+
+
+def _restore_remedy(capability: Capability, agent_name: str, pow_wow_id: str) -> str:
+    """What lifts a revocation, and the only thing that does.
+
+    Named exactly, arguments included, because the generic remedy is a trap
+    here: a new request-and-grant writes a fresh row while the REVOKED row
+    keeps refusing, so an operator following it would loop forever.
+    """
+
+    return (
+        "a revocation stands until an operator lifts it: run "
+        f"restore_tool_permission(pow_wow_id={pow_wow_id!r}, "
+        f"agent_name={agent_name!r}, tool_name={capability.value!r}, "
+        "restored_by=..., reason=...); granting again does not lift it"
+    )
 
 
 def granted_violations_for(agent_name: str, pow_wow_id: str) -> set[str]:
@@ -174,7 +227,7 @@ def granted_violations_for(agent_name: str, pow_wow_id: str) -> set[str]:
             "SELECT tool_name FROM tool_permission_requests "
             "WHERE agent_name = ? AND pow_wow_id = ? AND status = ? "
             "AND (expires_at IS NULL OR expires_at > ?)",
-            (agent_name, scope, "GRANTED", now()),
+            (agent_name, scope, ToolPermissionStatus.GRANTED.value, now()),
         ).fetchall()
 
     cleared: set[str] = set()
@@ -204,13 +257,19 @@ def revoked_capabilities_for(agent_name: str, pow_wow_id: str) -> set[Capability
 
     What the plan cannot express is a change of mind *while the work is running*.
     That is this table, and this function is how the gate hears about it.
+
+    Only unrestored revocations count. `restore_tool_permission` moves a REVOKED
+    row to RESTORED, which is how an operator lifts one; nothing else does. A
+    newer grant in particular does not: written policy outranks grants, and a
+    revocation is the operator's written change of mind, so it keeps outranking
+    every grant made after it until it is restored.
     """
 
     with connect() as connection:
         rows = connection.execute(
             "SELECT tool_name FROM tool_permission_requests "
             "WHERE agent_name = ? AND pow_wow_id = ? AND status = ?",
-            (agent_name, pow_wow_id, "REVOKED"),
+            (agent_name, pow_wow_id, ToolPermissionStatus.REVOKED.value),
         ).fetchall()
     revoked: set[Capability] = set()
     for row in rows:
@@ -229,6 +288,7 @@ def check_capability(
     agent_role: str,
     capability: Capability,
     pow_wow_id: str,
+    seat: DispatchTier | None = None,
 ) -> CapabilityVerdict:
     """Whether this agent may use this capability right now.
 
@@ -241,8 +301,10 @@ def check_capability(
     writing one worth the trouble.
 
     **Has it been taken back?** A gated capability - one `_CLEARS` names, meaning
-    it implies an approval class - is refused if this pow-wow has a `REVOKED` row
-    for it. This is the check that was missing, and its absence was not obvious:
+    it implies an approval class - is refused if this pow-wow has an unrestored
+    `REVOKED` row for it. That refusal stands until `restore_tool_permission`
+    lifts it; a newer grant does not, and the refusal says so.
+    This is the check that was missing, and its absence was not obvious:
     the function *looked* like enforcement because it called the policy engine,
     but it passed `capability.value` in as a **tool name**, and `check_tool_call`
     matches tool names against hardcoded sets like `send_email` and `git_merge`.
@@ -276,18 +338,25 @@ def check_capability(
     scope = _require_pow_wow_id(pow_wow_id)
     posture = resolve(get_settings().access_posture, capability)
 
-    def refuse(reason: str) -> CapabilityVerdict:
+    def refuse(reason: str, *, remedy: str | None = None) -> CapabilityVerdict:
         """One exit for every denial, so the posture cannot be applied unevenly.
 
         Every refusal in this function goes through here. That is the point: a
         second `return CapabilityDenied(...)` added later would silently be
         posture-blind, and the failure mode of a permissive posture is a refusal
         that ignores it rather than one that honours it too eagerly.
+
+        The default remedy is the request-and-grant path; a caller whose denial
+        that path cannot lift must say what does.
         """
 
         match posture:
             case AccessPosture.ENFORCING:
-                return CapabilityDenied(capability=capability, reason=reason)
+                return CapabilityDenied(
+                    capability=capability,
+                    reason=reason,
+                    remedy=remedy if remedy is not None else _grant_remedy(capability),
+                )
             case AccessPosture.OBSERVING:
                 record_unenforced_refusal(
                     capability=capability,
@@ -300,7 +369,7 @@ def check_capability(
                 assert_never(posture)
 
     written = load_policy_document()
-    principal = policy_principal(agent_name, agent_role, written)
+    principal = policy_principal(agent_name, agent_role, written, seat=seat)
     if not written.permits(principal, capability):
         # The written document outranks both the compiled plan and the ledger,
         # and it is checked first so nothing downstream can reach past it. An
@@ -314,7 +383,8 @@ def check_capability(
         agent_name, scope
     ):
         return refuse(
-            f"{capability.value!r} was revoked for agent {agent_name!r} in pow-wow {scope}"
+            f"{capability.value!r} was revoked for agent {agent_name!r} in pow-wow {scope}",
+            remedy=_restore_remedy(capability, agent_name, scope),
         )
     verdict = get_saga_policy().check_tool_call(
         capability.value,
@@ -332,6 +402,7 @@ def ensure_capability(
     agent_role: str,
     capability: Capability,
     pow_wow_id: str,
+    seat: DispatchTier | None = None,
 ) -> None:
     """Raise unless this agent may use this capability.
 
@@ -346,6 +417,7 @@ def ensure_capability(
         agent_role=agent_role,
         capability=capability,
         pow_wow_id=pow_wow_id,
+        seat=seat,
     )
     if isinstance(verdict, CapabilityDenied):
         raise PermissionError(f"{verdict.reason} -- {verdict.remedy}")
@@ -387,6 +459,7 @@ def ensure_caller_may_use(caller: CallerIdentity, tool_name: str) -> None:
         agent_role=caller.agent_role,
         capability=capability,
         pow_wow_id=caller.pow_wow_id,
+        seat=caller.seat,
     )
 
 

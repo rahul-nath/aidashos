@@ -16,6 +16,7 @@ from local_first_agent_os import dependency_context_compactor
 from local_first_agent_os.agent_adapters import AgentResult
 from local_first_agent_os.constants import DELEGATED_TASK_RUN_ARTIFACT_TYPE
 from local_first_agent_os.contracts import WorkflowStatus, WorkflowType
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.dependency_context_compactor import (
     COMPACTION_WORKFLOW_ID,
     DEPENDENCY_COMPACTION_TIMEOUT_SECONDS,
@@ -154,7 +155,7 @@ def test_a_compacted_prompt_says_so_to_whoever_reads_it_later() -> None:
         task_name="implement",
         role="implementer",
         description="build on the dependencies",
-        dispatch_kind="code",
+        dispatch_kind=DispatchKind.CODE,
     )
 
     prompt = build_agent_task_prompt(
@@ -173,7 +174,7 @@ def test_a_failed_compactor_still_produces_the_full_prompt() -> None:
         task_name="implement",
         role="implementer",
         description="build on the dependencies",
-        dispatch_kind="code",
+        dispatch_kind=DispatchKind.CODE,
     )
 
     def dead_compactor(_request: ViewCompactionRequest) -> str:

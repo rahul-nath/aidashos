@@ -27,7 +27,7 @@ from local_first_agent_os.constants import (
     DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
 )
 
-from ..refinery.loop import run_refinery
+from ..refinery.loop import run_refinery, run_refinery_fleet
 from ..work_units import commands as work_unit_commands
 from ..work_units.next_commands import (
     NextCommandSet,
@@ -60,6 +60,7 @@ from .collaboration import (
     read_notes,
     register_agent,
 )
+from .contracts import DispatchKind
 from .dispatch import (
     cancel_dispatch_intent,
     claim_next_dispatch_intent,
@@ -124,6 +125,8 @@ from .pow_wows import (
     list_tasks,
     list_tool_permission_requests,
     request_tool_permission,
+    restore_tool_permission,
+    revoke_tool_permission,
     submit_artifact,
 )
 from .projects import (
@@ -436,6 +439,8 @@ def build_mcp_server():
     mcp.tool(name="request_tool_permission")(request_tool_permission)
     mcp.tool(name="grant_tool_permission")(grant_tool_permission)
     mcp.tool(name="deny_tool_permission")(deny_tool_permission)
+    mcp.tool(name="revoke_tool_permission")(revoke_tool_permission)
+    mcp.tool(name="restore_tool_permission")(restore_tool_permission)
     mcp.tool(name="list_tool_permission_requests")(list_tool_permission_requests)
 
     # Layer 2 — Evaluation
@@ -450,6 +455,7 @@ def build_mcp_server():
     mcp.tool(name="recover_unparsed_staff_review")(recover_unparsed_staff_review)
     mcp.tool(name="list_integration_requests")(list_integration_requests)
     mcp.tool(name="run_refinery")(run_refinery)
+    mcp.tool(name="run_refinery_fleet")(run_refinery_fleet)
     mcp.tool(name="submit_dispatch_intent")(submit_dispatch_intent)
     mcp.tool(name="claim_next_dispatch_intent")(claim_next_dispatch_intent)
     mcp.tool(name="complete_dispatch_intent")(complete_dispatch_intent)
@@ -707,6 +713,7 @@ def build_parser() -> argparse.ArgumentParser:
     red.add_argument("--limit", type=int, default=20)
     red.add_argument("--max-polls", type=int, default=None)
     red.add_argument("--inline", action="store_true")
+    red.add_argument("--max-transient-resumes", type=int, default=3)
 
     rel = sub.add_parser("read_execution_ledger")
     rel.add_argument("--workflow-name", default=None)
@@ -882,6 +889,23 @@ def build_parser() -> argparse.ArgumentParser:
     lar.add_argument("--saga-id")
     lar.add_argument("--status")
 
+    # ---- layer 2: tool permissions ----
+    # Only the two operator verbs. Request, grant, deny, and list are agent and
+    # MCP surfaces; revoke and restore are the operator's change of mind and
+    # its lifting, and an operator at a terminal must be able to type both.
+    rtp = sub.add_parser("revoke_tool_permission")
+    rtp.add_argument("pow_wow_id")
+    rtp.add_argument("agent_name")
+    rtp.add_argument("tool_name")
+    rtp.add_argument("--revoked-by", required=True)
+
+    rstp = sub.add_parser("restore_tool_permission")
+    rstp.add_argument("pow_wow_id")
+    rstp.add_argument("agent_name")
+    rstp.add_argument("tool_name")
+    rstp.add_argument("--restored-by", required=True)
+    rstp.add_argument("--reason", required=True)
+
     rusr = sub.add_parser("recover_unparsed_staff_review")
     rusr.add_argument("intent_id")
 
@@ -894,11 +918,21 @@ def build_parser() -> argparse.ArgumentParser:
     rrf.add_argument("--interval-seconds", type=float, default=None)
     rrf.add_argument("--max-polls", type=int, default=None)
 
+    rrff = sub.add_parser("run_refinery_fleet")
+    rrff.add_argument("--target-project-id", action="append", required=True)
+    rrff.add_argument("--interval-seconds", type=float, default=None)
+    rrff.add_argument("--max-polls", type=int, default=None)
+
     # ---- layer 3: dispatch intents ----
     sdi = sub.add_parser("submit_dispatch_intent")
     sdi.add_argument("tier", choices=["junior", "senior", "staff"])
     sdi.add_argument("prompt")
-    sdi.add_argument("--kind", choices=["advisory", "code"], default="advisory")
+    dispatch_kind_choices = tuple(item.value for item in DispatchKind)
+    sdi.add_argument(
+        "--kind",
+        choices=dispatch_kind_choices,
+        default=DispatchKind.ADVISORY.value,
+    )
     sdi.add_argument("--target-project-id")
     sdi.add_argument("--source")
     sdi.add_argument("--fanout", type=int, default=1)
@@ -911,6 +945,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sdi.add_argument("--reduce", choices=["none", "vote", "judge"], default="none")
     sdi.add_argument("--reducer-tier", choices=["junior", "senior", "staff"])
+    sdi.add_argument("--permitted-capability", action="append", default=[])
 
     cndi = sub.add_parser("claim_next_dispatch_intent")
     cndi.add_argument("--claimed-by", required=True)
@@ -932,7 +967,7 @@ def build_parser() -> argparse.ArgumentParser:
     sudi.add_argument("old_intent_id")
     sudi.add_argument("--prompt")
     sudi.add_argument("--tier", choices=["junior", "senior", "staff"])
-    sudi.add_argument("--kind", choices=["advisory", "code"])
+    sudi.add_argument("--kind", choices=dispatch_kind_choices)
     sudi.add_argument("--target-project-id")
     sudi.add_argument("--source")
     sudi.add_argument("--reason")
@@ -1221,6 +1256,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             args.limit,
             args.max_polls,
             inline=args.inline,
+            max_transient_resumes=args.max_transient_resumes,
         )
     elif cmd == "read_execution_ledger":
         out = read_execution_ledger(args.workflow_name)
@@ -1400,6 +1436,23 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
     elif cmd == "list_approval_requests":
         out = list_approval_requests(saga_id=args.saga_id, status_filter=args.status)
+
+    # layer 2 — tool permissions (operator verbs)
+    elif cmd == "revoke_tool_permission":
+        out = revoke_tool_permission(
+            pow_wow_id=args.pow_wow_id,
+            agent_name=args.agent_name,
+            tool_name=args.tool_name,
+            revoked_by=args.revoked_by,
+        )
+    elif cmd == "restore_tool_permission":
+        out = restore_tool_permission(
+            pow_wow_id=args.pow_wow_id,
+            agent_name=args.agent_name,
+            tool_name=args.tool_name,
+            restored_by=args.restored_by,
+            reason=args.reason,
+        )
     elif cmd == "recover_unparsed_staff_review":
         out = recover_unparsed_staff_review(args.intent_id)
     elif cmd == "list_integration_requests":
@@ -1409,6 +1462,12 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
         )
     elif cmd == "run_refinery":
         out = run_refinery(
+            args.target_project_id,
+            args.interval_seconds,
+            args.max_polls,
+        )
+    elif cmd == "run_refinery_fleet":
+        out = run_refinery_fleet(
             args.target_project_id,
             args.interval_seconds,
             args.max_polls,
@@ -1426,6 +1485,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             allow_tiers=args.allow_tiers,
             reduce=args.reduce,
             reducer_tier=args.reducer_tier,
+            permitted_capabilities=args.permitted_capability,
         )
     elif cmd == "claim_next_dispatch_intent":
         out = claim_next_dispatch_intent(claimed_by=args.claimed_by, tier=args.tier)

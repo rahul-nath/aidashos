@@ -37,7 +37,7 @@ import traceback
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 from .coordination import (
     ClaimNextDispatchIntent,
@@ -58,7 +58,7 @@ from .settings import Settings
 logger = logging.getLogger(__name__)
 
 # A runner turns a claimed intent (dict from the ledger) into a terminal result.
-IntentResult = tuple[Literal["DONE", "FAILED"], str | None, str | None]  # status, result, error
+IntentResult = tuple[DispatchTerminalStatus, str | None, str | None]  # status, result, error
 IntentRunner = Callable[[Mapping[str, Any]], IntentResult]
 
 
@@ -68,7 +68,7 @@ class Dispatched:
 
     intent_id: str
     tier: str
-    status: Literal["DONE", "FAILED"]
+    status: DispatchTerminalStatus
     source: str | None = None
     target_project_id: str | None = None
     milestone_id: str | None = None
@@ -261,15 +261,18 @@ class LedgerDispatcher:
             status, result, error = self.runner(intent)
         except Exception as exc:  # noqa: BLE001 - a runner crash fails the intent, not the reactor
             status, result, error = (
-                "FAILED",
+                DispatchTerminalStatus.FAILED,
                 _runner_crash_payload(str(intent["intent_id"]), exc),
                 f"{type(exc).__name__}: {exc}",
             )
+        # A runner may hand back a bare "DONE"/"FAILED" string; normalize once
+        # here so everything downstream carries the enum, not the raw value.
+        status = DispatchTerminalStatus(status)
 
         self._coord(
             CompleteDispatchIntent(
                 intent_id=intent["intent_id"],
-                status=DispatchTerminalStatus(status),
+                status=status,
                 result=result,
                 error=error,
             )

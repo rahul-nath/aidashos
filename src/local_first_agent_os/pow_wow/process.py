@@ -16,11 +16,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from ..coordination.contracts import DispatchKind
 from ..project_center import LinkedProject
 from ..toolchains import project_environment
 from .types import (
     CommandRunCapture,
-    DispatchKind,
     ExecutionLeaseStatus,
     PowWowTaskSpec,
 )
@@ -117,12 +117,13 @@ def run_captured_command(
     *,
     timeout_seconds: int,
     env: Mapping[str, str] | None = None,
+    complete_environment: bool = False,
 ) -> CommandRunCapture:
     return _run_reaped_process_group(
         [str(part) for part in command],
         cwd,
         shell=False,
-        environment=project_environment(cwd, env),
+        environment=(dict(env or {}) if complete_environment else project_environment(cwd, env)),
         timeout_seconds=timeout_seconds,
         display_command=shlex.join(str(part) for part in command),
     )
@@ -341,7 +342,7 @@ def build_execution_attempt_idempotency_key(
         "role": task.role,
         "harness": harness,
         "model": model,
-        "dispatch_kind": dispatch_kind,
+        "dispatch_kind": dispatch_kind.value,
     }
     digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
     return f"cli_attempt:{digest}"

@@ -29,8 +29,10 @@ from uuid import uuid4
 
 from .archetype_planners import ArchetypeMilestoneTemplate, plan_saas_archetype
 from .constants import CLI_AGENT_RUN_ARTIFACT_TYPE, DELEGATED_TASK_RUN_ARTIFACT_TYPE
+from .coordination.contracts import DispatchKind
 from .pow_wow import PowWowRunResult, PowWowTaskSpec
-from .staffing import JudgmentRole, Tier
+from .staffing import JudgmentRole
+from .vocabulary import DispatchTier
 from .work_units.design_doc import (
     DocumentSection,
     canonical_heading,
@@ -1058,8 +1060,8 @@ def build_gawd_review_tasks(
         PowWowTaskSpec(
             task_name=scan_task,
             role="junior_permissions_scan",
-            judgment=JudgmentRole(name="junior_permissions_scan", tier=Tier.JUNIOR),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="junior_permissions_scan", tier=DispatchTier.JUNIOR),
+            dispatch_kind=DispatchKind.ADVISORY,
             description=(
                 "Read the sparse GAWD draft and identify permissions, autonomy limits, "
                 "external dependencies, secret/access needs, spend risks, and "
@@ -1075,8 +1077,8 @@ def build_gawd_review_tasks(
         PowWowTaskSpec(
             task_name=completion_task,
             role="senior_spec_completion",
-            judgment=JudgmentRole(name="senior_spec_completion", tier=Tier.SENIOR),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="senior_spec_completion", tier=DispatchTier.SENIOR),
+            dispatch_kind=DispatchKind.ADVISORY,
             blocked_by=(scan_task,),
             description=(
                 "Turn the sparse Mini-GAWD draft into a complete scoped build "
@@ -1111,8 +1113,8 @@ def build_gawd_review_tasks(
         PowWowTaskSpec(
             task_name=verdict_task,
             role="staff_final_verdict",
-            judgment=JudgmentRole(name="staff_final_verdict", tier=Tier.STAFF),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="staff_final_verdict", tier=DispatchTier.STAFF),
+            dispatch_kind=DispatchKind.ADVISORY,
             blocked_by=(completion_task,),
             description=(
                 "Review the finalized GAWD draft, permission envelope, and durable "

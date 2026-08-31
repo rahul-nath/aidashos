@@ -25,6 +25,7 @@ import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 from work_unit_support import compile_acceptance_doc
 
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.coordination.store import tx
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units.events import (
@@ -76,7 +77,7 @@ def _create_intent(work_unit_id: str, intent_id: str, *, attempt: int = 1) -> re
             attempt=attempt,
             dispatch_intent_id=intent_id,
             tier="junior",
-            kind="advisory",
+            kind=DispatchKind.ADVISORY,
         ),
     )
 

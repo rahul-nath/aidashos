@@ -38,7 +38,9 @@ def main() -> int:
             "ProgramArguments": ["/bin/bash", "-lc", shell],
             "WorkingDirectory": str(repo),
             "RunAtLoad": True,
-            "KeepAlive": False,
+            # The service is unloaded to stop it.  While loaded, launchd is its
+            # sole owner and must replace a process that exits unexpectedly.
+            "KeepAlive": True,
             "StandardOutPath": str(log_dir / "pi-daemon.out.log"),
             "StandardErrorPath": str(log_dir / "pi-daemon.err.log"),
         }

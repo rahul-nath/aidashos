@@ -485,12 +485,12 @@ def test_a_headline_never_reads_as_a_command(command: str, payload: dict[str, An
     )
 
 
-def test_a_resume_that_delivered_nothing_says_so() -> None:
-    """`ok: true` with `delivered: false` means the WorkUnit is still parked.
+def test_a_resume_that_queued_its_delivery_says_the_drainer_has_it() -> None:
+    """`delivered: false` with `resume_enqueued: true` is a promise, not a stall.
 
-    The verb returns success, returns milestones to READY, and writes no outbox
-    row, so nothing will ever pick the continuation up. Reporting only "re-read
-    the WorkUnit" there reads as though the resume worked.
+    The verb wrote a pending RESUME outbox row, so the resident drainer delivers
+    the continuation on its next pass. The follow-up must not offer `--inline`:
+    an inline drive racing the drainer would contend for the same continuation.
     """
 
     result = next_commands_for(
@@ -499,7 +499,38 @@ def test_a_resume_that_delivered_nothing_says_so() -> None:
             "ok": True,
             "work_unit_id": WORK_UNIT_ID,
             "delivered": False,
-            "reason": "no active DBOS runtime; resume again from a durable runtime",
+            "resume_enqueued": True,
+            "reason": (
+                "no active DBOS runtime; a pending RESUME delivery awaits the enqueue drainer"
+            ),
+        },
+    )
+    assert result is not None
+    assert "queued durably" in result.headline
+    assert "drainer" in (result.detail or "")
+    drain = _find(result.commands, "drain_work_unit_enqueues")
+    assert drain.status is NextCommandStatus.READY
+    assert not any("--inline" in item.command for item in result.commands)
+
+
+def test_a_resume_that_delivered_nothing_and_queued_nothing_says_so() -> None:
+    """`delivered: false` with no queued delivery means the WorkUnit is parked.
+
+    This shape survives only where no RESUME row could be written; the advice
+    has to hand the operator a way to drive the lifecycle themselves.
+    """
+
+    result = next_commands_for(
+        "resume_work_unit",
+        {
+            "ok": True,
+            "work_unit_id": WORK_UNIT_ID,
+            "delivered": False,
+            "resume_enqueued": False,
+            "reason": (
+                "no active DBOS runtime; a pending START delivery already exists "
+                "and will run the same root workflow"
+            ),
         },
     )
     assert result is not None

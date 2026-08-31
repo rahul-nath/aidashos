@@ -55,8 +55,8 @@ _TRUNCATION_MARKER = "~"
 class ResidentLoop(StrEnum):
     """The loops that may exist at most once per coordination database.
 
-    The first two are the processes `start-agent-runtime.sh` leaves running. The
-    values are the names it already uses for their log files, so an operator
+    The singleton values are processes `start-agent-runtime.sh` leaves running.
+    Their values are the names used for log files, so an operator
     reading a lock holder and an operator reading `.local_agent/logs` see the
     same word.
     """
@@ -66,9 +66,8 @@ class ResidentLoop(StrEnum):
     CRASH_RECONCILER = "work-unit-crash-reconciler"
     """Unattended recovery of executions that died without recording a halt.
 
-    Deliberately not started by `start-agent-runtime.sh`. It is a thing an
-    operator turns on, because automatic retries are only safe once a spawned
-    agent's authority is bounded by what its plan declared.
+    Started only after the process-containment probe succeeds, because an
+    automatic retry is safe only when the successor keeps the plan's authority.
     """
 
     REFINERY = "refinery"
@@ -82,6 +81,14 @@ class ResidentLoop(StrEnum):
 
     Two refineries on one repository would each compute a fast-forward from a
     base the other was about to invalidate, and one would silently lose a batch.
+    """
+
+    REFINERY_FLEET = "refinery-fleet"
+    """One resident that discovers projects before taking per-project locks.
+
+    The fleet lock prevents two launchd residents from duplicating the scan.
+    Each actual integration still takes ``REFINERY`` scoped by project, so a
+    manual project drain and the resident fleet cannot race on one repository.
     """
 
     @property

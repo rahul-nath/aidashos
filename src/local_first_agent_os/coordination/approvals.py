@@ -7,16 +7,29 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from typing import Any
 
 from local_first_agent_os.constants import APPROVAL_REQUEST_TYPES
 
 from ..contracts import ApprovalRequestType, ApprovalStatus
+from ..operator_identity import OperatorIdentityRefused, verify_operator_actor
+from ..refinery.requests import (
+    InFlight,
+    Integrated,
+    IntegrationSubject,
+    Queued,
+    WithdrawalReason,
+    Withdrawn,
+)
 from .integration_queue import (
     EnqueueAdmitted,
     EnqueueRefused,
     admit_code_merge_approval,
+    apply_integration_transition,
     enqueue_summary,
+    integration_request_from_row,
     record_queued_request,
 )
 from .outcomes import require_approval_status_transition
@@ -169,6 +182,12 @@ def resolve_approval_request(
     the alternative is an approval that exists and a merge that can never happen.
     """
 
+    try:
+        verify_operator_actor(resolved_by)
+    except OperatorIdentityRefused as exc:
+        data = err(exc.code, message=str(exc), token_file=str(exc.token_file))
+        emit("resolve_approval_request_refused", {**data, "approval_id": approval_id})
+        return data
     t = now()
     new_status = "APPROVED" if approved else "DENIED"
     admission = _integration_admission(approval_id, approved=approved, enqueued_at=t)
@@ -181,7 +200,7 @@ def resolve_approval_request(
         )
     with tx() as c:
         r = c.execute(
-            "SELECT * FROM approval_requests WHERE approval_id = ?", (approval_id,)
+            "SELECT * FROM approval_requests WHERE approval_id = ? FOR UPDATE", (approval_id,)
         ).fetchone()
         if not r:
             return err("not_found", approval_id=approval_id)
@@ -206,6 +225,7 @@ def resolve_approval_request(
         approval_id=approval_id,
         status=new_status,
         resolved_by=resolved_by,
+        attribution="operator",
         resolved_at=iso(t),
         **queued,
     )
@@ -262,13 +282,19 @@ def revoke_approval_request(
 ) -> dict[str, Any]:
     """Revoke a previously approved gate without erasing its resolution."""
 
+    try:
+        verify_operator_actor(revoked_by)
+    except OperatorIdentityRefused as exc:
+        data = err(exc.code, message=str(exc), token_file=str(exc.token_file))
+        emit("revoke_approval_request_refused", {**data, "approval_id": approval_id})
+        return data
     normalized_reason = reason.strip()
     if not normalized_reason:
         return err("reason_required", approval_id=approval_id)
     t = now()
     with tx() as c:
         row = c.execute(
-            "SELECT * FROM approval_requests WHERE approval_id = ?",
+            "SELECT * FROM approval_requests WHERE approval_id = ? FOR UPDATE",
             (approval_id,),
         ).fetchone()
         if not row:
@@ -287,6 +313,33 @@ def revoke_approval_request(
                 status=current.value,
             )
         require_approval_status_transition(current, ApprovalStatus.REVOKED)
+        request_row = c.execute(
+            "SELECT * FROM integration_requests WHERE approval_id=? "
+            "ORDER BY enqueued_at, request_id LIMIT 1 FOR UPDATE",
+            (approval_id,),
+        ).fetchone()
+        withdrawn_request_id: str | None = None
+        if request_row is not None:
+            request = integration_request_from_row(rowdict(request_row))
+            if isinstance(request, (InFlight, Integrated)):
+                return err(
+                    "revocation_too_late",
+                    approval_id=approval_id,
+                    request_id=request.subject.request_id,
+                    integration_state=type(request).__name__,
+                    message=(
+                        "the refinery already started this request; revocation cannot "
+                        "pretend the branch was not advanced"
+                    ),
+                )
+            if isinstance(request, Queued):
+                withdrawn = Withdrawn(
+                    subject=request.subject,
+                    reason=WithdrawalReason.APPROVAL_REVOKED,
+                    withdrawn_at=t,
+                )
+                apply_integration_transition(c, request, withdrawn, recorded_at=t)
+                withdrawn_request_id = str(request.subject.request_id)
         c.execute(
             "UPDATE approval_requests SET status = ? WHERE approval_id = ?",
             (ApprovalStatus.REVOKED.value, approval_id),
@@ -298,11 +351,42 @@ def revoke_approval_request(
         original_resolved_by=row["resolved_by"],
         original_resolved_at=iso(row["resolved_at"]),
         revoked_by=revoked_by,
+        attribution="operator",
         revoked_at=iso(t),
         reason=normalized_reason,
+        withdrawn_integration_request_id=withdrawn_request_id,
     )
     emit("revoke_approval_request", data)
     return data
+
+
+@contextmanager
+def hold_approved_code_merge_authority(
+    subjects: Sequence[IntegrationSubject],
+) -> Iterator[bool]:
+    """Serialize the refinery's last approval check against revocation.
+
+    The transaction remains open while the caller fast-forwards git. A
+    concurrent revocation therefore happens either before this check and stops
+    the landing, or after the fast-forward and sees the request already
+    ``InFlight``. There is no interval in which both can claim to have won.
+    """
+
+    approval_ids = tuple(dict.fromkeys(subject.approval_id for subject in subjects))
+    with tx() as c:
+        approved = True
+        for approval_id in approval_ids:
+            row = c.execute(
+                "SELECT status, request_type FROM approval_requests WHERE approval_id=? FOR UPDATE",
+                (approval_id,),
+            ).fetchone()
+            if (
+                row is None
+                or ApprovalStatus(str(row["status"])) is not ApprovalStatus.APPROVED
+                or str(row["request_type"]) != ApprovalRequestType.CODE_MERGE.value
+            ):
+                approved = False
+        yield approved
 
 
 def list_approval_requests(

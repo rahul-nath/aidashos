@@ -10,7 +10,7 @@ This is the role model that replaces the ad-hoc ``role`` string + the
   ``JudgmentRole`` (needs a thinking model) OR a ``CheckRole`` (a deterministic
   shell check). Modeled as a sum type so illegal states (asking a check for a
   tier, or a judge for a shell command) are unrepresentable.
-* The contractor-tier idea — a ``Tier`` (junior/senior/staff) resolves through
+* The contractor-tier idea — a ``DispatchTier`` (junior/senior/staff) resolves through
   the ``Bench`` to a concrete harness + model + capacity, which is the
   executable binding Ouroboros never had.
 
@@ -28,15 +28,9 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, assert_never
 
+from .vocabulary import DispatchTier
+
 logger = logging.getLogger(__name__)
-
-
-class Tier(StrEnum):
-    """Seniority axis — an engineer persona's level IS its tier."""
-
-    JUNIOR = "junior"  # local, cheap, high-count
-    SENIOR = "senior"  # strong implementer
-    STAFF = "staff"  # strongest; reviewer / finisher
 
 
 class Harness(StrEnum):
@@ -70,6 +64,14 @@ class JudgmentWorkload(StrEnum):
 
     STANDARD = "standard"
     INDEPENDENT_READING = "independent_reading"
+    VERIFICATION_PLAN = "verification_plan"
+    """The junior's hypothesis pass over the senior's reading.
+
+    Its own workload because it is the one junior task that reasons rather than
+    reports, and the fast local model kept making calls above its paygrade on
+    it. Routing it to the heavier local model is a config edit rather than a new
+    tier, which is the whole point of a workload profile.
+    """
 
 
 @dataclass(frozen=True)
@@ -203,7 +205,7 @@ class BenchSlot:
 
 
 # The Bench is the ONE place that knows tier -> runtime.
-Bench = dict[Tier, BenchSlot]
+Bench = dict[DispatchTier, BenchSlot]
 
 
 class SharedSeatRefused(ValueError):
@@ -273,10 +275,10 @@ class FrontierPairing:
             "more than one"
         )
 
-    def seats(self) -> dict[Tier, BenchSlot]:
+    def seats(self) -> dict[DispatchTier, BenchSlot]:
         """The two slots, keyed by the tier each one holds."""
 
-        return {Tier.SENIOR: self.senior, Tier.STAFF: self.staff}
+        return {DispatchTier.SENIOR: self.senior, DispatchTier.STAFF: self.staff}
 
     def frontier_harnesses(self) -> frozenset[FrontierHarness]:
         """The spawnable vendors this pairing depends on.
@@ -332,7 +334,7 @@ class Staffing:
 
         return {**self.solo, **self.seated.seats()}
 
-    def __getitem__(self, tier: Tier) -> BenchSlot:
+    def __getitem__(self, tier: DispatchTier) -> BenchSlot:
         """Resolve a tier exactly as the derived bench would.
 
         Kept deliberately read-only: a caller that could assign through this
@@ -400,7 +402,7 @@ class JudgmentRole:
     """A role that needs a thinking model (Ouroboros Character, unified w/ tier)."""
 
     name: str  # "implementer", "reviewer", "realist", "qa"
-    tier: Tier
+    tier: DispatchTier
     stance: str | None = None  # optional Ouroboros cognitive stance (deferred layer)
 
     kind: str = field(default="judgment", init=False)
@@ -485,7 +487,7 @@ DEFAULT_JUNIOR = BenchSlot(
 DEFAULT_STAFFING = Staffing(
     pairings={DEFAULT_PAIRING.name: DEFAULT_PAIRING},
     seated=DEFAULT_PAIRING,
-    solo={Tier.JUNIOR: DEFAULT_JUNIOR},
+    solo={DispatchTier.JUNIOR: DEFAULT_JUNIOR},
 )
 
 DEFAULT_BENCH: Bench = DEFAULT_STAFFING.bench
@@ -494,8 +496,8 @@ DEFAULT_BENCH: Bench = DEFAULT_STAFFING.bench
 # implementer's work - two models checking each other. Which vendor plays either
 # tier is `configs/staffing.toml`'s business and has changed once; naming one
 # here is how a comment goes stale without anything failing.
-IMPLEMENTER = JudgmentRole(name="implementer", tier=Tier.SENIOR)
-REVIEWER = JudgmentRole(name="reviewer", tier=Tier.STAFF, stance="evaluator")
+IMPLEMENTER = JudgmentRole(name="implementer", tier=DispatchTier.SENIOR)
+REVIEWER = JudgmentRole(name="reviewer", tier=DispatchTier.STAFF, stance="evaluator")
 
 DEFAULT_ROSTERS: dict[str, Roster] = {
     "IMPLEMENTATION": Roster(judgment=(IMPLEMENTER,)),
@@ -503,14 +505,14 @@ DEFAULT_ROSTERS: dict[str, Roster] = {
         judgment=(REVIEWER,),
         consensus=(
             REVIEWER,
-            JudgmentRole(name="qa", tier=Tier.SENIOR),
-            JudgmentRole(name="realist", tier=Tier.SENIOR),
+            JudgmentRole(name="qa", tier=DispatchTier.SENIOR),
+            JudgmentRole(name="realist", tier=DispatchTier.SENIOR),
         ),
     ),
 }
 
 
-def resolve_bench(tier: Tier, bench: Bench | None = None) -> BenchSlot:
+def resolve_bench(tier: DispatchTier, bench: Bench | None = None) -> BenchSlot:
     """Resolve a tier to its concrete harness slot, raising on an unstaffed tier."""
     bench = bench if bench is not None else DEFAULT_BENCH
     try:
@@ -520,7 +522,7 @@ def resolve_bench(tier: Tier, bench: Bench | None = None) -> BenchSlot:
 
 
 def resolve_bench_for_workload(
-    tier: Tier,
+    tier: DispatchTier,
     workload: JudgmentWorkload,
     bench: Bench | None = None,
 ) -> BenchSlot:
@@ -552,7 +554,7 @@ class SpawnableModel:
     proves exactly one of them.
     """
 
-    tier: Tier
+    tier: DispatchTier
     workload: JudgmentWorkload
     harness: Harness
     model: str | None
@@ -630,7 +632,7 @@ def dispatch_seat_counts(bench: Bench | None = None) -> dict[str, int]:
     pipeline concurrently, so "how many senior pipelines at once" is a tier
     semantic and lives here, not in the loop. The keys are tier values (plain
     strings) because the dispatcher speaks the coordination ledger's tier
-    vocabulary, not this module's ``Tier`` - the two enums share values by
+    vocabulary, not this module's ``DispatchTier`` - the two enums share values by
     construction.
 
     A tier absent from the bench gets no key and therefore no seats: a
@@ -772,7 +774,7 @@ def load_staffing(config_path: Path) -> Staffing:
         return DEFAULT_STAFFING
     data = tomllib.loads(config_path.read_text(encoding="utf-8"))
     bench_table = data.get("bench", {})
-    paired = {tier.value for tier in (Tier.SENIOR, Tier.STAFF)}
+    paired = {tier.value for tier in (DispatchTier.SENIOR, DispatchTier.STAFF)}
     named_alone = sorted(paired & set(bench_table))
     if named_alone:
         raise ValueError(
@@ -781,7 +783,7 @@ def load_staffing(config_path: Path) -> Staffing:
             "table and selected with a top-level `seated_pairing`"
         )
     solo: Bench = {
-        Tier(tier_name): _read_slot(slot, where=f"bench.{tier_name}")
+        DispatchTier(tier_name): _read_slot(slot, where=f"bench.{tier_name}")
         for tier_name, slot in bench_table.items()
     }
     pairings = _read_pairings(data)

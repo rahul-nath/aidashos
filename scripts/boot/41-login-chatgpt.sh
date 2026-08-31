@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../toolchain-pins.env
+. "$ROOT/scripts/toolchain-pins.env"
+
 # Sign in to the ChatGPT subscription through the Codex CLI.
 #
 # The senior seat in configs/staffing.toml runs on the codex harness under your
@@ -14,7 +18,7 @@ if [ "${1:-}" = "--install" ]; then INSTALL=true; fi
 if ! command -v codex >/dev/null 2>&1; then
   if [ "$INSTALL" = true ] && command -v npm >/dev/null 2>&1; then
     echo "Installing the Codex CLI..."
-    npm install --global @openai/codex
+    npm install --global "@openai/codex@$CODEX_CLI_VERSION"
   else
     echo "Codex CLI missing. Install with: npm install --global @openai/codex" >&2
     exit 1
@@ -22,6 +26,10 @@ if ! command -v codex >/dev/null 2>&1; then
 fi
 
 codex --version
+[ "$(codex --version | awk '{print $2}')" = "$CODEX_CLI_VERSION" ] || {
+  echo "Codex CLI must be exactly $CODEX_CLI_VERSION." >&2
+  exit 1
+}
 
 if codex login status >/dev/null 2>&1; then
   echo "Codex is already signed in."

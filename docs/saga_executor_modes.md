@@ -85,7 +85,7 @@ The archived implementation and revival notes live in `potential_directions/omni
 ## Task prompt and environment contract
 
 Each agent task launch gets a first-message prompt built from the pow-wow task and context (role, saga goal, target project, startup-skill pointer, success criteria, dependency outputs, and code/advisory constraints).
-Every typed senior and staff launch also receives the bounded `engineering_doctrine.v2` contract regardless of which target repository owns the work.
+Every typed senior and staff launch also receives the bounded `engineering_doctrine.v3` contract regardless of which target repository owns the work.
 The host stamps its schema version and SHA-256 into the durable execution lease and run artifact.
 Staff may BLOCK approval for a concrete doctrine violation, but must name the violated rule and specific code, contract, or invariant rather than treating a style preference as a violation.
 The launched process also receives `LOCAL_AGENT_CONTEXT_JSON` (the whole `PowWowExecutionContext` payload, carrying the saga id, target project, and dispatch intent) and, for worktree launches, `LOCAL_AGENT_ASSIGNED_WORKTREE` in its environment; the per-field variables this sentence used to list are gone.

@@ -9,6 +9,7 @@ from typing import Any, cast
 
 import pytest
 
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.harness_availability import staffing_around_spent_quotas
 from local_first_agent_os.harness_readiness import TierRestaffed, TierServed, TierUnstaffable
 from local_first_agent_os.pow_wow import CliPowWowExecutor
@@ -28,7 +29,6 @@ from local_first_agent_os.staffing import (
     JudgmentWorkload,
     Roster,
     SharedSeatRefused,
-    Tier,
     WorkloadModelProfile,
     dispatch_seat_counts,
     load_bench,
@@ -36,6 +36,7 @@ from local_first_agent_os.staffing import (
     resolve_bench,
     resolve_bench_for_workload,
 )
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 def test_default_bench_seats_two_different_frontier_vendors() -> None:
@@ -48,9 +49,12 @@ def test_default_bench_seats_two_different_frontier_vendors() -> None:
     vendors, so that is what this asserts.
     """
 
-    frontier_seats = {resolve_bench(Tier.SENIOR).harness, resolve_bench(Tier.STAFF).harness}
+    frontier_seats = {
+        resolve_bench(DispatchTier.SENIOR).harness,
+        resolve_bench(DispatchTier.STAFF).harness,
+    }
     assert frontier_seats == {Harness.CLAUDE, Harness.CODEX}
-    junior = resolve_bench(Tier.JUNIOR)
+    junior = resolve_bench(DispatchTier.JUNIOR)
     assert junior.harness == Harness.PI
     assert junior.model == "gemma4"
     # qwen kept as a backup junior model for the upcoming local comparison eval
@@ -58,9 +62,9 @@ def test_default_bench_seats_two_different_frontier_vendors() -> None:
 
 
 def test_capacity_encodes_allocation() -> None:
-    assert resolve_bench(Tier.STAFF).capacity == 1
-    assert resolve_bench(Tier.SENIOR).capacity == 3
-    assert resolve_bench(Tier.JUNIOR).capacity == 4
+    assert resolve_bench(DispatchTier.STAFF).capacity == 1
+    assert resolve_bench(DispatchTier.SENIOR).capacity == 3
+    assert resolve_bench(DispatchTier.JUNIOR).capacity == 4
 
 
 def test_dispatch_seat_counts_are_the_bench_capacities() -> None:
@@ -71,8 +75,8 @@ def test_dispatch_seat_counts_are_the_bench_capacities() -> None:
     """
 
     bench = {
-        Tier.SENIOR: BenchSlot(harness=Harness.CODEX, capacity=3),
-        Tier.STAFF: BenchSlot(harness=Harness.CLAUDE, capacity=1),
+        DispatchTier.SENIOR: BenchSlot(harness=Harness.CODEX, capacity=3),
+        DispatchTier.STAFF: BenchSlot(harness=Harness.CLAUDE, capacity=1),
     }
     assert dispatch_seat_counts(bench) == {"senior": 3, "staff": 1}
     assert dispatch_seat_counts() == {
@@ -82,9 +86,13 @@ def test_dispatch_seat_counts_are_the_bench_capacities() -> None:
 
 def test_stage_role_is_a_sum_type() -> None:
     # A judgment role carries a tier and (optionally) a stance; a check carries a command.
-    judge = JudgmentRole(name="reviewer", tier=Tier.STAFF, stance="evaluator")
+    judge = JudgmentRole(name="reviewer", tier=DispatchTier.STAFF, stance="evaluator")
     check = CheckRole(name="test_runner", command="uv run pytest")
-    assert judge.kind == "judgment" and judge.tier == Tier.STAFF and judge.stance == "evaluator"
+    assert (
+        judge.kind == "judgment"
+        and judge.tier == DispatchTier.STAFF
+        and judge.stance == "evaluator"
+    )
     assert check.kind == "check" and check.command == "uv run pytest"
     # They are distinct types; a check has no tier, a judge has no command.
     assert not hasattr(check, "tier")
@@ -95,9 +103,10 @@ def test_default_rosters_encode_two_models_checking_each_other() -> None:
     impl = DEFAULT_ROSTERS["IMPLEMENTATION"]
     review = DEFAULT_ROSTERS["REVIEW"]
     assert impl.judgment[0].name == "implementer"
-    assert impl.judgment[0].tier == Tier.SENIOR
+    assert impl.judgment[0].tier == DispatchTier.SENIOR
     assert review.judgment[0].name == "reviewer"
-    assert review.judgment[0].tier == Tier.STAFF  # the other vendor checks the implementer's work
+    # the other vendor checks the implementer's work
+    assert review.judgment[0].tier == DispatchTier.STAFF
     assert review.judgment[0].stance == "evaluator"
     # consensus panel names come straight from the staffing model, not hardcoded strings
     assert {role.name for role in review.consensus} == {"reviewer", "qa", "realist"}
@@ -133,7 +142,7 @@ capacity = 8
         encoding="utf-8",
     )
     bench = load_bench(cfg)
-    assert bench[Tier.STAFF] == BenchSlot(
+    assert bench[DispatchTier.STAFF] == BenchSlot(
         harness=Harness.CLAUDE,
         model=None,
         capacity=2,
@@ -145,8 +154,8 @@ capacity = 8
             ),
         ),
     )
-    assert bench[Tier.SENIOR] == BenchSlot(harness=Harness.CODEX, model=None, capacity=3)
-    assert bench[Tier.JUNIOR] == BenchSlot(harness=Harness.PI, model="gemma4", capacity=8)
+    assert bench[DispatchTier.SENIOR] == BenchSlot(harness=Harness.CODEX, model=None, capacity=3)
+    assert bench[DispatchTier.JUNIOR] == BenchSlot(harness=Harness.PI, model="gemma4", capacity=8)
 
 
 def test_a_frontier_seat_cannot_be_declared_alone(tmp_path: Path) -> None:
@@ -288,9 +297,9 @@ reasoning_effort = "high"
 
     staffing = load_staffing(cfg)
     plan = staffing_around_spent_quotas(staffing, frozenset({FrontierHarness.CLAUDE}))
-    moved = {item.tier: item for item in plan if item.tier is not Tier.JUNIOR}
+    moved = {item.tier: item for item in plan if item.tier is not DispatchTier.JUNIOR}
 
-    senior, staff = moved[Tier.SENIOR], moved[Tier.STAFF]
+    senior, staff = moved[DispatchTier.SENIOR], moved[DispatchTier.STAFF]
     assert isinstance(senior, TierRestaffed) and isinstance(staff, TierRestaffed)
     assert senior.slot.model == "gpt-5.6-sol"
     assert senior.slot.reasoning_effort == "high"
@@ -373,7 +382,7 @@ model = "gpt-5.6-terra"
     plan = staffing_around_spent_quotas(
         staffing, frozenset({FrontierHarness.CLAUDE, FrontierHarness.CODEX})
     )
-    frontier = [item for item in plan if item.tier is not Tier.JUNIOR]
+    frontier = [item for item in plan if item.tier is not DispatchTier.JUNIOR]
 
     assert len(frontier) == 2
     assert all(isinstance(item, TierUnstaffable) for item in frontier)
@@ -430,7 +439,7 @@ def test_the_repo_matrix_survives_the_loss_of_any_one_vendor() -> None:
         depends_on = seated.frontier_harnesses()
         for vendor in depends_on:
             plan = staffing_around_spent_quotas(candidate, frozenset({vendor}))
-            moved = {item.tier: item for item in plan if item.tier is not Tier.JUNIOR}
+            moved = {item.tier: item for item in plan if item.tier is not DispatchTier.JUNIOR}
             for tier, item in moved.items():
                 assert isinstance(item, TierRestaffed), (
                     f"pairing {seated.name!r} has no way off a spent {vendor.value} for "
@@ -441,8 +450,8 @@ def test_the_repo_matrix_survives_the_loss_of_any_one_vendor() -> None:
                     vendor
                     not in FrontierPairing(
                         name="landed",
-                        senior=moved[Tier.SENIOR].slot,
-                        staff=moved[Tier.STAFF].slot,
+                        senior=moved[DispatchTier.SENIOR].slot,
+                        staff=moved[DispatchTier.STAFF].slot,
                     ).frontier_harnesses()
                 )
                 assert item.slot.reasoning_effort in accepted_efforts
@@ -450,17 +459,24 @@ def test_the_repo_matrix_survives_the_loss_of_any_one_vendor() -> None:
             # a shared seat would have raised SharedSeatRefused above.
 
         both_out = staffing_around_spent_quotas(candidate, frozenset(FrontierHarness))
-        unstaffed = [item for item in both_out if item.tier is not Tier.JUNIOR]
+        unstaffed = [item for item in both_out if item.tier is not DispatchTier.JUNIOR]
         assert all(isinstance(item, TierUnstaffable) for item in unstaffed)
 
 
 def test_the_repo_matrix_is_the_operator_s_matrix() -> None:
-    """The three seatings, by name, exactly as ruled on 2026-08-23.
+    """The three seatings, by name, as ruled on 2026-08-23 and re-ruled since.
 
     The property test above proves the matrix has no holes; this one pins its
     content, so a drive-by edit to a model or an effort dial is a deliberate
     act against a named ruling rather than a quiet drift. Changing this test IS
     the act of changing the ruling.
+
+    `claude-only` was re-ruled on 2026-08-30: the implementer moved from Opus
+    at high to Sonnet at xhigh and the reviewer from Fable to Opus, after the
+    shared claude window refused a concurrent turn during work unit
+    c88ff4167c66. Depth on the implementation seat is now bought with effort
+    instead of with the model, and the expensive model sits on the capacity-1
+    critic seat.
     """
 
     repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
@@ -478,8 +494,8 @@ def test_the_repo_matrix_is_the_operator_s_matrix() -> None:
         ("claude", "claude-opus-5", "xhigh"),
     )
     assert seats("claude-only") == (
+        ("claude", "claude-sonnet-5", "xhigh"),
         ("claude", "claude-opus-5", "high"),
-        ("claude", "claude-fable-5", "high"),
     )
     assert seats("codex-only") == (
         ("codex", "gpt-5.6-terra", "max"),
@@ -495,12 +511,12 @@ def test_workload_profile_changes_model_not_seniority_or_capacity(tmp_path: Path
     bench = load_bench(repo_cfg)
 
     standard = resolve_bench_for_workload(
-        Tier.SENIOR,
+        DispatchTier.SENIOR,
         JudgmentWorkload.STANDARD,
         bench,
     )
     reading = resolve_bench_for_workload(
-        Tier.SENIOR,
+        DispatchTier.SENIOR,
         JudgmentWorkload.INDEPENDENT_READING,
         bench,
     )
@@ -515,7 +531,10 @@ def test_workload_profile_changes_model_not_seniority_or_capacity(tmp_path: Path
         "gpt-5.6-terra",
         "medium",
     )
-    assert reading.capacity == standard.capacity == 2
+    # Equal to each other, not to a literal: the claim under test is that a
+    # workload profile swaps the model and leaves capacity alone, so pinning the
+    # number here only made the test fail when the operator re-ruled capacity.
+    assert reading.capacity == standard.capacity
 
 
 def test_executor_routes_only_independent_reading_to_its_workload_profile(
@@ -526,14 +545,14 @@ def test_executor_routes_only_independent_reading_to_its_workload_profile(
         worktree_root=tmp_path / "worktrees",
         bench=load_bench(repo_cfg),
     )
-    role = JudgmentRole(name="implementer", tier=Tier.SENIOR)
+    role = JudgmentRole(name="implementer", tier=DispatchTier.SENIOR)
     reading = PowWowTaskSpec(
         task_name="read",
         role="senior independent reader",
         description="inspect the repository",
         purpose=TaskPurpose.ADVISORY,
         judgment=role,
-        dispatch_kind="advisory",
+        dispatch_kind=DispatchKind.ADVISORY,
         planning_phase=PlanningPhase.SENIOR_INDEPENDENT_READING,
     )
     implementation = PowWowTaskSpec(
@@ -542,7 +561,7 @@ def test_executor_routes_only_independent_reading_to_its_workload_profile(
         description="implement the accepted plan",
         purpose=TaskPurpose.IMPLEMENTATION,
         judgment=role,
-        dispatch_kind="code",
+        dispatch_kind=DispatchKind.CODE,
         planning_phase=PlanningPhase.SENIOR_OWNED_PLAN,
     )
 
@@ -636,7 +655,7 @@ model = "claude-fable-5"
 
     bench = load_bench(cfg)
 
-    assert bench[Tier.SENIOR].model != bench[Tier.STAFF].model
+    assert bench[DispatchTier.SENIOR].model != bench[DispatchTier.STAFF].model
 
 
 def test_one_seat_pinned_and_one_defaulted_is_not_decidable_here(tmp_path: Path) -> None:
@@ -662,7 +681,7 @@ harness = "claude"
         encoding="utf-8",
     )
 
-    assert load_bench(cfg)[Tier.STAFF].model is None
+    assert load_bench(cfg)[DispatchTier.STAFF].model is None
 
 
 def test_repo_staffing_toml_matches_locked_mapping() -> None:
@@ -698,14 +717,14 @@ def test_repo_staffing_toml_matches_locked_mapping() -> None:
 
     repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
     bench = load_bench(repo_cfg)
-    senior = bench[Tier.SENIOR]
-    staff = bench[Tier.STAFF]
+    senior = bench[DispatchTier.SENIOR]
+    staff = bench[DispatchTier.STAFF]
 
     assert {senior.harness, staff.harness} <= {Harness.CLAUDE, Harness.CODEX}, (
         "both frontier seats must be staffed by a frontier vendor; the junior harness "
         "in a frontier seat is a different mistake and this is where it shows"
     )
-    assert bench[Tier.JUNIOR].harness == Harness.PI
+    assert bench[DispatchTier.JUNIOR].harness == Harness.PI
     # `xhigh` joined this set on 2026-08-13, probed against the claude CLI
     # (`claude --model claude-opus-5 --effort xhigh` answers) before being
     # written here. The set is the harnesses' accepted vocabulary and nothing
@@ -727,8 +746,8 @@ def test_the_repo_bench_never_lets_the_reviewer_be_the_author() -> None:
 
     repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
     bench = load_bench(repo_cfg)
-    senior = bench[Tier.SENIOR]
-    staff = bench[Tier.STAFF]
+    senior = bench[DispatchTier.SENIOR]
+    staff = bench[DispatchTier.STAFF]
 
     assert (senior.harness, senior.model) != (staff.harness, staff.model)
 
@@ -752,8 +771,8 @@ def test_prose_that_names_the_seating_matches_the_config() -> None:
 
     repo_root = Path(__file__).resolve().parents[1]
     bench = load_bench(repo_root / "configs" / "staffing.toml")
-    senior = bench[Tier.SENIOR].harness
-    staff = bench[Tier.STAFF].harness
+    senior = bench[DispatchTier.SENIOR].harness
+    staff = bench[DispatchTier.STAFF].harness
     spoken = {Harness.CLAUDE: "Claude", Harness.CODEX: "Codex"}
     written = {Harness.CLAUDE: "Claude Code", Harness.CODEX: "Codex"}
 
@@ -783,7 +802,7 @@ def test_prose_that_names_the_seating_matches_the_config() -> None:
 
 def test_roster_payload_is_json_friendly() -> None:
     payload = Roster(
-        judgment=(JudgmentRole("implementer", Tier.SENIOR),),
+        judgment=(JudgmentRole("implementer", DispatchTier.SENIOR),),
         checks=(CheckRole("test_runner", "uv run pytest"),),
     ).to_payload()
     judgment = cast(list[dict[str, Any]], payload["judgment"])

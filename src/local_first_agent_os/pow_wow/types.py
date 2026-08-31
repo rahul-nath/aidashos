@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Literal, Protocol
 
 from ..constants import AGENT_BRANCH_AUTO_MERGE
-from ..coordination.contracts import CoordinationCommand, CoordinationResult
+from ..coordination.contracts import CoordinationCommand, CoordinationResult, DispatchKind
 from ..project_center import LinkedProject
 from ..staffing import IMPLEMENTER, REVIEWER, JudgmentRole
 from .protocol import (
@@ -23,7 +23,6 @@ from .protocol import (
 
 type DelegateFn = Callable[..., Mapping[str, Any]]
 type CoordinationCommandFn = Callable[[CoordinationCommand], CoordinationResult]
-type DispatchKind = Literal["advisory", "code", "cast"]
 type ExecutionLeaseStatus = Literal[
     "COMPLETED",
     "FAILED",
@@ -112,6 +111,10 @@ class PowWowTaskSpec:
     reference_packs: tuple[ReferencePack, ...] = ()
 
     def __post_init__(self) -> None:
+        dispatch_kind = self.dispatch_kind
+        if isinstance(dispatch_kind, str):
+            dispatch_kind = DispatchKind(dispatch_kind)
+            object.__setattr__(self, "dispatch_kind", dispatch_kind)
         purpose = self.purpose
         if isinstance(purpose, str):
             purpose = TaskPurpose(purpose)
@@ -120,7 +123,7 @@ class PowWowTaskSpec:
                 task_name=self.task_name,
                 role=self.role,
                 judgment_name=self.judgment.name if self.judgment else None,
-                dispatch_kind=self.dispatch_kind,
+                dispatch_kind=dispatch_kind,
             )
         object.__setattr__(self, "purpose", purpose)
         planning_phase = self.planning_phase
@@ -135,6 +138,7 @@ class PowWowTaskSpec:
     def to_payload(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["purpose"] = self.purpose.value if self.purpose else None
+        payload["dispatch_kind"] = self.dispatch_kind.value if self.dispatch_kind else None
         payload["planning_phase"] = self.planning_phase.value if self.planning_phase else None
         payload["reference_packs"] = [pack.value for pack in self.reference_packs]
         payload["judgment"] = self.judgment.to_payload() if self.judgment else None
@@ -157,7 +161,7 @@ class PowWowExecutionContext:
     memory_project_id: str | None = None
     personal_context_used: bool = False
     no_auto_merge: bool = not AGENT_BRANCH_AUTO_MERGE
-    dispatch_kind: DispatchKind = "code"
+    dispatch_kind: DispatchKind = DispatchKind.CODE
     execution_checkpoint_id: str | None = None
     checkpoint_worktree_path: str | None = None
     checkpoint_base_head_sha: str | None = None
@@ -175,9 +179,14 @@ class PowWowExecutionContext:
     # carried on the intent row. None means branch from HEAD, the historical
     # behavior and the correct one for a milestone without dependencies.
     base_commit_sha: str | None = None
+    # Present only for governed WorkUnit dispatches. A legacy saga has no
+    # attempt-scoped assignment and keeps its compatibility fallback.
+    pairing_assignment_id: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["dispatch_kind"] = self.dispatch_kind.value
+        return payload
 
 
 @dataclass(frozen=True)
@@ -259,7 +268,7 @@ def build_default_saga_tasks(
             role=IMPLEMENTER.name,
             purpose=TaskPurpose.IMPLEMENTATION,
             judgment=IMPLEMENTER,
-            dispatch_kind="code",
+            dispatch_kind=DispatchKind.CODE,
             worktree_group="default",
             description=(
                 f"Use {target} reports and runbooks to identify the next gated portfolio "
@@ -277,7 +286,7 @@ def build_default_saga_tasks(
             role=REVIEWER.name,
             purpose=TaskPurpose.REVIEW,
             judgment=REVIEWER,
-            dispatch_kind="code",
+            dispatch_kind=DispatchKind.CODE,
             blocked_by=("implement_next_gated_portfolio_task",),
             worktree_group="default",
             description=(

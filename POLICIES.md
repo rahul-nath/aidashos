@@ -90,8 +90,9 @@ Keying them on the vendor said the same thing only by coincidence, and the coinc
 A staffing swap meant editing this file, re-pinning its hash, and correcting prose in two other files, or else the gate denied the implementer the write its own compiled plan had granted.
 That is a static rule breaking a modular seat, and it cost a demo more than once before it was fixed on 2026-08-11.
 
-`capability_gate.policy_principal` resolves a caller to its seat: by the role the compiled plan gave it, or - when the role names no seat - by the bench, provided the vendor holds exactly one.
-A vendor may hold two seats at once, which is what an outage staffing looks like, so the role is asked first.
+`capability_gate.policy_principal` resolves a caller to its seat: by the role the compiled plan gave it, then by the seat the dispatch path declares from that plan, and only then by the bench, provided the vendor holds exactly one.
+A vendor may hold two seats at once, which is what an outage staffing looks like, so the role and the declared seat are asked before the bench.
+The declared seat exists because a plan role like `implementer` names no seat by itself, and the bench keys on the vendor - under an outage pairing that answered with the reviewer's seat and denied a live implementation milestone `run_command` on 2026-08-29.
 A section named for a vendor still works and is matched last, so one may be pinned deliberately without giving up the seat sections.
 
 ## Principal: senior

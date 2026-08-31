@@ -43,12 +43,11 @@ PY
 # most sessions never use. Ask for it when you want it.
 parse_runtime_args() {
   START_ASR=false
-  # The frontier probe is on by default because its absence is what this repeats
-  # otherwise: a staffed harness whose subscription is spent looks available
-  # until a milestone spends an attempt discovering it. It costs one nonce
-  # completion per staffed frontier tier, which is the cheapest evidence there
-  # is that the next dispatch can run at all.
-  PROBE_FRONTIER=true
+  # A quota probe is a real provider request carrying the CLI scaffold, so a
+  # routine restart must not spend one per staffed tier. Use --frontier-probe
+  # when deliberately validating newly edited model ids; live scheduling treats
+  # the useful dispatch itself as the availability check.
+  PROBE_FRONTIER=false
   # The environment variable exists so a launchd plist or a scripted caller can
   # ask without an argv change. An explicit flag wins because it is the more
   # specific request.
@@ -132,12 +131,15 @@ uv run local-agent init-db
 # domain. The whisper/llama bring-up below short-circuits if these already
 # brought the ports up.
 LAUNCH_LABELS=(
+  com.rahul.local-first-agent.postgres-backup
   com.rahul.local-first-agent.lifecycle-maintenance
   com.rahul.local-first-agent.session-daemon
   com.rahul.local-first-agent.pi-daemon
   com.rahul.local-first-agent.llama
   com.rahul.local-first-agent.enqueue-drainer
   com.rahul.local-first-agent.ledger-dispatcher
+  com.rahul.local-first-agent.work-unit-crash-reconciler
+  com.rahul.local-first-agent.refinery-fleet
 )
 # Bootstrapping the whisper agent is a launch, so it belongs behind the same
 # gate as the manual bring-up below rather than happening unconditionally here.
@@ -280,167 +282,12 @@ else
   fi
 fi
 
-PI_DAEMON_URL="${LOCAL_AGENT_PI_DAEMON_URL:-http://${LOCAL_AGENT_PI_DAEMON_HOST}:${LOCAL_AGENT_PI_DAEMON_PORT}}"
-PI_DAEMON_LABEL="com.rahul.local-first-agent.pi-daemon"
-pi_daemon_launchd=false
-if launchctl print "$LAUNCH_DOMAIN/$PI_DAEMON_LABEL" >/dev/null 2>&1; then
-  pi_daemon_launchd=true
-fi
-
-# The pi-daemon serves the checkout it runs from, which is not necessarily this
-# one. When launchd owns it, the installed service pins it to the directory in
-# its plist, and launchd does not inherit this shell's environment; running this
-# script from a git worktree does not retarget it and is not meant to.
-#
-# So the revision to expect is the HEAD of the checkout that actually serves Pi.
-# Comparing against this checkout's HEAD instead is what made a worktree on any
-# other branch fail startup outright: the daemon correctly reported the installed
-# checkout's revision, the script demanded the worktree's, a kickstart could not
-# change the answer, and the runtime exited 1.
-PI_DAEMON_CHECKOUT="$ROOT"
-if [ "$pi_daemon_launchd" = "true" ]; then
-  PI_DAEMON_CHECKOUT="$(
-    /usr/libexec/PlistBuddy -c 'Print :WorkingDirectory' \
-      "$LAUNCH_PLIST_DIR/$PI_DAEMON_LABEL.plist" 2>/dev/null || echo "$ROOT"
-  )"
-fi
-PI_DAEMON_REVISION="$(git -C "$PI_DAEMON_CHECKOUT" rev-parse HEAD 2>/dev/null || true)"
-
-if [ "$PI_DAEMON_CHECKOUT" != "$ROOT" ]; then
-  echo "pi-daemon is pinned to $PI_DAEMON_CHECKOUT; \`pi\` runs that checkout, not this one."
-fi
-
-pid_descends_from() {
-  local pid="$1"
-  local ancestor="$2"
-  local parent
-  while [ -n "$pid" ] && [ "$pid" != "1" ]; do
-    [ "$pid" = "$ancestor" ] && return 0
-    parent="$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
-    [ -n "$parent" ] || return 1
-    pid="$parent"
-  done
-  return 1
-}
-
-pi_daemon_is_launchd_owned() {
-  local launchd_pid listener_pid
-  [ "$pi_daemon_launchd" = "true" ] || return 1
-  launchd_pid="$(
-    launchctl print "$LAUNCH_DOMAIN/$PI_DAEMON_LABEL" 2>/dev/null \
-      | awk '/^[[:space:]]*pid = / { print $3; exit }'
-  )"
-  [ -n "$launchd_pid" ] || return 1
-  for listener_pid in $(
-    lsof -nP -iTCP:"${LOCAL_AGENT_PI_DAEMON_PORT}" -sTCP:LISTEN -t 2>/dev/null || true
-  ); do
-    pid_descends_from "$listener_pid" "$launchd_pid" && return 0
-  done
-  return 1
-}
-
-stop_stale_pi_daemon() {
-  local pids pid command
-  pids="$(lsof -nP -iTCP:"${LOCAL_AGENT_PI_DAEMON_PORT}" -sTCP:LISTEN -t 2>/dev/null || true)"
-  for pid in $pids; do
-    command="$(ps -o command= -p "$pid" 2>/dev/null || true)"
-    if [[ "$command" =~ (pi-daemon|run_pi_daemon|local_first_agent_os) ]]; then
-      echo "Restarting stale pi-daemon (pid $pid) for revision $PI_DAEMON_REVISION"
-      kill "$pid" 2>/dev/null || true
-    fi
-  done
-  rm -f .local_agent/run/pi-daemon.pid "$HOME/.local-agent/daemon/pi-daemon.pid"
-  for _ in {1..40}; do
-    if ! "${CURL_HEALTH[@]}" "$PI_DAEMON_URL/health" >/dev/null 2>&1; then
-      return 0
-    fi
-    sleep 0.25
-  done
-  return 1
-}
-
-refresh_pi_daemon() {
-  if [ "$pi_daemon_launchd" = "true" ]; then
-    if ! pi_daemon_is_launchd_owned; then
-      stop_stale_pi_daemon || return 1
-    fi
-    echo "Restarting launchd-owned pi-daemon for revision $PI_DAEMON_REVISION"
-    rm -f .local_agent/run/pi-daemon.pid "$HOME/.local-agent/daemon/pi-daemon.pid"
-    launchctl kickstart -k "$LAUNCH_DOMAIN/$PI_DAEMON_LABEL"
-    return
-  fi
-  stop_stale_pi_daemon
-}
-
-# A healthy daemon can still be serving an earlier revision of its own checkout,
-# or a non-Postgres test configuration. `/health` reports both, and it reports
-# them as of the moment that process started, so it is the whole answer: a
-# revision recorded here at startup would be a second copy of the same fact, and
-# a per-checkout copy at that, which is what made a first start from any worktree
-# announce staleness that was not there.
-pi_daemon_revision_is_stale() {
-  # An unreadable expected revision is not a staleness claim. Comparing two
-  # empty strings would silently read as verified, which is the one outcome
-  # worse than saying the check could not run.
-  [ -n "$PI_DAEMON_REVISION" ] || return 1
-  [ "$1" != "$PI_DAEMON_REVISION" ]
-}
-
-if [ -z "$PI_DAEMON_REVISION" ]; then
-  echo "Cannot read HEAD of $PI_DAEMON_CHECKOUT; skipping the pi-daemon staleness check." >&2
-fi
-
-pi_daemon_current_backend="$("${CURL_HEALTH[@]}" "$PI_DAEMON_URL/health" 2>/dev/null | uv run python -c 'import json, sys; print(json.load(sys.stdin).get("coordination_backend", ""))' 2>/dev/null || true)"
-pi_daemon_current_revision="$("${CURL_HEALTH[@]}" "$PI_DAEMON_URL/health" 2>/dev/null | uv run python -c 'import json, sys; print(json.load(sys.stdin).get("runtime_revision", ""))' 2>/dev/null || true)"
-if "${CURL_HEALTH[@]}" "$PI_DAEMON_URL/health" >/dev/null 2>&1 && \
-  { [ "$pi_daemon_launchd" = "true" ] && ! pi_daemon_is_launchd_owned || \
-    [ "$pi_daemon_current_backend" != "postgres" ] || \
-    pi_daemon_revision_is_stale "$pi_daemon_current_revision"; }; then
-  refresh_pi_daemon || {
-    echo "pi-daemon did not restart for an ownership or revision refresh." >&2
-    exit 1
-  }
-fi
-
-if ! "${CURL_HEALTH[@]}" "$PI_DAEMON_URL/health" >/dev/null 2>&1; then
-  if [ "$pi_daemon_launchd" = "true" ]; then
-    launchctl kickstart -k "$LAUNCH_DOMAIN/$PI_DAEMON_LABEL"
-  else
-    # A machine without the installed LaunchAgent retains the explicit
-    # developer fallback. Installed machines have exactly one owner: launchd.
-    uv run python -c \
-      'from local_first_agent_os.pi_daemon import ensure_pi_daemon; ensure_pi_daemon(wait_seconds=40)'
-  fi
-fi
-
-pi_daemon_ready=false
-for _ in {1..80}; do
-  if "${CURL_HEALTH[@]}" "$PI_DAEMON_URL/health" >/dev/null 2>&1; then
-    pi_daemon_ready=true
-    break
-  fi
-  sleep 0.5
-done
-if [ "$pi_daemon_ready" = "false" ]; then
-  echo "pi-daemon did not become ready within 40s. Check .local_agent/logs/pi-daemon.log" >&2
-  exit 1
-fi
-pi_daemon_backend="$("${CURL_HEALTH[@]}" "$PI_DAEMON_URL/health" | uv run python -c 'import json, sys; print(json.load(sys.stdin).get("coordination_backend", ""))')"
-if [ "$pi_daemon_backend" != "postgres" ]; then
-  echo "pi-daemon is healthy but has coordination_backend=${pi_daemon_backend:-missing}; expected postgres." >&2
-  echo "Check LOCAL_AGENT_COORDINATION_BACKEND in .env, then rerun this script." >&2
-  exit 1
-fi
-pi_daemon_revision="$("${CURL_HEALTH[@]}" "$PI_DAEMON_URL/health" | uv run python -c 'import json, sys; print(json.load(sys.stdin).get("runtime_revision", ""))')"
-if pi_daemon_revision_is_stale "$pi_daemon_revision"; then
-  echo "pi-daemon is healthy but has runtime_revision=${pi_daemon_revision:-missing}; expected" >&2
-  echo "$PI_DAEMON_REVISION, the HEAD of $PI_DAEMON_CHECKOUT, which is the checkout it serves." >&2
-  exit 1
-fi
-if [ "$pi_daemon_launchd" = "true" ] && ! pi_daemon_is_launchd_owned; then
-  echo "pi-daemon is healthy but is not owned by the installed launchd service." >&2
-  exit 1
-fi
+# Service reconciliation is a typed application concern.  The shell supplies
+# its environment and paths, then gets out of the lifecycle decision tree.
+uv run python -m local_first_agent_os.runtime_services pi-daemon \
+  --repo-root "$ROOT" \
+  --launch-domain "$LAUNCH_DOMAIN" \
+  --launch-plist-dir "$LAUNCH_PLIST_DIR"
 
 if [ "$START_ASR" = "true" ]; then
   echo "Postgres/DBOS schema/llama/whisper/pi-daemon are ready."
@@ -471,15 +318,7 @@ else
   exit 1
 fi
 
-# The frontier tiers get the same question the junior tier just answered, and
-# for the same reason: a tier nobody proved is a tier a milestone proves for you,
-# at the cost of one of its three attempts.
-#
-# Unlike the junior preload this does not exit non-zero. A spent subscription is
-# a real state an operator works around - restaffing the seat, or waiting out a
-# window - and refusing to start the cockpit, the ledger and the loops over it
-# would take away the tools they would use to do that. It warns, names the tier,
-# and says what a dispatch to that tier will do.
+# Warn without blocking the runtime operators need to restaff unavailable tiers.
 if [ "$PROBE_FRONTIER" = "true" ]; then
   uv run python -m local_first_agent_os.frontier_probe || true
 fi

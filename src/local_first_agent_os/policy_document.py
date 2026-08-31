@@ -73,7 +73,7 @@ DEFAULT_PRINCIPAL = "default"
 # so revert the file.
 #
 # Recomputed by `policy_document_content_hash()`.
-POLICY_CONTENT_HASH = "3e115f619fa39abcab149947771ab8a0816d301d45598be7bcdd5ba05bec0b4d"
+POLICY_CONTENT_HASH = "3933f80f92f266d86adfd8d8c107fdf7553c9c9a5267976e4ef375e5bc88603c"
 
 _SECTION = re.compile(r"^##\s+Principal:\s*(?P<name>.+?)\s*$", re.MULTILINE)
 _RULE = re.compile(r"^(?P<verb>May|Never):\s*(?P<names>.+?)\s*$", re.MULTILINE)

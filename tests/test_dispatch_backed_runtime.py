@@ -20,6 +20,7 @@ from local_first_agent_os.contracts import (
     TERMINAL_DISPATCH_INTENT_STATUSES,
     DispatchIntentStatus,
 )
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units.events import (
     DiagnosticArtifact,
@@ -28,6 +29,7 @@ from local_first_agent_os.work_units.events import (
 )
 from local_first_agent_os.work_units.execution import (
     DispatchBackedExecutorRuntime,
+    MilestoneAwaitingIntegration,
     MilestoneContext,
 )
 
@@ -102,7 +104,9 @@ def test_an_advisory_intent_needs_no_target_project() -> None:
 
     submitter = _Submitter()
     runtime = DispatchBackedExecutorRuntime(
-        kind="advisory", intent_submitter=submitter, fact_recorder=lambda *_: None
+        kind=DispatchKind.ADVISORY,
+        intent_submitter=submitter,
+        fact_recorder=lambda *_: None,
     )
 
     runtime.submit(_context())
@@ -122,7 +126,9 @@ def test_an_advisory_intent_carries_a_target_the_plan_declared() -> None:
 
     submitter = _Submitter()
     runtime = DispatchBackedExecutorRuntime(
-        kind="advisory", intent_submitter=submitter, fact_recorder=lambda *_: None
+        kind=DispatchKind.ADVISORY,
+        intent_submitter=submitter,
+        fact_recorder=lambda *_: None,
     )
     context = replace(_context(), target_project_id="ai_business_portfolio")
 
@@ -157,7 +163,7 @@ def test_submission_records_the_link_before_the_wait() -> None:
         attempt=1,
         dispatch_intent_id="intent-1",
         tier="senior",
-        kind="code",
+        kind=DispatchKind.CODE,
     )
 
 
@@ -266,6 +272,47 @@ def _run_with_settled(settled: dict[str, Any]) -> Any:
         return runtime.run(_context())
     finally:
         object.__setattr__(runtime, "wait_for", runtime_wait)
+
+
+def test_a_reviewed_source_patch_waits_for_its_exact_landing() -> None:
+    import json
+
+    context = replace(
+        _context(),
+        milestone=replace(_context().milestone, required_artifacts=("source_patch",)),
+    )
+    payload = json.dumps(
+        {
+            "schema_version": "dispatch_runner_result.v1",
+            "promotion_state": "MERGE_PENDING",
+            "run_result": {
+                "status": "COMPLETED",
+                "output_summary": "reviewed patch",
+                "changed_files": ["src/example.py"],
+            },
+        }
+    )
+    runtime = DispatchBackedExecutorRuntime(
+        intent_submitter=_Submitter(),
+        target_project_id="proj",
+        fact_recorder=lambda *_: None,
+    )
+
+    outcome = runtime._outcome_from_settled_row(
+        context,
+        "intent-1",
+        {
+            "status": DispatchIntentStatus.DONE.value,
+            "outcome": "COMPLETED",
+            "error": None,
+            "result": payload,
+        },
+    )
+
+    assert outcome == MilestoneAwaitingIntegration(
+        dispatch_intent_id="intent-1",
+        timeout_seconds=context.milestone.timeout_seconds,
+    )
 
 
 def test_a_failed_dispatch_keeps_the_evidence_its_payload_already_carried() -> None:

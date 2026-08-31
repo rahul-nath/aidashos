@@ -5,14 +5,14 @@ from __future__ import annotations
 
 import pytest
 
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.decomposition import (
     DecompositionError,
     PromptedDecompositionPlanner,
     RuleBasedDecompositionPlanner,
     parse_task_specs_from_planner_payload,
 )
-from local_first_agent_os.pow_wow import DispatchKind
-from local_first_agent_os.staffing import Tier
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 class _Project:
@@ -57,8 +57,8 @@ def _mini_gawd_payload() -> dict[str, object]:
 def test_rule_based_planner_emits_code_dag() -> None:
     plan = RuleBasedDecompositionPlanner().plan(
         intent_id="abcdef12-3456",
-        tier=Tier.SENIOR,
-        kind="code",
+        tier=DispatchTier.SENIOR,
+        kind=DispatchKind.CODE,
         prompt="implement the thing",
         target_project=_Project(),  # type: ignore[arg-type]
         intent={},
@@ -69,18 +69,18 @@ def test_rule_based_planner_emits_code_dag() -> None:
     assert plan.mini_gawd.project == "target"
     assert "No automatic merge" in plan.mini_gawd.non_goals[0]
     assert [task.judgment.tier for task in plan.tasks if task.judgment] == [
-        Tier.SENIOR,
-        Tier.STAFF,
-        Tier.JUNIOR,
-        Tier.SENIOR,
-        Tier.STAFF,
+        DispatchTier.SENIOR,
+        DispatchTier.STAFF,
+        DispatchTier.JUNIOR,
+        DispatchTier.SENIOR,
+        DispatchTier.STAFF,
     ]
     assert [task.dispatch_kind for task in plan.tasks] == [
-        "advisory",
-        "advisory",
-        "advisory",
-        "code",
-        "code",
+        DispatchKind.ADVISORY,
+        DispatchKind.ADVISORY,
+        DispatchKind.ADVISORY,
+        DispatchKind.CODE,
+        DispatchKind.CODE,
     ]
     assert plan.tasks[2].blocked_by == (plan.tasks[0].task_name,)
     assert set(plan.tasks[3].blocked_by) == {
@@ -112,7 +112,7 @@ def test_planner_payload_parser_rejects_missing_dependency() -> None:
                     }
                 ]
             },
-            default_dispatch_kind="advisory",
+            default_dispatch_kind=DispatchKind.ADVISORY,
         )
 
 
@@ -137,12 +137,12 @@ def test_planner_payload_parser_accepts_valid_model_shape() -> None:
                 },
             ]
         },
-        default_dispatch_kind="advisory",
+        default_dispatch_kind=DispatchKind.ADVISORY,
     )
 
     assert len(tasks) == 2
     assert tasks[1].blocked_by == ("draft",)
-    assert tasks[1].judgment and tasks[1].judgment.tier == Tier.STAFF
+    assert tasks[1].judgment and tasks[1].judgment.tier == DispatchTier.STAFF
 
 
 def test_prompted_planner_uses_injected_model_front_end() -> None:
@@ -172,8 +172,8 @@ def test_prompted_planner_uses_injected_model_front_end() -> None:
 
     plan = PromptedDecompositionPlanner(fake_model).plan(
         intent_id="intent-1",
-        tier=Tier.STAFF,
-        kind="advisory",
+        tier=DispatchTier.STAFF,
+        kind=DispatchKind.ADVISORY,
         prompt="decide what to do",
         target_project=_Project(),  # type: ignore[arg-type]
         intent={},
@@ -204,8 +204,8 @@ def test_prompted_planner_requires_mini_gawd() -> None:
     with pytest.raises(DecompositionError, match="mini_gawd"):
         planner.plan(
             intent_id="intent-1",
-            tier=Tier.JUNIOR,
-            kind="advisory",
+            tier=DispatchTier.JUNIOR,
+            kind=DispatchKind.ADVISORY,
             prompt="draft",
             target_project=_Project(),  # type: ignore[arg-type]
             intent={},
@@ -213,5 +213,35 @@ def test_prompted_planner_requires_mini_gawd() -> None:
 
 
 def test_dispatch_kind_type_exports_expected_values() -> None:
-    kinds: tuple[DispatchKind, DispatchKind] = ("advisory", "code")
-    assert kinds == ("advisory", "code")
+    assert tuple(DispatchKind) == (
+        DispatchKind.ADVISORY,
+        DispatchKind.CODE,
+        DispatchKind.CAST,
+    )
+
+
+def test_planner_payload_parser_accepts_cast_from_the_wire() -> None:
+    tasks = parse_task_specs_from_planner_payload(
+        {
+            "tasks": [
+                {
+                    "task_name": "advocate",
+                    "role": "advocate",
+                    "tier": "junior",
+                    "dispatch_kind": "cast",
+                    "description": "argue for the proposal",
+                },
+                {
+                    "task_name": "synthesis",
+                    "role": "synthesizer",
+                    "tier": "senior",
+                    "dispatch_kind": "cast",
+                    "description": "resolve the arguments",
+                    "blocked_by": ["advocate"],
+                },
+            ]
+        },
+        default_dispatch_kind=DispatchKind.CAST,
+    )
+
+    assert all(task.dispatch_kind is DispatchKind.CAST for task in tasks)

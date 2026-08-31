@@ -26,7 +26,7 @@ import psycopg
 import pytest
 
 from local_first_agent_os import dispatcher as dispatcher_module
-from local_first_agent_os.coordination import ClaimNextDispatchIntent, store
+from local_first_agent_os.coordination import ClaimNextDispatchIntent, DispatchTerminalStatus, store
 from local_first_agent_os.coordination.availability import (
     LedgerUnavailable,
     ledger_unavailable,
@@ -165,7 +165,7 @@ def test_an_outage_is_not_an_idle_queue(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def _dispatcher(coord: Any) -> LedgerDispatcher:
-    dispatcher = LedgerDispatcher(lambda _intent: ("DONE", None, None))
+    dispatcher = LedgerDispatcher(lambda _intent: (DispatchTerminalStatus.DONE, None, None))
     dispatcher._coord = coord  # type: ignore[method-assign]
     return dispatcher
 

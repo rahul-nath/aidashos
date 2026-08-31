@@ -24,6 +24,7 @@ import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 
 from local_first_agent_os.contracts import WorkflowType
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.local_delegate import (
     build_directive_local_delegate,
     build_resident_local_delegate,
@@ -47,9 +48,9 @@ from local_first_agent_os.staffing import (
     Harness,
     JudgmentRole,
     LocalHarness,
-    Tier,
     classify_harness,
 )
+from local_first_agent_os.vocabulary import DispatchTier
 
 scenarios("features/resident_junior_routing.feature")
 
@@ -88,8 +89,8 @@ def _junior_task(name: str = "junior_context") -> PowWowTaskSpec:
     return PowWowTaskSpec(
         task_name=name,
         role="analyst",
-        judgment=JudgmentRole(name="analyst", tier=Tier.JUNIOR),
-        dispatch_kind="advisory",
+        judgment=JudgmentRole(name="analyst", tier=DispatchTier.JUNIOR),
+        dispatch_kind=DispatchKind.ADVISORY,
         description="summarise the target",
     )
 
@@ -106,11 +107,11 @@ class _RecordingDelegate:
         return {"ok": True, "output": self.output, "error": None}
 
 
-def _bench(junior: Harness = Harness.PI) -> dict[Tier, BenchSlot]:
+def _bench(junior: Harness = Harness.PI) -> dict[DispatchTier, BenchSlot]:
     return {
-        Tier.JUNIOR: BenchSlot(harness=junior, model="gemma4", capacity=4),
-        Tier.SENIOR: BenchSlot(harness=Harness.CLAUDE, capacity=1),
-        Tier.STAFF: BenchSlot(harness=Harness.CODEX, capacity=1),
+        DispatchTier.JUNIOR: BenchSlot(harness=junior, model="gemma4", capacity=4),
+        DispatchTier.SENIOR: BenchSlot(harness=Harness.CLAUDE, capacity=1),
+        DispatchTier.STAFF: BenchSlot(harness=Harness.CODEX, capacity=1),
     }
 
 
@@ -170,8 +171,8 @@ def _junior_is_local(world: dict[str, Any]) -> None:
 def _frontiers_are_configured(world: dict[str, Any]) -> None:
     # `_bench` binds these; the step exists so the feature file states the
     # assumption a reader needs rather than leaving it in Python.
-    assert _bench()[Tier.SENIOR].harness is Harness.CLAUDE
-    assert _bench()[Tier.STAFF].harness is Harness.CODEX
+    assert _bench()[DispatchTier.SENIOR].harness is Harness.CLAUDE
+    assert _bench()[DispatchTier.STAFF].harness is Harness.CODEX
 
 
 @given("a bench that staffs junior with claude instead")
@@ -201,7 +202,7 @@ def _route_junior(world: dict[str, Any]) -> None:
     world["executor"] = executor
     if world["junior_harness"] is Harness.CLAUDE:
         # The claude path would spawn a process; the command is the observable.
-        slot = executor.bench[Tier.JUNIOR]
+        slot = executor.bench[DispatchTier.JUNIOR]
         frontier = executor._resolve_frontier_harness(slot)
         assert isinstance(frontier, FrontierHarness)
         world["command"] = executor._build_agent_cli_command(
@@ -382,7 +383,7 @@ def test_an_unstaffed_tier_is_not_reported_as_local(tmp_path: Path) -> None:
 
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
-        bench={Tier.SENIOR: BenchSlot(harness=Harness.CLAUDE, capacity=1)},
+        bench={DispatchTier.SENIOR: BenchSlot(harness=Harness.CLAUDE, capacity=1)},
         delegate_fn=_RecordingDelegate(),
     )
     assert executor._local_harness_for(_junior_task()) is None
@@ -537,7 +538,7 @@ def test_the_fallback_for_codex_is_claude(tmp_path: Path) -> None:
 def test_there_is_no_fallback_when_the_bench_staffs_only_one_frontier(tmp_path: Path) -> None:
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
-        bench={Tier.SENIOR: BenchSlot(harness=Harness.CLAUDE, capacity=1)},
+        bench={DispatchTier.SENIOR: BenchSlot(harness=Harness.CLAUDE, capacity=1)},
     )
     assert executor._select_alternate_frontier_slot(FrontierHarness.CLAUDE) is None
 
@@ -590,7 +591,7 @@ def test_a_dead_process_is_never_the_answer_for_a_local_harness(tmp_path: Path) 
     """
 
     executor = _executor(tmp_path)
-    resolved = executor._resolve_frontier_harness(executor.bench[Tier.JUNIOR])
+    resolved = executor._resolve_frontier_harness(executor.bench[DispatchTier.JUNIOR])
     assert isinstance(resolved, LocalHarness)
 
 

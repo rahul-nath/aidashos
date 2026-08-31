@@ -65,20 +65,33 @@ from .staffing import (
     FrontierHarness,
     LocalHarness,
     Staffing,
-    Tier,
     classify_harness,
 )
+from .vocabulary import DispatchTier
 
 logger = logging.getLogger(__name__)
 
-USAGE_LIMIT_COOLDOWN: Final = timedelta(hours=5)
-"""How long a reported usage limit keeps a harness off the bench.
+USAGE_LIMIT_COOLDOWN: Final = timedelta(minutes=20)
+"""How long a usage limit with NO STATED RESET keeps a harness off the bench.
 
-Five hours because that is the shape of the rolling windows these providers
-use, so it is long enough to stop re-discovering a spent quota and short enough
-that a harness comes back on its own without an operator remembering to put it
-back. Wrong in both directions for some provider somewhere, which is why it is
-one named constant instead of an assumption spread across call sites.
+Twenty minutes, and the short value is the point. A provider that states its
+own reset outranks this entirely - `parse_quota_reset` reads
+`resets 11:30am (America/New_York)` out of the refusal and benches until exactly
+then. This constant only covers the case where the provider said it was spent
+and said nothing about when it would not be.
+
+That case used to assume five hours, on the theory that it matched the shape of
+these providers' rolling windows. The theory was untestable and wrong in the
+expensive direction: on 2026-08-30 both vendors sat benched by this timer while
+a one-line nonce to each answered `ok`, so the machine refused work it could
+have done. An assumption that idles a working provider for hours is worse than
+one that spends an attempt finding out.
+
+So this is now a rate limiter rather than an outage model. It is long enough to
+stop a blocked milestone hammering a spent provider, and short enough that a
+window reopening is noticed in the next scheduling pass instead of the next
+afternoon. The dispatch itself is the real availability check; this only decides
+how soon that check may be repeated.
 """
 
 _USAGE_LIMIT_FAILURE: Final = "USAGE_LIMIT"
@@ -391,7 +404,7 @@ def _unspent_frontier_peer(bench: Bench, spent: frozenset[FrontierHarness]) -> B
     happened to order a TOML file.
     """
 
-    for tier in Tier:
+    for tier in DispatchTier:
         slot = bench.get(tier)
         if slot is None:
             continue
@@ -403,7 +416,7 @@ def _unspent_frontier_peer(bench: Bench, spent: frozenset[FrontierHarness]) -> B
 
 
 def _frontier_models_in_use(
-    bench: Bench, *, excluding: Tier
+    bench: Bench, *, excluding: DispatchTier
 ) -> frozenset[tuple[FrontierHarness, str | None]]:
     """The (harness, model) pairs other frontier tiers are holding right now.
 
@@ -425,7 +438,7 @@ def _frontier_models_in_use(
 
 
 def _replacement_for(
-    bench: Bench, spent: frozenset[FrontierHarness], *, tier: Tier
+    bench: Bench, spent: frozenset[FrontierHarness], *, tier: DispatchTier
 ) -> BenchSlot | None:
     """Where a spent tier goes, and on which model once it gets there.
 
@@ -487,7 +500,7 @@ def _replacement_for(
 
 def _paired_tier_staffing(
     staffing: Staffing, spent: frozenset[FrontierHarness], *, hours: int
-) -> dict[Tier, TierStaffing]:
+) -> dict[DispatchTier, TierStaffing]:
     """The two frontier seats, staffed as the one decision they are declared as.
 
     The pair moves together or not at all. That is not a preference, it is the
@@ -577,12 +590,12 @@ def staffing_around_spent_quotas(
     """
 
     hours = int(cooldown.total_seconds() // 3600)
-    paired: dict[Tier, TierStaffing] = {}
+    paired: dict[DispatchTier, TierStaffing] = {}
     if isinstance(bench, Staffing):
         paired = _paired_tier_staffing(bench, spent, hours=hours)
         bench = bench.bench
     plan: list[TierStaffing] = []
-    for tier in Tier:
+    for tier in DispatchTier:
         if tier in paired:
             plan.append(paired[tier])
             continue
@@ -682,7 +695,7 @@ def build_quota_claim_gate(
         if tier_value is None:
             return True
         try:
-            tier = Tier(tier_value)
+            tier = DispatchTier(tier_value)
         except ValueError:
             return True
         slot = resolved.get(tier)
@@ -712,8 +725,8 @@ def collapsed_cross_checks(plan: Iterable[TierStaffing]) -> tuple[str, ...]:
     """
 
     items = tuple(plan)
-    effective: dict[Tier, FrontierHarness] = {}
-    effective_models: dict[Tier, str | None] = {}
+    effective: dict[DispatchTier, FrontierHarness] = {}
+    effective_models: dict[DispatchTier, str | None] = {}
     for item in items:
         slot = item.replacement if isinstance(item, TierRestaffed) else item.configured
         kind = classify_harness(slot.harness)

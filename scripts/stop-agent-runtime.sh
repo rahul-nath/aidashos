@@ -46,6 +46,7 @@ LAUNCH_LABELS=(
   # script, which brings Postgres up through Docker Compose instead. It is on
   # this list anyway: a stop that leaves a loaded agent behind is not a stop.
   com.rahul.local-first-agent.postgres
+  com.rahul.local-first-agent.postgres-backup
   com.rahul.local-first-agent.pi-daemon
   com.rahul.local-first-agent.whisper
   com.rahul.local-first-agent.llama
@@ -55,6 +56,8 @@ LAUNCH_LABELS=(
   # machine undoes by itself is not a stop.
   com.rahul.local-first-agent.enqueue-drainer
   com.rahul.local-first-agent.ledger-dispatcher
+  com.rahul.local-first-agent.work-unit-crash-reconciler
+  com.rahul.local-first-agent.refinery-fleet
 )
 LAUNCH_DOMAIN="gui/$(id -u)"
 

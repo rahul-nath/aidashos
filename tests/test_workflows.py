@@ -2054,7 +2054,7 @@ def test_start_new_project_ingests_draft_and_finalizes(runtime, tmp_path, monkey
     } <= artifact_types
 
 
-def test_start_approved_gawd_approves_and_enqueues_once(runtime, tmp_path) -> None:
+def _legacy_start_approved_gawd_approves_and_enqueues_once(runtime, tmp_path) -> None:
     runtime.settings.coordination_root = tmp_path / "coordination-root"
     target_path = tmp_path / "target"
     target_path.mkdir()
@@ -2181,7 +2181,7 @@ def test_start_approved_gawd_approves_and_enqueues_once(runtime, tmp_path) -> No
     assert ready_milestone_id in approval["payload_json"]
 
 
-def test_start_approved_gawd_requires_target_project(runtime, tmp_path) -> None:
+def _legacy_start_approved_gawd_requires_target_project(runtime, tmp_path) -> None:
     runtime.settings.coordination_root = tmp_path / "coordination-root"
     target_path = tmp_path / "target"
     target_path.mkdir()
@@ -2229,7 +2229,7 @@ def test_start_approved_gawd_requires_target_project(runtime, tmp_path) -> None:
     assert doc_status == "DRAFT"
 
 
-def test_start_approved_gawd_uses_target_embedded_during_intake(runtime, tmp_path) -> None:
+def _legacy_start_approved_gawd_uses_target_embedded_during_intake(runtime, tmp_path) -> None:
     runtime.settings.coordination_root = tmp_path / "coordination-root"
     target_path = tmp_path / "target"
     target_path.mkdir()
@@ -2268,7 +2268,7 @@ def test_start_approved_gawd_uses_target_embedded_during_intake(runtime, tmp_pat
     assert payload["dispatch_intent"]["target_project_id"] == "target"
 
 
-def test_approve_most_recent_resolves_gawd_target_and_enqueues(runtime, tmp_path) -> None:
+def _legacy_approve_most_recent_resolves_gawd_target_and_enqueues(runtime, tmp_path) -> None:
     runtime.settings.coordination_root = tmp_path / "coordination-root"
     target_path = tmp_path / "target"
     target_path.mkdir()
@@ -2343,7 +2343,7 @@ def test_approve_most_recent_resolves_gawd_target_and_enqueues(runtime, tmp_path
     assert payload["next_step"] == "pi /dispatch"
 
 
-def test_approve_most_recent_refuses_ambiguous_historical_targets(runtime, tmp_path) -> None:
+def _legacy_approve_most_recent_refuses_ambiguous_historical_targets(runtime, tmp_path) -> None:
     runtime.settings.coordination_root = tmp_path / "coordination-root"
     saga = run_coordination_command(
         ["create_saga", "Ambiguous shortcut target"], settings=runtime.settings
@@ -2410,6 +2410,34 @@ def test_approve_most_recent_refuses_ambiguous_historical_targets(runtime, tmp_p
     assert approvals["requests"] == []
 
 
+@pytest.mark.parametrize(
+    "directive",
+    (
+        "/start /approved-gawd historical-doc --target-project target",
+        "/approve-most-recent",
+    ),
+)
+def test_governed_saga_entrypoints_redirect_to_work_units(runtime, directive: str) -> None:
+    event = normalize_scheduled_event(
+        source_type=SourceType.MANUAL,
+        workspace_id=WorkspaceId.GENERAL.value,
+        event_type="pi.directive",
+        payload={"directive": directive},
+    )
+
+    result = WorkflowEngine(runtime).model_directive(event)
+
+    assert result.status == WorkflowStatus.FAILED_PERMANENT
+    artifact = next(a for a in result.artifacts if str(a.role) == "directive_result")
+    payload = runtime.artifact_store.read_json(artifact.artifact_id)
+    assert "standalone saga door for governed work is retired" in payload["error"]
+    assert "agent-ledger compile_design_doc" in payload["error"]
+    with tx() as conn:
+        assert (
+            conn.execute("SELECT COUNT(*) AS count FROM dispatch_intents").fetchone()["count"] == 0
+        )
+
+
 def test_dispatcher_directive_reports_completed_poll_count(runtime, monkeypatch) -> None:
     from local_first_agent_os import dispatcher, dispatcher_runner
 
@@ -2419,7 +2447,7 @@ def test_dispatcher_directive_reports_completed_poll_count(runtime, monkeypatch)
                 dispatcher.Dispatched(
                     intent_id="intent-1",
                     tier="senior",
-                    status="DONE",
+                    status=dispatcher.DispatchTerminalStatus.DONE,
                     source="approved_gawd:doc-1:milestone:m04",
                     target_project_id="pest_site_factory",
                     milestone_id="saga-1:m04",

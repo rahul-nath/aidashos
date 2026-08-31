@@ -17,7 +17,8 @@ told to stop.
 Three kinds of thing get stopped, because three different things can be holding
 the work:
 
-- A `PENDING` dispatch intent becomes `CANCELED` and no agent ever starts from it.
+- A `PENDING` or `PAUSED` dispatch intent becomes `CANCELED` and cannot start
+  or resume work.
 - A DBOS workflow is cancelled, so nothing resumes it on recovery.
 - An **execution lease** is asked to cancel, which is what actually reaches a
   running agent. `agent_execution_leases.intent_id` is a foreign key to the
@@ -26,9 +27,9 @@ the work:
   heartbeat.
 
 The intent and the lease are a pair, and neither alone is enough.
-`cancel_dispatch_intent` refuses anything past `PENDING`, so once a dispatcher
-has claimed an intent, cancelling it stops nothing that is running. That refusal
-is reported rather than swallowed, and the lease stop is what covers the case.
+`cancel_dispatch_intent` refuses active states, so cancelling a claimed intent
+stops nothing that is running. That refusal is reported rather than swallowed,
+and the lease stop is what covers the case.
 Leases are resolved *before* anything is stopped, because the intent is about to
 be refused and the lease is the only remaining handle on the process it started.
 
@@ -168,10 +169,9 @@ def _stop_dispatch_intent(intent_id: str, reason: str) -> StopAttempt:
             identifier=intent_id,
             verdict=StopVerdict.STOPPED,
         )
-    # `not_pending` means a dispatcher already claimed it, so no future agent
-    # starts from this intent but a current one is untouched. That is not a
-    # failure of the cascade: it is the case `_stop_execution_lease` handles,
-    # and it is reported so the two together tell the whole story.
+    # `not_cancelable` means the intent is active or terminal. An active process
+    # is covered by `_stop_execution_lease`; a terminal row is reported because
+    # this function cannot infer which of those two cases the refusal represents.
     return StopAttempt(
         kind=StopTargetKind.DISPATCH_INTENT,
         identifier=intent_id,

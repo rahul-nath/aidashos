@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Installs (or removes) the launch agents: postgres bring-up, llama-server,
-# whisper-server, pi-daemon, the session-daemon, and the two resident loops that
-# move queued work. Run `install.sh` to install them and `install.sh uninstall`
+# whisper-server, pi-daemon, the session-daemon, backups, and the resident loops
+# that move, recover, and integrate queued work. Run `install.sh` to install them and `install.sh uninstall`
 # to remove them.
 #
 # These are not boot agents. The plists are rendered into LOCAL_AGENT_LAUNCHD_DIR
@@ -43,6 +43,7 @@ esac
 
 PLISTS=(
   com.rahul.local-first-agent.postgres
+  com.rahul.local-first-agent.postgres-backup
   com.rahul.local-first-agent.lifecycle-maintenance
   com.rahul.local-first-agent.llama
   com.rahul.local-first-agent.whisper
@@ -55,6 +56,8 @@ PLISTS=(
   # that starts early simply retries.
   com.rahul.local-first-agent.enqueue-drainer
   com.rahul.local-first-agent.ledger-dispatcher
+  com.rahul.local-first-agent.work-unit-crash-reconciler
+  com.rahul.local-first-agent.refinery-fleet
 )
 
 wait_for_bootout() {

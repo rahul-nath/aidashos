@@ -89,6 +89,24 @@ case "${LEDGER_STATE%% *}" in
     ;;
 esac
 
+section "Ledger backups"
+BACKUP_STATE="$(uv run python -m local_first_agent_os.backup_readiness 2>/dev/null)"
+IFS=$'\t' read -r backup_status backup_message backup_fix <<<"$BACKUP_STATE"
+if [ "$backup_status" = "ready" ]; then
+  ok "$backup_message"
+else
+  blocked "${backup_message:-backup readiness could not be determined}" \
+    "${backup_fix:-./scripts/backup-coordination-postgres.sh}"
+fi
+
+section "Process containment"
+if uv run python -c "from local_first_agent_os.process_containment import assert_process_containment_available; assert_process_containment_available()" >/dev/null 2>&1; then
+  ok "frontier process containment is available"
+else
+  blocked "frontier process containment is unavailable" \
+    "run on supported macOS with /usr/bin/sandbox-exec available"
+fi
+
 section "Local junior model (required)"
 # The one dependency the system will not run without. The junior tier decides
 # things *about* the frontier agents - permission-envelope scans, stall
@@ -239,14 +257,14 @@ if missing:
 PY
 
 section "Resident loops"
-# The two processes that make queued work move. Supervised by launchd, so the
+# The processes that make queued work move and recover it. Supervised by launchd, so the
 # expected steady state is owned-by-someone rather than started-by-you.
 if uv run python scripts/resident_loop_owners.py 2>/dev/null | grep -q .; then
   uv run python scripts/resident_loop_owners.py 2>/dev/null | while IFS=$'\t' read -r loop _pid description; do
     printf '  \033[32mok\033[0m       %s: %s\n' "$loop" "$description"
   done
 else
-  partial "no resident loop owns the drainer or the dispatcher" \
+  partial "no resident coordination loop is currently owned" \
     "./scripts/launchd/install.sh (supervised), or ./scripts/start-agent-runtime.sh (this shell)"
 fi
 

@@ -30,6 +30,7 @@ from local_first_agent_os.engineering_doctrine import CURRENT_ENGINEERING_DOCTRI
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 _INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
+_STARTUP_SKILL = _REPOSITORY_ROOT / "skills" / "agent-startup" / "SKILL.md"
 
 
 def _read(name: str) -> str:
@@ -106,3 +107,20 @@ def test_both_instruction_files_point_at_the_principles_in_prose() -> None:
             f"{name} no longer mentions docs/design_principles.md. It is not imported on "
             "purpose, which only works while something still tells the reader to open it."
         )
+
+
+def test_both_instruction_files_make_live_documentation_reduce_code_knowledge() -> None:
+    """Both harnesses receive the same rule before they edit repository code."""
+
+    for name in _INSTRUCTION_FILES:
+        text = _read(name)
+        assert "Make comments and docstrings reduce code knowledge" in text
+        assert "leave implementation history in version control" in text
+
+
+def test_startup_skill_makes_live_documentation_reduce_code_knowledge() -> None:
+    """The canonical startup ritual carries the rule into dispatched work."""
+
+    text = _STARTUP_SKILL.read_text(encoding="utf-8")
+    assert "Make comments and docstrings reduce code knowledge" in text
+    assert "leave implementation history in version control" in text

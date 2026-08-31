@@ -662,6 +662,16 @@ export interface components {
             /** Width */
             width: number;
         };
+        /** ChargedFailureBudgetView */
+        ChargedFailureBudgetView: {
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "charged_failure_budget";
+            /** Max Charged Failures */
+            max_charged_failures: number;
+        };
         /** CheckpointFacts */
         CheckpointFacts: {
             /** Base Head Sha */
@@ -846,15 +856,16 @@ export interface components {
          *     answer to lift it, so the refusal carries its own remedy.
          */
         ExhaustedMilestoneView: {
-            /** Attempt */
-            attempt: number;
+            /** Charged Failures */
+            charged_failures: number;
+            /** Execution Ordinal */
+            execution_ordinal: number;
             /** Milestone Key */
             milestone_key: string;
             /** Override Request Id */
             override_request_id: string;
-            /** Permitted */
-            permitted: number;
             phase: components["schemas"]["LifecyclePhase"];
+            retry_policy: components["schemas"]["RetryPolicyView"];
         };
         /** FileIngressRequest */
         FileIngressRequest: {
@@ -906,9 +917,8 @@ export interface components {
             /** Request Id */
             request_id: string;
             /**
-             * State
-             * @default accepted
-             * @constant
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
             state: "accepted";
             /** Target Project Id */
@@ -923,9 +933,8 @@ export interface components {
             /** Request Id */
             request_id: string | null;
             /**
-             * State
-             * @default blocked
-             * @constant
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
             state: "blocked";
             /** Target Project Id */
@@ -943,9 +952,8 @@ export interface components {
             /** Request Id */
             request_id: string;
             /**
-             * State
-             * @default complete
-             * @constant
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
             state: "complete";
             /** Target Project Id */
@@ -963,9 +971,8 @@ export interface components {
             /** Request Id */
             request_id: string;
             /**
-             * State
-             * @default running
-             * @constant
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
              */
             state: "running";
             /** Target Project Id */
@@ -1183,6 +1190,14 @@ export interface components {
          * @enum {string}
          */
         OperatorDecision: "APPROVED" | "DENIED" | "ANSWERED";
+        /** OperatorOnlyRetryView */
+        OperatorOnlyRetryView: {
+            /**
+             * Kind
+             * @constant
+             */
+            kind: "operator_only";
+        };
         /** PendingDecisionView */
         PendingDecisionView: {
             /** Created At */
@@ -1435,6 +1450,7 @@ export interface components {
             /** Reason */
             reason: string;
         };
+        RetryPolicyView: components["schemas"]["ChargedFailureBudgetView"] | components["schemas"]["OperatorOnlyRetryView"];
         /** ReviseWalkthru */
         ReviseWalkthru: {
             /** Accepted Summary */
@@ -2029,6 +2045,8 @@ export interface components {
             reason: string | null;
             recovered: components["schemas"]["ExecutionRecoveryView"] | null;
             result: components["schemas"]["WorkUnitExecutionResult"] | null;
+            /** Resume Enqueued */
+            resume_enqueued: boolean | null;
             /** Work Unit Id */
             work_unit_id: string;
             /** Workflow Id */

@@ -35,10 +35,10 @@ from .staffing import (
     FrontierPairing,
     LocalHarness,
     Staffing,
-    Tier,
     classify_harness,
     resolve_bench,
 )
+from .vocabulary import DispatchTier
 
 _PROBE_TIMEOUT_SECONDS: Final = 20.0
 
@@ -198,7 +198,7 @@ def frontier_harnesses_on_bench(
     if isinstance(bench, Staffing):
         return bench.frontier_harnesses_in_play()
     harnesses: set[FrontierHarness] = set()
-    for tier in Tier:
+    for tier in DispatchTier:
         kind = classify_harness(resolve_bench(tier, bench).harness)
         if isinstance(kind, LocalHarness):
             continue
@@ -214,7 +214,7 @@ def check_frontier_readiness(bench: Bench | Staffing | None = None) -> tuple[Har
 class TierServed:
     """The tier's configured slot can act, so nothing deviates from the bench."""
 
-    tier: Tier
+    tier: DispatchTier
     configured: BenchSlot
 
     @property
@@ -243,7 +243,7 @@ class TierRestaffed:
     override and `restaffings()` exists to say so out loud.
     """
 
-    tier: Tier
+    tier: DispatchTier
     configured: BenchSlot
     replacement: BenchSlot
     detail: str
@@ -274,6 +274,21 @@ class TierRestaffed:
             capacity=self.configured.capacity,
             backup_models=self.replacement.backup_models,
             reasoning_effort=self.replacement.reasoning_effort,
+            # The replacement's own profiles, not the configured seat's. They
+            # name models in the provider that is actually going to run, so
+            # they travel with the seat that brought them; the configured
+            # seat's would name ids in the spent provider's vocabulary.
+            #
+            # Dropping them was a silent and expensive defect. A restaffed seat
+            # lost its `independent_reading` profile, so
+            # `resolve_bench_for_workload` found none and handed reading tasks
+            # the full seat model - during a quota outage, which is exactly when
+            # the cheap profile matters most. Observed on work unit
+            # c88ff4167c66 (2026-08-30): the two independent-reading tasks ran
+            # `claude-opus-5` and `claude-fable-5` while the file declared
+            # `claude-sonnet-5` for both, and the Fable reading exhausted that
+            # model's credits and blocked the milestone.
+            workload_profiles=self.replacement.workload_profiles,
         )
 
     def describe(self) -> str:
@@ -293,7 +308,7 @@ class TierUnstaffable:
     the operator has to clear by hand.
     """
 
-    tier: Tier
+    tier: DispatchTier
     configured: BenchSlot
     detail: str
 
@@ -325,7 +340,7 @@ def _ready_frontier_peer(
     on.
     """
 
-    for tier in Tier:
+    for tier in DispatchTier:
         slot = resolve_bench(tier, bench)
         kind = classify_harness(slot.harness)
         if isinstance(kind, LocalHarness) or kind is failed:
@@ -337,7 +352,7 @@ def _ready_frontier_peer(
 
 def _paired_door_staffing(
     staffing: Staffing, readiness: dict[FrontierHarness, HarnessReadiness]
-) -> dict[Tier, TierStaffing]:
+) -> dict[DispatchTier, TierStaffing]:
     """The frontier pair at a door, moved as the one decision it is declared as.
 
     The mirror of `harness_availability._paired_tier_staffing`, and deliberately
@@ -425,12 +440,12 @@ def plan_tier_staffing(
         state.harness: state
         for state in (states if states is not None else check_frontier_readiness(bench))
     }
-    paired: dict[Tier, TierStaffing] = {}
+    paired: dict[DispatchTier, TierStaffing] = {}
     if isinstance(bench, Staffing):
         paired = _paired_door_staffing(bench, readiness)
         bench = bench.bench
     plan: list[TierStaffing] = []
-    for tier in Tier:
+    for tier in DispatchTier:
         if tier in paired:
             plan.append(paired[tier])
             continue

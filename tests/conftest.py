@@ -54,6 +54,20 @@ _SCHEMA_NAME_PATTERN = re.compile(r"^test_(?P<created_at>\d{10})_[0-9a-f]{12}$")
 _ORPHAN_MAX_AGE_SECONDS = 3600
 
 
+@pytest.fixture(autouse=True)
+def _operator_token_for_tests(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Give test operator surfaces the same process-held proof production requires."""
+
+    token_file = tmp_path_factory.mktemp("operator-identity") / "operator.token"
+    token_file.write_text("test-operator-token\n", encoding="utf-8")
+    token_file.chmod(0o600)
+    monkeypatch.setenv("LOCAL_AGENT_OPERATOR_TOKEN_FILE", str(token_file))
+    monkeypatch.setenv("LOCAL_AGENT_OPERATOR_TOKEN", "test-operator-token")
+
+
 @cache
 def suite_postgres_source() -> postgres_server.PostgresSource:
     """The server every test's schema is created on, started if it is not up.

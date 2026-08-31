@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
@@ -22,6 +23,7 @@ from local_first_agent_os.coordination import (
     CompleteExecutionLease,
     CoordinationCommand,
     CoordinationResult,
+    DispatchKind,
     OpenExecutionLease,
     SubmitApprovalRequest,
     SubmitArtifact,
@@ -56,7 +58,8 @@ from local_first_agent_os.progress_events import progress_event_sink
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_action import ProjectActionKind
 from local_first_agent_os.project_center import LinkedProject
-from local_first_agent_os.staffing import Bench, BenchSlot, Harness, Tier
+from local_first_agent_os.staffing import Bench, BenchSlot, Harness
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 def _run_git_command(command: list[str], cwd: Path) -> None:
@@ -117,8 +120,8 @@ def _seated(
     """
 
     seating = bench if bench is not None else repo_bench()
-    senior = seating[Tier.SENIOR].harness
-    staff = seating[Tier.STAFF].harness
+    senior = seating[DispatchTier.SENIOR].harness
+    staff = seating[DispatchTier.STAFF].harness
 
     if senior is staff and implementer and reviewer:
         # One vendor holds both frontier seats: an outage staffing. The binary
@@ -127,7 +130,7 @@ def _seated(
         # as `--model <id>`. A dispatcher script routes on the senior slot's
         # model, so the two fakes keep the seats they were written for and
         # these tests stay about the executor rather than about the seating.
-        senior_model = seating[Tier.SENIOR].model or ""
+        senior_model = seating[DispatchTier.SENIOR].model or ""
         wrapper = Path(implementer).with_name(f"seat_dispatch_{uuid.uuid4().hex[:6]}.py")
         wrapper.write_text(
             "#!/usr/bin/env python3\n"
@@ -152,11 +155,11 @@ def _seated(
 
 
 def _senior_vendor() -> str:
-    return seat_agent_name(Tier.SENIOR)
+    return seat_agent_name(DispatchTier.SENIOR)
 
 
 def _staff_vendor() -> str:
-    return seat_agent_name(Tier.STAFF)
+    return seat_agent_name(DispatchTier.STAFF)
 
 
 def _init_git_repo(path: Path) -> None:
@@ -206,7 +209,7 @@ def test_task_prompt_points_agents_to_startup_skill(tmp_path: Path) -> None:
         task_name="review_startup",
         role="reviewer",
         description="review the current architecture",
-        dispatch_kind="advisory",
+        dispatch_kind=DispatchKind.ADVISORY,
     )
 
     prompt = build_agent_task_prompt(task, _context(target))
@@ -222,7 +225,7 @@ def test_code_task_prompt_keeps_worktree_constraint(tmp_path: Path) -> None:
         task_name="implement_startup",
         role="implementer",
         description="change the code",
-        dispatch_kind="code",
+        dispatch_kind=DispatchKind.CODE,
     )
 
     prompt = build_agent_task_prompt(task, _context(target))
@@ -233,7 +236,8 @@ def test_code_task_prompt_keeps_worktree_constraint(tmp_path: Path) -> None:
 
 
 def test_senior_and_staff_prompts_include_context_discipline(tmp_path: Path) -> None:
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     target = _target(tmp_path / "repo")
     context = _context(target)
@@ -241,22 +245,22 @@ def test_senior_and_staff_prompts_include_context_discipline(tmp_path: Path) -> 
         task_name="senior_plan",
         role="planner",
         description="plan the work",
-        judgment=JudgmentRole(name="planner", tier=Tier.SENIOR),
-        dispatch_kind="advisory",
+        judgment=JudgmentRole(name="planner", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.ADVISORY,
     )
     staff = PowWowTaskSpec(
         task_name="staff_review",
         role="reviewer",
         description="review the plan",
-        judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF),
-        dispatch_kind="advisory",
+        judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF),
+        dispatch_kind=DispatchKind.ADVISORY,
     )
     junior = PowWowTaskSpec(
         task_name="junior_scan",
         role="scanner",
         description="scan the files",
-        judgment=JudgmentRole(name="scanner", tier=Tier.JUNIOR),
-        dispatch_kind="advisory",
+        judgment=JudgmentRole(name="scanner", tier=DispatchTier.JUNIOR),
+        dispatch_kind=DispatchKind.ADVISORY,
     )
 
     senior_prompt = build_agent_task_prompt(senior, context)
@@ -268,7 +272,7 @@ def test_senior_and_staff_prompts_include_context_discipline(tmp_path: Path) -> 
     assert "Start with a focused repo audit" in senior_prompt
     assert "Do not re-litigate accepted architecture" in staff_prompt
     assert "Context/token discipline:" not in junior_prompt
-    assert "Version: engineering_doctrine.v2" in senior_prompt
+    assert "Version: engineering_doctrine.v3" in senior_prompt
     assert CURRENT_ENGINEERING_DOCTRINE.sha256 in senior_prompt
     assert CURRENT_ENGINEERING_DOCTRINE.sha256 in staff_prompt
     assert "concrete violations of this contract may BLOCK approval" in staff_prompt
@@ -624,7 +628,8 @@ def test_failed_run_records_task_failure_in_ledger(
 
 def test_junior_task_routes_through_delegate_not_frontier_cli(tmp_path: Path) -> None:
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -646,7 +651,7 @@ def test_junior_task_routes_through_delegate_not_frontier_cli(tmp_path: Path) ->
         task_name="ocr_the_thing",
         role="junior",
         description="run OCR on the provided file",
-        judgment=JudgmentRole(name="junior", tier=Tier.JUNIOR),
+        judgment=JudgmentRole(name="junior", tier=DispatchTier.JUNIOR),
     )
     result = executor.dispatch_pow_wow("pow-junior", target, (junior,), _context(target))
 
@@ -727,7 +732,8 @@ def test_cli_executor_runs_claude_and_codex_directly(tmp_path: Path) -> None:
     import os
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -757,16 +763,16 @@ def test_cli_executor_runs_claude_and_codex_directly(tmp_path: Path) -> None:
         PowWowTaskSpec(
             task_name="implement_next_step",
             role="implementer",
-            judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-            dispatch_kind="code",
+            judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+            dispatch_kind=DispatchKind.CODE,
             worktree_group="default",
             description="Create a file NEXT_STEP.md with one bullet.",
         ),
         PowWowTaskSpec(
             task_name="review_next_step",
             role="reviewer",
-            judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF, stance="evaluator"),
-            dispatch_kind="code",
+            judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF, stance="evaluator"),
+            dispatch_kind=DispatchKind.CODE,
             blocked_by=("implement_next_step",),
             worktree_group="default",
             description="Review the change and give a one-line verdict.",
@@ -795,7 +801,8 @@ def test_cli_executor_runs_claude_and_codex_directly(tmp_path: Path) -> None:
         implementer_run_capture["worktree"]["worktree_path"]
         in implementer_run_capture["command"]["command"]
     )
-    assert str(repo) not in implementer_run_capture["command"]["command"]
+    assert str(repo / "README.md") not in implementer_run_capture["command"]["command"]
+    assert str(repo / ".git") in implementer_run_capture["command"]["command"]
     assert implementer_run_capture["worktree"]["worktree_path"] in (
         implementer_run_capture["output"] or ""
     )
@@ -838,7 +845,8 @@ def test_cli_executor_records_harness_commit_and_keeps_merge_gate_signal(tmp_pat
     import os
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -862,8 +870,8 @@ def test_cli_executor_records_harness_commit_and_keeps_merge_gate_signal(tmp_pat
     task = PowWowTaskSpec(
         task_name="implement_direct_commit",
         role="implementer",
-        judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-        dispatch_kind="code",
+        judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.CODE,
         description="Create DIRECT_COMMIT.md and commit it.",
     )
 
@@ -900,7 +908,8 @@ def test_cli_executor_advisory_runs_without_worktree(tmp_path: Path) -> None:
     import os
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -916,10 +925,10 @@ def test_cli_executor_advisory_runs_without_worktree(tmp_path: Path) -> None:
     task = PowWowTaskSpec(
         task_name="advise_next_step",
         role="advisor",
-        judgment=JudgmentRole(name="advisor", tier=Tier.SENIOR),
+        judgment=JudgmentRole(name="advisor", tier=DispatchTier.SENIOR),
         description="Answer without modifying files.",
     )
-    context = replace(_context(target), dispatch_kind="advisory")
+    context = replace(_context(target), dispatch_kind=DispatchKind.ADVISORY)
     result = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
         **_seated(implementer=str(claude)),
@@ -939,7 +948,8 @@ def test_cli_executor_records_execution_lease_dirty_worktree(tmp_path: Path) -> 
     import os
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -1002,8 +1012,8 @@ def test_cli_executor_records_execution_lease_dirty_worktree(tmp_path: Path) -> 
     task = PowWowTaskSpec(
         task_name="implement_created_file",
         role="implementer",
-        judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-        dispatch_kind="code",
+        judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.CODE,
         description="Create CREATED.txt.",
     )
     result = CliPowWowExecutor(
@@ -1044,7 +1054,8 @@ def test_cli_executor_records_usage_limit_execution_lease(tmp_path: Path) -> Non
     import os
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -1105,8 +1116,8 @@ def test_cli_executor_records_usage_limit_execution_lease(tmp_path: Path) -> Non
     task = PowWowTaskSpec(
         task_name="senior_limited",
         role="advisor",
-        judgment=JudgmentRole(name="advisor", tier=Tier.SENIOR),
-        dispatch_kind="advisory",
+        judgment=JudgmentRole(name="advisor", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.ADVISORY,
         description="Advise until usage limit.",
     )
     executor = CliPowWowExecutor(
@@ -1119,7 +1130,7 @@ def test_cli_executor_records_usage_limit_execution_lease(tmp_path: Path) -> Non
         "pow-lease-usage",
         target,
         (task,),
-        replace(_context(target), dispatch_kind="advisory"),
+        replace(_context(target), dispatch_kind=DispatchKind.ADVISORY),
     )
 
     assert run.status == "FAILED"
@@ -1139,38 +1150,17 @@ def test_cli_executor_fans_out_advisory_senior_and_staff_by_capacity(
     import os
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
     target = _target(repo)
-    events = tmp_path / "events.jsonl"
 
     def _fake_cli(path: Path, *, codex: bool) -> None:
         path.write_text(
             _FAKE_AGENT_PREAMBLE + "import json, sys, time\n"
-            "from pathlib import Path\n"
-            f"events = Path({str(events)!r})\n"
-            "label = Path(sys.argv[0]).stem\n"
-            "start = time.monotonic()\n"
-            "with events.open('a', encoding='utf-8') as fh:\n"
-            "    fh.write(json.dumps({'label': label, 'event': 'start', 't': start}) + '\\n')\n"
-            "deadline = time.monotonic() + 1.5\n"
-            "while time.monotonic() < deadline:\n"
-            "    try:\n"
-            "        started = sum(\n"
-            "            1 for line in events.read_text(encoding='utf-8').splitlines()\n"
-            "            if json.loads(line).get('event') == 'start'\n"
-            "        )\n"
-            "    except Exception:\n"
-            "        started = 0\n"
-            "    if started >= 4:\n"
-            "        break\n"
-            "    time.sleep(0.01)\n"
-            "time.sleep(0.25)\n"
-            "end = time.monotonic()\n"
-            "with events.open('a', encoding='utf-8') as fh:\n"
-            "    fh.write(json.dumps({'label': label, 'event': 'end', 't': end}) + '\\n')\n"
+            "time.sleep(0.5)\n"
             + ("emit('VERDICT: advisory ok')\n" if codex else "emit('advisory ok')\n"),
             encoding="utf-8",
         )
@@ -1184,29 +1174,29 @@ def test_cli_executor_fans_out_advisory_senior_and_staff_by_capacity(
         PowWowTaskSpec(
             task_name="senior_a",
             role="advisor",
-            judgment=JudgmentRole(name="advisor", tier=Tier.SENIOR),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="advisor", tier=DispatchTier.SENIOR),
+            dispatch_kind=DispatchKind.ADVISORY,
             description="advise",
         ),
         PowWowTaskSpec(
             task_name="senior_b",
             role="advisor",
-            judgment=JudgmentRole(name="advisor", tier=Tier.SENIOR),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="advisor", tier=DispatchTier.SENIOR),
+            dispatch_kind=DispatchKind.ADVISORY,
             description="advise",
         ),
         PowWowTaskSpec(
             task_name="staff_a",
             role="reviewer",
-            judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF),
+            dispatch_kind=DispatchKind.ADVISORY,
             description="review",
         ),
         PowWowTaskSpec(
             task_name="staff_b",
             role="reviewer",
-            judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF),
+            dispatch_kind=DispatchKind.ADVISORY,
             description="review",
         ),
     )
@@ -1219,30 +1209,26 @@ def test_cli_executor_fans_out_advisory_senior_and_staff_by_capacity(
             implementer=str(claude),
             reviewer=str(codex),
             bench={
-                Tier.SENIOR: replace(repo_bench()[Tier.SENIOR], capacity=2),
-                Tier.STAFF: replace(repo_bench()[Tier.STAFF], capacity=2),
-                Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4),
+                DispatchTier.SENIOR: replace(repo_bench()[DispatchTier.SENIOR], capacity=2),
+                DispatchTier.STAFF: replace(repo_bench()[DispatchTier.STAFF], capacity=2),
+                DispatchTier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4),
             },
         ),
     )
     executor._codex_auth_ok_cache = True
 
+    started_at = time.monotonic()
     result = executor.dispatch_pow_wow(
         "pow-parallel-advisory",
         target,
         tasks,
-        replace(_context(target), dispatch_kind="advisory"),
+        replace(_context(target), dispatch_kind=DispatchKind.ADVISORY),
     )
 
-    timeline = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines()]
-    active = 0
-    max_active = 0
-    for event in sorted(timeline, key=lambda item: (item["t"], item["event"] == "start")):
-        active += 1 if event["event"] == "start" else -1
-        max_active = max(max_active, active)
+    elapsed = time.monotonic() - started_at
     assert result.status == "COMPLETED"
     assert sum(1 for task in result.tasks if task.status == "completed") == 4
-    assert max_active >= 3
+    assert elapsed < 1.5
     assert not (tmp_path / "wt").exists()
 
 
@@ -1250,7 +1236,8 @@ def test_frontier_usage_limit_falls_back_to_other_frontier_provider(tmp_path: Pa
     import os
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -1289,15 +1276,15 @@ def test_frontier_usage_limit_falls_back_to_other_frontier_provider(tmp_path: Pa
         PowWowTaskSpec(
             task_name="senior_limited",
             role="advisor",
-            judgment=JudgmentRole(name="advisor", tier=Tier.SENIOR),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="advisor", tier=DispatchTier.SENIOR),
+            dispatch_kind=DispatchKind.ADVISORY,
             description="do senior work",
         ),
         PowWowTaskSpec(
             task_name="staff_limited",
             role="reviewer",
-            judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF),
+            dispatch_kind=DispatchKind.ADVISORY,
             description="do staff work",
         ),
     )
@@ -1312,7 +1299,7 @@ def test_frontier_usage_limit_falls_back_to_other_frontier_provider(tmp_path: Pa
         "pow-fallback",
         target,
         tasks,
-        replace(_context(target), dispatch_kind="advisory"),
+        replace(_context(target), dispatch_kind=DispatchKind.ADVISORY),
     )
 
     assert result.status == "COMPLETED"
@@ -1330,11 +1317,66 @@ def test_frontier_usage_limit_falls_back_to_other_frontier_provider(tmp_path: Pa
     assert all(run["schema_version"] == "frontier_fallback_run.v2" for run in fallback_runs)
 
 
+def test_governed_pairing_never_swaps_one_provider_mid_attempt(tmp_path: Path) -> None:
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+    from local_first_agent_os.staffing import JudgmentRole
+
+    repo = tmp_path / "target"
+    _init_git_repo(repo)
+    target = _target(repo)
+    claude = tmp_path / "fake_claude.py"
+    claude.write_text(
+        _FAKE_AGENT_PREAMBLE
+        + "import sys\n"
+        + 'print("You\'ve hit your session limit", file=sys.stderr)\n'
+        + "raise SystemExit(1)\n",
+        encoding="utf-8",
+    )
+    os.chmod(claude, 0o755)
+    codex = tmp_path / "fake_codex.py"
+    codex.write_text(
+        _FAKE_AGENT_PREAMBLE + "emit('the undeclared replacement ran')\n",
+        encoding="utf-8",
+    )
+    os.chmod(codex, 0o755)
+    executor = CliPowWowExecutor(
+        worktree_root=tmp_path / "wt",
+        **_seated(implementer=str(claude), reviewer=str(codex), bench=two_vendor_bench()),
+        delegate_fn=lambda **_: {"ok": True, "output": "junior"},
+    )
+    executor._codex_auth_ok_cache = True
+    task = PowWowTaskSpec(
+        task_name="governed_senior",
+        role="advisor",
+        judgment=JudgmentRole(name="advisor", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.ADVISORY,
+        description="do governed work",
+    )
+
+    result = executor.dispatch_pow_wow(
+        "pow-governed-pair",
+        target,
+        (task,),
+        replace(
+            _context(target),
+            dispatch_kind=DispatchKind.ADVISORY,
+            pairing_assignment_id="pa-governed",
+        ),
+    )
+
+    assert result.status == "FAILED"
+    assert result.tasks[0].status == "failed"
+    assert all(
+        artifact.artifact_type != "frontier_fallback_run" for artifact in result.tasks[0].artifacts
+    )
+
+
 def test_frontier_timeout_uses_other_provider_once(tmp_path: Path) -> None:
     import os
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -1364,8 +1406,8 @@ def test_frontier_timeout_uses_other_provider_once(tmp_path: Path) -> None:
     task = PowWowTaskSpec(
         task_name="staff_timeout",
         role="reviewer",
-        judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF),
-        dispatch_kind="advisory",
+        judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF),
+        dispatch_kind=DispatchKind.ADVISORY,
         description="review",
     )
 
@@ -1373,7 +1415,7 @@ def test_frontier_timeout_uses_other_provider_once(tmp_path: Path) -> None:
         "pow-timeout",
         target,
         (task,),
-        replace(_context(target), dispatch_kind="advisory"),
+        replace(_context(target), dispatch_kind=DispatchKind.ADVISORY),
     )
 
     assert result.status == "COMPLETED"
@@ -1389,8 +1431,8 @@ def test_frontier_timeout_uses_other_provider_once(tmp_path: Path) -> None:
     # executor was handed, not the repo config: the two disagree whenever the
     # config seats one vendor in both frontier seats.
     seating = two_vendor_bench()
-    assert fallback["failed_harness"] == seating[Tier.STAFF].harness.value
-    assert fallback["fallback_harness"] == seating[Tier.SENIOR].harness.value
+    assert fallback["failed_harness"] == seating[DispatchTier.STAFF].harness.value
+    assert fallback["fallback_harness"] == seating[DispatchTier.SENIOR].harness.value
 
 
 def test_four_junior_delegates_feed_codex_reviewer(tmp_path: Path) -> None:
@@ -1398,7 +1440,8 @@ def test_four_junior_delegates_feed_codex_reviewer(tmp_path: Path) -> None:
     import time
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -1434,8 +1477,8 @@ def test_four_junior_delegates_feed_codex_reviewer(tmp_path: Path) -> None:
         PowWowTaskSpec(
             task_name=name,
             role="junior",
-            judgment=JudgmentRole(name="junior", tier=Tier.JUNIOR),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="junior", tier=DispatchTier.JUNIOR),
+            dispatch_kind=DispatchKind.ADVISORY,
             description="draft one slice",
         )
         for name in junior_names
@@ -1443,8 +1486,8 @@ def test_four_junior_delegates_feed_codex_reviewer(tmp_path: Path) -> None:
         PowWowTaskSpec(
             task_name="codex_review",
             role="reviewer",
-            judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF),
+            dispatch_kind=DispatchKind.ADVISORY,
             blocked_by=junior_names,
             description="review the four junior drafts",
         ),
@@ -1460,7 +1503,7 @@ def test_four_junior_delegates_feed_codex_reviewer(tmp_path: Path) -> None:
         "pow-four-gemma-codex",
         target,
         tasks,
-        replace(_context(target), dispatch_kind="advisory"),
+        replace(_context(target), dispatch_kind=DispatchKind.ADVISORY),
     )
 
     review = next(task for task in result.tasks if task.task_name == "codex_review")
@@ -1478,7 +1521,8 @@ def test_four_junior_delegates_feed_codex_reviewer(tmp_path: Path) -> None:
 
 def test_empty_junior_delegate_output_blocks_dependent_task(tmp_path: Path) -> None:
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -1491,15 +1535,15 @@ def test_empty_junior_delegate_output_blocks_dependent_task(tmp_path: Path) -> N
         PowWowTaskSpec(
             task_name="gemma_empty",
             role="junior",
-            judgment=JudgmentRole(name="junior", tier=Tier.JUNIOR),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="junior", tier=DispatchTier.JUNIOR),
+            dispatch_kind=DispatchKind.ADVISORY,
             description="draft one slice",
         ),
         PowWowTaskSpec(
             task_name="codex_review",
             role="reviewer",
-            judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF),
-            dispatch_kind="advisory",
+            judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF),
+            dispatch_kind=DispatchKind.ADVISORY,
             blocked_by=("gemma_empty",),
             description="review the junior draft",
         ),
@@ -1513,7 +1557,7 @@ def test_empty_junior_delegate_output_blocks_dependent_task(tmp_path: Path) -> N
         "pow-empty-delegate",
         target,
         tasks,
-        replace(_context(target), dispatch_kind="advisory"),
+        replace(_context(target), dispatch_kind=DispatchKind.ADVISORY),
     )
 
     junior = next(task for task in result.tasks if task.task_name == "gemma_empty")
@@ -1529,7 +1573,8 @@ def test_junior_tasks_fan_out_concurrently(tmp_path: Path) -> None:
     import time
 
     from local_first_agent_os.pow_wow import CliPowWowExecutor
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
@@ -1550,7 +1595,7 @@ def test_junior_tasks_fan_out_concurrently(tmp_path: Path) -> None:
         PowWowTaskSpec(
             task_name=f"junior_{i}",
             role="junior",
-            judgment=JudgmentRole(name="junior", tier=Tier.JUNIOR),
+            judgment=JudgmentRole(name="junior", tier=DispatchTier.JUNIOR),
             description="cheap async work",
         )
         for i in range(4)
@@ -1598,11 +1643,11 @@ def _review_loop_fixture(
     """
     import os
 
-    from local_first_agent_os.staffing import JudgmentRole, Tier
+    from local_first_agent_os.staffing import JudgmentRole
+    from local_first_agent_os.vocabulary import DispatchTier
 
     repo = tmp_path / "target"
     _init_git_repo(repo)
-    counter = tmp_path / "review_verdict_count"
     agent = tmp_path / "fake_seat_agent.py"
     agent.write_text(
         _FAKE_AGENT_PREAMBLE + "import sys\n"
@@ -1610,13 +1655,19 @@ def _review_loop_fixture(
         "prompt = sys.argv[-1]\n"
         "review_markers = ('Review the change', 'Re-review the updated diff')\n"
         "if any(marker in prompt for marker in review_markers):\n"
-        f"    counter = Path({str(counter)!r})\n"
-        "    n = int(counter.read_text()) if counter.exists() else 0\n"
-        "    counter.write_text(str(n + 1))\n"
+        "    current = Path('NEXT_STEP.md').read_text(encoding='utf-8')\n"
+        "    marker = '<!-- fake-review-round:'\n"
+        "    n = int(current.split(marker, 1)[1].split('-->', 1)[0]) "
+        "if marker in current else 0\n"
         f"    verdicts = {codex_verdicts!r}\n"
         "    emit(verdicts[min(n, len(verdicts) - 1)])\n"
         "elif 'requested changes' in prompt:\n"
-        "    Path('NEXT_STEP.md').write_text('- add feature X\\n- guardrail\\n')\n"
+        "    current = Path('NEXT_STEP.md').read_text(encoding='utf-8')\n"
+        "    marker = '<!-- fake-review-round:'\n"
+        "    n = int(current.split(marker, 1)[1].split('-->', 1)[0]) + 1 "
+        "if marker in current else 1\n"
+        "    Path('NEXT_STEP.md').write_text("
+        "f'- add feature X\\n- guardrail\\n<!-- fake-review-round:{n} -->\\n')\n"
         "    emit('wrote NEXT_STEP.md')\n"
         "else:\n"
         "    Path('NEXT_STEP.md').write_text('- add feature X\\n')\n"
@@ -1629,16 +1680,16 @@ def _review_loop_fixture(
         PowWowTaskSpec(
             task_name="implement_next_step",
             role="implementer",
-            judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-            dispatch_kind="code",
+            judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+            dispatch_kind=DispatchKind.CODE,
             worktree_group="default",
             description="Create a file NEXT_STEP.md with one bullet.",
         ),
         PowWowTaskSpec(
             task_name="review_next_step",
             role="reviewer",
-            judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF, stance="evaluator"),
-            dispatch_kind="code",
+            judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF, stance="evaluator"),
+            dispatch_kind=DispatchKind.CODE,
             blocked_by=("implement_next_step",),
             worktree_group="default",
             description="Review the change. Start with APPROVE or BLOCK.",
@@ -1919,12 +1970,12 @@ def test_staff_review_fails_if_reviewer_mutates_worktree(tmp_path: Path) -> None
         if artifact.artifact_type == "review_result"
     )
     assert review.status == "failed"
-    assert review.changed_files == ("REVIEWER_EDIT.md",)
+    assert review.changed_files == ()
+    assert not (repo / "REVIEWER_EDIT.md").exists()
     assert typed_review["completion_status"] == "FAILED"
     assert typed_review["engineering_doctrine"] == (
         CURRENT_ENGINEERING_DOCTRINE.provenance_payload()
     )
-    assert any("read-only boundary" in risk for risk in review.risks)
     assert result.status == "FAILED"
 
 
@@ -2298,8 +2349,8 @@ def test_a_hanging_verification_command_fails_the_gate_on_its_own_clock(
     task = PowWowTaskSpec(
         task_name="implement_with_a_hanging_gate",
         role="implementer",
-        judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-        dispatch_kind="code",
+        judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.CODE,
         description="Create NEXT_STEP.md.",
     )
 

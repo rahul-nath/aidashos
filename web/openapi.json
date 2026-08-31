@@ -279,6 +279,26 @@
         "title": "BrowserViewport",
         "type": "object"
       },
+      "ChargedFailureBudgetView": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "charged_failure_budget",
+            "title": "Kind",
+            "type": "string"
+          },
+          "max_charged_failures": {
+            "title": "Max Charged Failures",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "kind",
+          "max_charged_failures"
+        ],
+        "title": "ChargedFailureBudgetView",
+        "type": "object"
+      },
       "CheckpointFacts": {
         "additionalProperties": false,
         "properties": {
@@ -775,8 +795,12 @@
         "additionalProperties": false,
         "description": "A milestone the resume refused to try again, and the arithmetic behind it.\n\nAn operator asking \"why is this still blocked after I resumed it\" needs the\nnumbers, not a sentence. ``override_request_id`` names the decision they can\nanswer to lift it, so the refusal carries its own remedy.",
         "properties": {
-          "attempt": {
-            "title": "Attempt",
+          "charged_failures": {
+            "title": "Charged Failures",
+            "type": "integer"
+          },
+          "execution_ordinal": {
+            "title": "Execution Ordinal",
             "type": "integer"
           },
           "milestone_key": {
@@ -787,19 +811,19 @@
             "title": "Override Request Id",
             "type": "string"
           },
-          "permitted": {
-            "title": "Permitted",
-            "type": "integer"
-          },
           "phase": {
             "$ref": "#/components/schemas/LifecyclePhase"
+          },
+          "retry_policy": {
+            "$ref": "#/components/schemas/RetryPolicyView"
           }
         },
         "required": [
           "milestone_key",
           "phase",
-          "attempt",
-          "permitted",
+          "execution_ordinal",
+          "charged_failures",
+          "retry_policy",
           "override_request_id"
         ],
         "title": "ExhaustedMilestoneView",
@@ -1742,6 +1766,21 @@
         "title": "OperatorDecision",
         "type": "string"
       },
+      "OperatorOnlyRetryView": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "operator_only",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "OperatorOnlyRetryView",
+        "type": "object"
+      },
       "PendingDecisionView": {
         "properties": {
           "created_at": {
@@ -2502,6 +2541,16 @@
         ],
         "title": "ResumeDeliveryView",
         "type": "object"
+      },
+      "RetryPolicyView": {
+        "anyOf": [
+          {
+            "$ref": "#/components/schemas/ChargedFailureBudgetView"
+          },
+          {
+            "$ref": "#/components/schemas/OperatorOnlyRetryView"
+          }
+        ]
       },
       "ReviseWalkthru": {
         "additionalProperties": false,
@@ -3975,6 +4024,17 @@
               }
             ]
           },
+          "resume_enqueued": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Resume Enqueued"
+          },
           "work_unit_id": {
             "title": "Work Unit Id",
             "type": "string"
@@ -3998,6 +4058,7 @@
           "durable",
           "workflow_id",
           "reason",
+          "resume_enqueued",
           "result",
           "recovered",
           "exhausted"

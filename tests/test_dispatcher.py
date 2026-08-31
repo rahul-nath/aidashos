@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from local_first_agent_os.contracts import SourceType, WorkflowStatus, WorkspaceId
+from local_first_agent_os.coordination import DispatchKind, DispatchTerminalStatus
 from local_first_agent_os.coordination.durable import (
     CoordinationCommandRequest,
     ExternalAgentLeaseBoundaryRequest,
@@ -508,7 +509,7 @@ def test_reactor_poll_runs_and_records(tmp_path: Path) -> None:
 
     def runner(intent):
         seen.append(intent["prompt"])
-        return ("DONE", f"ran: {intent['prompt']}", None)
+        return (DispatchTerminalStatus.DONE, f"ran: {intent['prompt']}", None)
 
     from local_first_agent_os.settings import Settings
 
@@ -713,6 +714,120 @@ def test_dispatcher_runner_executes_intent_through_pow_wow_ledger(tmp_path: Path
     ]
 
 
+def test_cast_dispatch_crosses_cli_claim_planning_execution_and_ledger(
+    tmp_path: Path,
+    runtime,
+) -> None:
+    root = tmp_path / "coord"
+    target = tmp_path / "target"
+    target.mkdir()
+    runtime.settings.coordination_root = root
+    runtime.settings.saga_worktree_root = tmp_path / "worktrees"
+    _write_linked_projects(runtime.settings.config_dir, target)
+
+    class RecordingCastExecutor:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def dispatch_pow_wow(self, pow_wow_id, target_project, tasks, context):
+            self.calls.append(
+                {
+                    "pow_wow_id": pow_wow_id,
+                    "tasks": tasks,
+                    "context": context,
+                }
+            )
+            task_results = tuple(
+                PowWowTaskResult(
+                    task_name=task.task_name,
+                    role=task.role,
+                    status="completed",
+                    summary=f"held the {task.role} stance",
+                    artifacts=(
+                        PowWowArtifact(
+                            artifact_type="fake_cast_output",
+                            schema_version="fake_cast_output.v1",
+                            task_name=task.task_name,
+                            content={"dispatch_kind": task.dispatch_kind.value},
+                        ),
+                    ),
+                )
+                for task in tasks
+            )
+            return PowWowRunResult(
+                executor="RecordingCastExecutor",
+                mode="test",
+                pow_wow_id=pow_wow_id,
+                target_project_id=target_project.id,
+                target_project_path=str(target_project.expanded_path),
+                status="COMPLETED",
+                output_summary="cast synthesized",
+                tasks=task_results,
+            )
+
+    fake = RecordingCastExecutor()
+    submitted = _coord(
+        root,
+        [
+            "submit_dispatch_intent",
+            "junior",
+            "Should this proposal ship?",
+            "--kind",
+            "cast",
+            "--target-project-id",
+            "target",
+        ],
+    )
+    assert submitted["kind"] == DispatchKind.CAST.value
+
+    runner = DispatcherIntentRunner(
+        runtime,
+        executor_factory=lambda _bench, _ceiling: fake,  # type: ignore[arg-type]
+    )
+    dispatcher = LedgerDispatcher(runner, name="cast-dispatcher", settings=runtime.settings)
+
+    outcome = dispatcher.poll_once()
+
+    assert isinstance(outcome, Dispatched)
+    assert outcome.status == "DONE"
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["context"].dispatch_kind is DispatchKind.CAST
+    tasks = call["tasks"]
+    assert [task.role for task in tasks] == [
+        "advocate",
+        "skeptic",
+        "pragmatist",
+        "synthesizer",
+    ]
+    assert all(task.dispatch_kind is DispatchKind.CAST for task in tasks)
+    assert all(task.blocked_by == () for task in tasks[:-1])
+    assert set(tasks[-1].blocked_by) == {task.task_name for task in tasks[:-1]}
+
+    done = _coord(root, ["list_dispatch_intents", "--status", "DONE"])["intents"]
+    assert done[0]["intent_id"] == submitted["intent_id"]
+    payload = json.loads(done[0]["result"])
+    assert payload["kind"] == DispatchKind.CAST.value
+    assert all(
+        task["dispatch_kind"] == DispatchKind.CAST.value
+        for task in payload["decomposition"]["tasks"]
+    )
+    persisted_tasks = _coord(root, ["list_tasks", payload["pow_wow_id"]])["tasks"]
+    assert len(persisted_tasks) == 4
+    assert all(task["status"] == "COMPLETED" for task in persisted_tasks)
+    with tx() as conn:
+        artifact_types = [
+            row["artifact_type"]
+            for row in conn.execute(
+                "SELECT artifact_type FROM task_artifacts WHERE pow_wow_id = ?",
+                (payload["pow_wow_id"],),
+            ).fetchall()
+        ]
+    assert artifact_types.count("fake_cast_output") == 4
+    assert "decomposition_plan" in artifact_types
+    assert "pow_wow_dispatch_summary" in artifact_types
+
+
 def test_dispatcher_runner_rejects_code_intent_without_target(
     tmp_path: Path,
     runtime,
@@ -750,7 +865,7 @@ def test_dispatcher_runner_rejects_code_intent_without_target(
     assert pow_wow_count == 0
 
 
-def test_approved_gawd_dispatcher_runs_fake_frontier_clis_end_to_end(
+def _legacy_approved_gawd_dispatcher_runs_fake_frontier_clis_end_to_end(
     tmp_path: Path,
     runtime,
 ) -> None:
@@ -1501,7 +1616,8 @@ def test_dispatch_reads_the_quota_record_before_choosing_a_bench(tmp_path: Path,
     the intent rather than the dispatcher.
     """
 
-    from local_first_agent_os.staffing import DEFAULT_BENCH, Tier
+    from local_first_agent_os.staffing import DEFAULT_BENCH
+    from local_first_agent_os.vocabulary import DispatchTier
 
     root = tmp_path / "coord"
     target = tmp_path / "target"
@@ -1516,12 +1632,12 @@ def test_dispatch_reads_the_quota_record_before_choosing_a_bench(tmp_path: Path,
             "open_execution_lease",
             "quota-before-bench",
             "--worker-id",
-            f"cli:{DEFAULT_BENCH[Tier.STAFF].harness.value}:"
+            f"cli:{DEFAULT_BENCH[DispatchTier.STAFF].harness.value}:"
             "cc33cc33-0000-4000-8000-000000000001:dispatch_x_staff",
             "--agent-tier",
             "staff",
             "--agent-name",
-            DEFAULT_BENCH[Tier.STAFF].harness.value,
+            DEFAULT_BENCH[DispatchTier.STAFF].harness.value,
         ],
     )
     _coord(
@@ -1567,5 +1683,7 @@ def test_dispatch_reads_the_quota_record_before_choosing_a_bench(tmp_path: Path,
     # The staff seat's provider reported the spent quota, so the bench handed to
     # the executor moves that tier onto the other vendor while the runner's own
     # bench, fixed at construction, still names the spent one.
-    assert handed_benches[0][Tier.STAFF].harness is DEFAULT_BENCH[Tier.SENIOR].harness
-    assert runner.bench[Tier.STAFF].harness is DEFAULT_BENCH[Tier.STAFF].harness
+    assert (
+        handed_benches[0][DispatchTier.STAFF].harness is DEFAULT_BENCH[DispatchTier.SENIOR].harness
+    )
+    assert runner.bench[DispatchTier.STAFF].harness is DEFAULT_BENCH[DispatchTier.STAFF].harness

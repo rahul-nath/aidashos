@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from typing import assert_never
 
 from ..constants import DEFAULT_VERIFICATION_COMMAND_TIMEOUT_SECONDS
+from ..coordination.approvals import hold_approved_code_merge_authority
 from ..coordination.integration_queue import (
     claim_requests_for_attempt,
     record_bisected_out,
@@ -333,11 +334,14 @@ def _check_provenance_and_land(
         case _:
             assert_never(verification)
 
-    fast_forward = builder.fast_forward_integrated_branch(
-        workspace,
-        branch_name=project.integrated_branch,
-        tip_sha=tip_sha,
-    )
+    with hold_approved_code_merge_authority(subjects) as approved:
+        if not approved:
+            return StackAbandoned(StackAbandonment.APPROVAL_REVOKED)
+        fast_forward = builder.fast_forward_integrated_branch(
+            workspace,
+            branch_name=project.integrated_branch,
+            tip_sha=tip_sha,
+        )
     match fast_forward:
         case FastForwarded():
             return StackLanded()

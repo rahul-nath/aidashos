@@ -7,6 +7,7 @@ import contextlib
 import os
 import sys
 import threading
+from dataclasses import dataclass
 from typing import Any
 
 from . import (
@@ -70,18 +71,65 @@ def start_durable_workflow(workflow_type: WorkflowType, event: IngressEvent) -> 
     return workflow_id
 
 
-def launch_dbos() -> None:
+@dataclass(frozen=True)
+class DbosLaunched:
+    """A launched runtime is active in this process."""
+
+
+@dataclass(frozen=True)
+class DbosDisabled:
+    """`settings.use_dbos` is false; the direct path is the configured mode."""
+
+
+@dataclass(frozen=True)
+class DbosUnavailable:
+    """The runtime is configured on and the dbos package is not importable."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class DbosLaunchFailed:
+    """`DBOS.launch()` raised; no runtime is active in this process."""
+
+    reason: str
+
+
+DbosLaunchOutcome = DbosLaunched | DbosDisabled | DbosUnavailable | DbosLaunchFailed
+
+
+def launch_dbos() -> DbosLaunchOutcome:
+    """Launch the durable runtime once per process, and say what happened.
+
+    A caller that can serve without the runtime (the Pi direct path) may ignore
+    the outcome. A caller whose routes depend on the runtime - the API, whose
+    delivery, resume, and recovery all assume an active runtime in-process -
+    must refuse to proceed on `DbosUnavailable` or `DbosLaunchFailed`, because
+    this function swallowing a launch failure once left a server answering
+    requests with all three silently unavailable.
+    """
+
     global _dbos_launched
     if _dbos_launched:
-        return
-    if settings.use_dbos and DBOS is not None:
-        try:
-            DBOS.launch()
-        except Exception:
-            # If launch fails (already launched, missing system DB, etc.), fall
-            # back to the direct path so Pi keeps working.
-            return
-        _dbos_launched = True
+        return DbosLaunched()
+    if not settings.use_dbos:
+        return DbosDisabled()
+    if DBOS is None:
+        return DbosUnavailable(
+            reason="LOCAL_AGENT_USE_DBOS is true but the dbos package is not importable"
+        )
+    try:
+        DBOS.launch()
+    except Exception as exc:
+        return DbosLaunchFailed(reason=f"{type(exc).__name__}: {exc}")
+    _dbos_launched = True
+    return DbosLaunched()
+
+
+def dbos_runtime_active() -> bool:
+    """Whether this process holds a launched, not-yet-destroyed runtime."""
+
+    return _dbos_launched
 
 
 def shutdown_dbos() -> None:

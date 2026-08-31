@@ -49,8 +49,8 @@ from local_first_agent_os.staffing import (
     BenchSlot,
     FrontierHarness,
     Harness,
-    Tier,
 )
+from local_first_agent_os.vocabulary import DispatchTier
 
 _NOW = datetime(2026, 8, 6, 8, 0, tzinfo=UTC)
 
@@ -64,7 +64,7 @@ def _lease(harness: str, *, ago: timedelta, failure: str = "USAGE_LIMIT") -> dic
 
 
 def test_a_recent_usage_limit_benches_that_harness() -> None:
-    limited = recently_usage_limited([_lease("codex", ago=timedelta(hours=1))], now=_NOW)
+    limited = recently_usage_limited([_lease("codex", ago=USAGE_LIMIT_COOLDOWN / 2)], now=_NOW)
 
     assert limited == frozenset({FrontierHarness.CODEX})
 
@@ -148,7 +148,7 @@ def test_a_better_answer_is_never_overwritten() -> None:
     assert narrowed == (logged_out, unknown)
 
 
-def _spent(tier: Tier) -> frozenset[FrontierHarness]:
+def _spent(tier: DispatchTier) -> frozenset[FrontierHarness]:
     """The quota set that puts the vendor seated at `tier` out of action.
 
     Derived from the bench rather than named, because these scenarios are about
@@ -160,10 +160,11 @@ def _spent(tier: Tier) -> frozenset[FrontierHarness]:
     return frozenset({FrontierHarness(DEFAULT_BENCH[tier].harness.value)})
 
 
-def _other_vendor(tier: Tier) -> Harness:
+def _other_vendor(tier: DispatchTier) -> Harness:
     """The vendor a tier moves to when its own provider is spent."""
 
-    return DEFAULT_BENCH[Tier.STAFF if tier is Tier.SENIOR else Tier.SENIOR].harness
+    other = DispatchTier.STAFF if tier is DispatchTier.SENIOR else DispatchTier.SENIOR
+    return DEFAULT_BENCH[other].harness
 
 
 def test_the_two_features_meet(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -175,14 +176,14 @@ def test_the_two_features_meet(monkeypatch: pytest.MonkeyPatch) -> None:
 
     states = narrow_by_reported_failures(
         (HarnessReady(harness=FrontierHarness.CODEX), HarnessReady(harness=FrontierHarness.CLAUDE)),
-        _spent(Tier.STAFF),
+        _spent(DispatchTier.STAFF),
     )
 
     plan = plan_tier_staffing(states=states)
 
-    staff = next(item for item in plan if item.tier is Tier.STAFF)
+    staff = next(item for item in plan if item.tier is DispatchTier.STAFF)
     assert isinstance(staff, TierRestaffed)
-    assert staff.replacement.harness is DEFAULT_BENCH[Tier.SENIOR].harness
+    assert staff.replacement.harness is DEFAULT_BENCH[DispatchTier.SENIOR].harness
 
 
 def test_both_providers_spent_refuses_instead_of_burning_attempts() -> None:
@@ -205,12 +206,12 @@ def test_both_providers_spent_refuses_instead_of_burning_attempts() -> None:
 def test_a_dispatch_moves_a_tier_off_a_harness_that_reported_a_spent_quota() -> None:
     """The junior tier is untouched, because a local model has no quota to spend."""
 
-    plan = staffing_around_spent_quotas(dict(DEFAULT_BENCH), _spent(Tier.SENIOR))
+    plan = staffing_around_spent_quotas(dict(DEFAULT_BENCH), _spent(DispatchTier.SENIOR))
 
     bench = effective_bench(plan)
-    assert bench[Tier.SENIOR].harness is _other_vendor(Tier.SENIOR)
-    assert bench[Tier.STAFF].harness is DEFAULT_BENCH[Tier.STAFF].harness
-    assert bench[Tier.JUNIOR] == DEFAULT_BENCH[Tier.JUNIOR]
+    assert bench[DispatchTier.SENIOR].harness is _other_vendor(DispatchTier.SENIOR)
+    assert bench[DispatchTier.STAFF].harness is DEFAULT_BENCH[DispatchTier.STAFF].harness
+    assert bench[DispatchTier.JUNIOR] == DEFAULT_BENCH[DispatchTier.JUNIOR]
     assert restaffings(plan) != ()
 
 
@@ -218,11 +219,14 @@ def test_a_restaffed_tier_keeps_its_own_capacity() -> None:
     """Which provider answers is the replacement's; how many of this tier may run
     at once is a statement about the tier's role, so it stays the configured one."""
 
-    plan = staffing_around_spent_quotas(dict(DEFAULT_BENCH), _spent(Tier.SENIOR))
+    plan = staffing_around_spent_quotas(dict(DEFAULT_BENCH), _spent(DispatchTier.SENIOR))
 
     bench = effective_bench(plan)
-    assert bench[Tier.SENIOR].capacity == DEFAULT_BENCH[Tier.SENIOR].capacity
-    assert bench[Tier.SENIOR].reasoning_effort == DEFAULT_BENCH[Tier.STAFF].reasoning_effort
+    assert bench[DispatchTier.SENIOR].capacity == DEFAULT_BENCH[DispatchTier.SENIOR].capacity
+    assert (
+        bench[DispatchTier.SENIOR].reasoning_effort
+        == DEFAULT_BENCH[DispatchTier.STAFF].reasoning_effort
+    )
 
 
 def test_nowhere_to_move_still_dispatches() -> None:
@@ -234,11 +238,11 @@ def test_nowhere_to_move_still_dispatches() -> None:
     """
 
     bench: Bench = {
-        Tier.STAFF: DEFAULT_BENCH[Tier.STAFF],
-        Tier.JUNIOR: DEFAULT_BENCH[Tier.JUNIOR],
+        DispatchTier.STAFF: DEFAULT_BENCH[DispatchTier.STAFF],
+        DispatchTier.JUNIOR: DEFAULT_BENCH[DispatchTier.JUNIOR],
     }
 
-    plan = staffing_around_spent_quotas(bench, _spent(Tier.STAFF))
+    plan = staffing_around_spent_quotas(bench, _spent(DispatchTier.STAFF))
 
     assert any(isinstance(item, TierUnstaffable) for item in plan)
     assert effective_bench(plan) == bench
@@ -253,11 +257,11 @@ def test_a_tier_the_operator_left_unstaffed_is_not_invented() -> None:
     built with, so the dispatch-time planner walks the tiers that exist rather
     than demanding the rest."""
 
-    bench: Bench = {Tier.SENIOR: DEFAULT_BENCH[Tier.SENIOR]}
+    bench: Bench = {DispatchTier.SENIOR: DEFAULT_BENCH[DispatchTier.SENIOR]}
 
     plan = staffing_around_spent_quotas(bench, frozenset())
 
-    assert [item.tier for item in plan] == [Tier.SENIOR]
+    assert [item.tier for item in plan] == [DispatchTier.SENIOR]
     assert effective_bench(plan) == bench
 
 
@@ -266,15 +270,15 @@ def test_a_local_tier_is_never_the_replacement() -> None:
     substitution this area exists to avoid, not a recovery from one."""
 
     bench: Bench = {
-        Tier.SENIOR: BenchSlot(harness=Harness.CLAUDE),
-        Tier.JUNIOR: DEFAULT_BENCH[Tier.JUNIOR],
+        DispatchTier.SENIOR: BenchSlot(harness=Harness.CLAUDE),
+        DispatchTier.JUNIOR: DEFAULT_BENCH[DispatchTier.JUNIOR],
     }
 
     plan = staffing_around_spent_quotas(bench, frozenset({FrontierHarness.CLAUDE}))
 
     by_tier = {item.tier: item for item in plan}
-    assert isinstance(by_tier[Tier.SENIOR], TierUnstaffable)
-    assert isinstance(by_tier[Tier.JUNIOR], TierServed)
+    assert isinstance(by_tier[DispatchTier.SENIOR], TierUnstaffable)
+    assert isinstance(by_tier[DispatchTier.JUNIOR], TierServed)
     assert effective_bench(plan) == bench
 
 
@@ -367,7 +371,7 @@ def test_the_door_and_a_dispatch_decide_a_spent_quota_by_one_rule(
         ledger_execution,
         "agent_failure_leases_since",
         lambda cutoff, **_: [
-            _lease(DEFAULT_BENCH[Tier.STAFF].harness.value, ago=timedelta(hours=1))
+            _lease(DEFAULT_BENCH[DispatchTier.STAFF].harness.value, ago=timedelta(hours=1))
         ],
     )
     monkeypatch.setattr(
@@ -398,7 +402,7 @@ def test_a_milestone_dispatched_after_a_usage_limit_avoids_that_harness(
     to the spent provider anyway.
     """
 
-    spent_vendor = DEFAULT_BENCH[Tier.STAFF].harness
+    spent_vendor = DEFAULT_BENCH[DispatchTier.STAFF].harness
 
     opened = ledger_execution.open_execution_lease(
         idempotency_key="dispatch-quota-evidence",
@@ -417,8 +421,8 @@ def test_a_milestone_dispatched_after_a_usage_limit_avoids_that_harness(
 
     bench = runner.bench_for_dispatch("intent-after-the-limit")
 
-    assert runner.bench[Tier.STAFF].harness is spent_vendor
-    assert bench[Tier.STAFF].harness is DEFAULT_BENCH[Tier.SENIOR].harness
+    assert runner.bench[DispatchTier.STAFF].harness is spent_vendor
+    assert bench[DispatchTier.STAFF].harness is DEFAULT_BENCH[DispatchTier.SENIOR].harness
 
 
 def test_a_quiet_ledger_leaves_the_operators_bench_exactly_as_written(
@@ -510,13 +514,13 @@ def test_a_restaffing_names_the_cross_check_it_collapses() -> None:
     anyone deciding to, so the plan names it and the dispatch path says it.
     """
 
-    plan = staffing_around_spent_quotas(dict(DEFAULT_BENCH), _spent(Tier.STAFF))
+    plan = staffing_around_spent_quotas(dict(DEFAULT_BENCH), _spent(DispatchTier.STAFF))
 
     notices = collapsed_cross_checks(plan)
 
     assert len(notices) == 1
     assert "staff" in notices[0]
-    assert DEFAULT_BENCH[Tier.SENIOR].harness.value in notices[0]
+    assert DEFAULT_BENCH[DispatchTier.SENIOR].harness.value in notices[0]
     assert "cross-check is collapsed" in notices[0]
 
 
@@ -524,10 +528,10 @@ def test_a_restaffing_between_distinct_providers_collapses_nothing() -> None:
     """The notice is for a collapsed pairing, not for restaffing itself."""
 
     bench: Bench = {
-        Tier.STAFF: DEFAULT_BENCH[Tier.STAFF],
-        Tier.JUNIOR: DEFAULT_BENCH[Tier.JUNIOR],
+        DispatchTier.STAFF: DEFAULT_BENCH[DispatchTier.STAFF],
+        DispatchTier.JUNIOR: DEFAULT_BENCH[DispatchTier.JUNIOR],
     }
 
-    plan = staffing_around_spent_quotas(bench, _spent(Tier.STAFF))
+    plan = staffing_around_spent_quotas(bench, _spent(DispatchTier.STAFF))
 
     assert collapsed_cross_checks(plan) == ()

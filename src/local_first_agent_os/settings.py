@@ -37,6 +37,7 @@ from .constants import (
     DEFAULT_STREAM_DRAIN_TIMEOUT_SECONDS,
     LOCAL_AGENT_STATE_DIR_NAME,
 )
+from .vocabulary import GovernedSagaDoorPosture
 
 LedgerOutboxName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -387,6 +388,18 @@ class Settings(BaseSettings):
             "relaxes the irreversible capabilities in "
             "access_posture.ALWAYS_ENFORCED, and the process says which posture it "
             "is in at startup and on /health."
+        ),
+    )
+    governed_saga_door: GovernedSagaDoorPosture = Field(
+        json_schema_extra={"feature_flag": True},
+        default=GovernedSagaDoorPosture.RETIRED,
+        validation_alias="LOCAL_AGENT_GOVERNED_SAGA_DOOR",
+        description=(
+            "Compatibility parser for the removed /start /approved-gawd governed "
+            "execution lane. Every historical value now redirects to the "
+            "compile_design_doc / start_work_unit path. Production WorkUnit "
+            "2f8e57d35257795531717cfc796ef3ac satisfied the retirement gate in "
+            "docs/completed/governed_saga_door_retirement_gawd.md."
         ),
     )
     saga_worktree_root: Path = Field(

@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from local_first_agent_os.contracts import ApprovalStatus
+from local_first_agent_os.coordination import DispatchTerminalStatus
 from local_first_agent_os.dispatcher import IntentResult, LedgerDispatcher
 from local_first_agent_os.lifecycle_failure_harness import (
     CRITICAL_LIFECYCLE_FAULT_CASES,
@@ -304,7 +305,7 @@ def test_dispatcher_exposes_the_durable_post_claim_boundary(
     def runner(_intent: Mapping[str, object]) -> IntentResult:
         nonlocal runner_called
         runner_called = True
-        return "DONE", None, None
+        return DispatchTerminalStatus.DONE, None, None
 
     dispatcher = LedgerDispatcher(runner)
     commands: list[object] = []

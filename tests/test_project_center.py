@@ -15,14 +15,14 @@ def write_registry(config_dir: Path, project_path: Path) -> None:
     (config_dir / "linked_projects.toml").write_text(
         f"""
 [center]
-id = "local_first_agent_os"
+id = "local-first-agent-os"
 description = "test center"
-control_plane_project = "local_first_agent_os"
+control_plane_project = "local-first-agent-os"
 default_saga_project = "ai_business_portfolio"
 default_memory_project = "ai_stack_local"
 
 [[projects]]
-id = "local_first_agent_os"
+id = "local-first-agent-os"
 kind = "control_plane"
 path = "{project_path}"
 status = "active_center"
@@ -72,8 +72,8 @@ def test_load_project_center(tmp_path: Path) -> None:
     settings = Settings(config_dir=config_dir, mock_models=True)
     center = load_project_center(settings)
 
-    assert center.id == "local_first_agent_os"
-    assert center.control_plane_project == "local_first_agent_os"
+    assert center.id == "local-first-agent-os"
+    assert center.control_plane_project == "local-first-agent-os"
     assert center.default_saga_project == "ai_business_portfolio"
     assert center.default_saga_target().id == "ai_business_portfolio"
     assert center.default_memory_project == "ai_stack_local"
@@ -82,7 +82,7 @@ def test_load_project_center(tmp_path: Path) -> None:
     rows = center.status_rows(include_git=False)
     assert len(rows) == 3
     assert {row["id"] for row in rows} == {
-        "local_first_agent_os",
+        "local-first-agent-os",
         "ai_business_portfolio",
         "ai_stack_local",
     }

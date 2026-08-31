@@ -19,12 +19,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.decomposition import RuleBasedDecompositionPlanner
 from local_first_agent_os.pow_wow import PowWowExecutionContext
 from local_first_agent_os.pow_wow.prompts import build_agent_task_prompt
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject
-from local_first_agent_os.staffing import Tier
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 def _target(path: Path, project_id: str = "target") -> LinkedProject:
@@ -43,8 +44,8 @@ def _target(path: Path, project_id: str = "target") -> LinkedProject:
 def _plan(target: LinkedProject, prompt: str):
     return RuleBasedDecompositionPlanner().plan(
         intent_id="prefix-sharing",
-        tier=Tier.SENIOR,
-        kind="code",
+        tier=DispatchTier.SENIOR,
+        kind=DispatchKind.CODE,
         prompt=prompt,
         target_project=target,
         intent={},

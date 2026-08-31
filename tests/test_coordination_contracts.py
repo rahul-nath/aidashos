@@ -14,6 +14,7 @@ from local_first_agent_os.coordination import (
     CollectionResult,
     CompleteDispatchIntent,
     CoordinationCommandName,
+    DispatchKind,
     DispatchTerminalStatus,
     ListDispatchIntents,
     RawCoordinationCommand,
@@ -46,6 +47,25 @@ def test_outcome_taxonomy_does_not_redefine_contract_enums() -> None:
     )
 
     assert contract_enums.isdisjoint(outcome_enums)
+
+
+def test_dispatch_kind_has_one_definition_in_the_package() -> None:
+    definitions: list[Path] = []
+    package_root = PROJECT_ROOT / "src" / "local_first_agent_os"
+    for path in package_root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef) and node.name == "DispatchKind":
+                definitions.append(path)
+            if (
+                isinstance(node, ast.TypeAlias)
+                and isinstance(node.name, ast.Name)
+                and node.name.id == "DispatchKind"
+            ):
+                definitions.append(path)
+
+    assert definitions == [package_root / "dispatch_kinds.py"]
+    assert {item.value for item in DispatchKind} == {"advisory", "code", "cast"}
 
 
 def test_command_sum_owns_command_specific_argv_shape() -> None:

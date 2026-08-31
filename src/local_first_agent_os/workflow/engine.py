@@ -28,7 +28,6 @@ from ..contracts import (
     WorkflowType,
 )
 from ..coordination import (
-    ApprovalDecision,
     ApproveGawdDoc,
     AttachGawdDocToSaga,
     ClaimTask,
@@ -43,15 +42,9 @@ from ..coordination import (
     ListSagaMilestones,
     ListSagas,
     NextReadySagaMilestone,
-    ResolveApprovalRequest,
     RetrySagaMilestone,
     SubmitArtifact,
     SubmitDispatchIntent,
-)
-from ..coordination.outcomes import (
-    DispatchPromotionState,
-    next_dispatch_promotion_states,
-    require_dispatch_promotion_transition,
 )
 from ..coordination.projects import saga_content_digest
 from ..directives import DirectiveParser
@@ -68,7 +61,6 @@ from ..lifecycle_failure_harness import (
 from ..merge_review import (
     pending_code_merge_approval,
     render_merge_review_packet,
-    require_staff_review_provenance,
     review_packet_for_approval,
 )
 from ..new_project_intake import (
@@ -95,6 +87,13 @@ from ..observability import (
     observability_context,
     profiled_step,
 )
+from ..operator_commands import (
+    ApproveCodeMerge,
+    CodeMergeApproved,
+    OperatorExecutionContext,
+    execute_operator_command,
+)
+from ..operator_identity import verify_operator_actor
 from ..pow_wow import (
     PowWowExecutionContext,
 )
@@ -114,6 +113,7 @@ from .core import (
     build_completed_workflow_result,
     build_event_workflow_id,
 )
+from .governed_door import governed_saga_door_notice, governed_saga_door_refusal
 from .graph import GraphWorkflowMixin
 from .knowledge import KnowledgeWorkflowMixin
 from .models import ModelWorkflowMixin
@@ -934,167 +934,16 @@ class WorkflowEngine(
 
     def _approve_merge_directive(self, spec: DirectiveSpec) -> dict[str, Any]:
         approval_id = (spec.query or "").strip()
-        approval = pending_code_merge_approval(
-            settings=self.runtime.settings,
-            approval_id=approval_id,
-        )
-        require_staff_review_provenance(
-            approval,
-            settings=self.runtime.settings,
-        )
-        resolution = run_coordination_command(
-            ResolveApprovalRequest(
+        result = execute_operator_command(
+            ApproveCodeMerge(
                 approval_id=approval_id,
-                decision=ApprovalDecision.APPROVE,
-                resolved_by="pi:/approve-merge",
+                actor=verify_operator_actor("pi:/approve-merge"),
             ),
-            timeout=15,
-            settings=self.runtime.settings,
+            context=OperatorExecutionContext(settings=self.runtime.settings),
         )
-        reach_lifecycle_transition(
-            LifecycleTransitionPoint.AFTER_MERGE_APPROVAL_RESOLVED,
-            approval_id=approval_id,
-            decision="APPROVED",
-            saga_id=str(approval.get("saga_id") or "") or None,
-        )
-        require_dispatch_promotion_transition(
-            DispatchPromotionState.MERGE_PENDING,
-            DispatchPromotionState.MERGE_APPROVED,
-        )
-        next_required_state = next(
-            iter(next_dispatch_promotion_states(DispatchPromotionState.MERGE_APPROVED))
-        )
-        payload = approval.get("payload")
-        merge_payload = payload if isinstance(payload, Mapping) else {}
-        target_project_id = str(merge_payload.get("target_project_id") or "").strip()
-        branch = str(merge_payload.get("branch") or "").strip()
-        base_sha = str(merge_payload.get("base_sha") or "").strip()
-        commit_sha = str(merge_payload.get("commit_sha") or "").strip()
-        milestone_id = str(merge_payload.get("milestone_id") or "").strip()
-        target_path = ""
-        if target_project_id:
-            try:
-                target_path = str(
-                    load_project_center(self.runtime.settings)
-                    .project_by_id(target_project_id)
-                    .expanded_path
-                )
-            except (FileNotFoundError, KeyError, ValueError):
-                target_path = ""
-        saga_id = str(approval.get("saga_id") or "").strip()
-        saga_listing = run_coordination_command(
-            ListSagas(), timeout=15, settings=self.runtime.settings
-        )
-        saga = next(
-            (
-                row
-                for row in saga_listing.get("sagas", [])
-                if isinstance(row, Mapping) and row.get("saga_id") == saga_id
-            ),
-            {},
-        )
-        gawd_doc_id = str(saga.get("gawd_doc_id") or "").strip()
-        next_actions: list[dict[str, Any]] = [
-            {
-                "state": DispatchPromotionState.MERGED.value,
-                "action": "merge_exact_approved_commit",
-                "target_project_id": target_project_id or None,
-                "target_project_path": target_path or None,
-                "branch": branch or None,
-                "base_sha": base_sha or None,
-                "commit_sha": commit_sha or None,
-                "instruction": (
-                    "Confirm target main is clean and still contains the approved base, "
-                    "then merge the exact approved commit."
-                ),
-            }
-        ]
-        if milestone_id:
-            next_actions.extend(
-                [
-                    {
-                        "state": DispatchPromotionState.MILESTONE_COMPLETED.value,
-                        "action": "complete_milestone_after_merge",
-                        "milestone_id": milestone_id,
-                        "instruction": (
-                            "Record milestone completion with the resulting merge commit "
-                            "as evidence."
-                        ),
-                    },
-                    {
-                        "action": "dispatch_next_ready_milestone",
-                        "gawd_doc_id": gawd_doc_id or None,
-                        "target_project_id": target_project_id or None,
-                        "instruction": (
-                            "Run the approved-GAWD path again only after the merge and "
-                            "milestone completion are durable."
-                        ),
-                    },
-                ]
-            )
-        integration_request_id = str(resolution.get("integration_request_id") or "").strip()
-        report_lines = [
-            f"approved CODE_MERGE request {approval_id}; no code was merged by this command.",
-            f"Next required transition: {DispatchPromotionState.MERGE_APPROVED.value} -> "
-            f"{next_required_state.value}.",
-        ]
-        if integration_request_id:
-            # The queue row exists from this moment; the loop that drains it does
-            # not exist yet, which is milestone 3 of the refinery design. Saying
-            # so is the difference between an operator who knows the manual merge
-            # below is still the only thing that lands anything and one who waits
-            # for a runner that is not there.
-            report_lines.append(
-                f"Queued for integration as {integration_request_id}. No refinery run drains "
-                "the queue yet, so the manual steps below are still how it lands."
-            )
-        if target_project_id and commit_sha:
-            location = f" in {target_path}" if target_path else ""
-            report_lines.append(
-                f"1. Confirm {target_project_id} main is clean and still contains base "
-                f"{base_sha or 'recorded in the approval'}, then merge exact commit "
-                f"{commit_sha} from {branch or 'the approved branch'}{location}."
-            )
-        else:
-            report_lines.append(
-                "1. Inspect the approval payload and merge its exact approved commit into "
-                "the target main branch."
-            )
-        if milestone_id:
-            report_lines.append(
-                f"2. After the merge, complete milestone {milestone_id} with the merge "
-                "commit recorded as evidence."
-            )
-        else:
-            report_lines.append(
-                "2. This approval has no milestone_id; do not invent a milestone "
-                "transition after integration."
-            )
-        if milestone_id and gawd_doc_id and target_project_id:
-            report_lines.append(
-                "3. Dispatch the next dependency-ready milestone with: "
-                f"pi /start /approved-gawd {gawd_doc_id} --target-project "
-                f"{target_project_id}"
-            )
-        elif milestone_id:
-            report_lines.append(
-                "3. Re-run the approved-GAWD path to select the next dependency-ready milestone."
-            )
-        return {
-            "schema_version": "directive_result.v1",
-            "directive": spec.raw,
-            "action": "approve_merge",
-            "status": "approved",
-            "approval_id": approval_id,
-            "saga_id": saga_id or None,
-            "resolution": resolution,
-            "promotion_state": DispatchPromotionState.MERGE_APPROVED.value,
-            "next_required_state": next_required_state.value,
-            "next_actions": next_actions,
-            "report": "\n".join(report_lines),
-            "code_merged": False,
-            "integration_request_id": integration_request_id or None,
-        }
+        if not isinstance(result, CodeMergeApproved):
+            raise AssertionError(f"ApproveCodeMerge returned {type(result).__name__}")
+        return {**result.payload, "directive": spec.raw}
 
     def _ledger_directive(self, spec: DirectiveSpec) -> dict[str, Any]:
         repo_root = resolve_project_repo_root()
@@ -1304,7 +1153,7 @@ class WorkflowEngine(
                     verification_commands=tuple(target_project.verification_commands),
                     personal_context_used=False,
                     no_auto_merge=not AGENT_BRANCH_AUTO_MERGE,
-                    dispatch_kind="advisory",
+                    dispatch_kind=DispatchKind.ADVISORY,
                 )
                 from ..dependency_context_compactor import build_dependency_context_compactor
 
@@ -1880,8 +1729,12 @@ class WorkflowEngine(
         status = WorkflowStatus.COMPLETED
         stage = Stage.COMPLETED
         shortcut_resolution: dict[str, Any] | None = None
+        door = self.runtime.settings.governed_saga_door
 
         try:
+            door_refusal = governed_saga_door_refusal(door)
+            if door_refusal is not None:
+                raise ValueError(door_refusal)
             gawd_doc_id = (spec.query or "").strip()
             if spec.action == "approve_most_recent":
                 shortcut_resolution = _find_latest_dependency_ready_gawd(self.runtime.settings)
@@ -2053,6 +1906,9 @@ class WorkflowEngine(
                     "note": guidance["note"],
                     "report": guidance["report"],
                 }
+                early_door_notice = governed_saga_door_notice(door)
+                if early_door_notice is not None:
+                    result["governed_saga_door"] = early_door_notice
                 artifact = self.runtime.artifact_store.write_json(
                     role=ArtifactRole.DIRECTIVE_RESULT.value,
                     payload=result,
@@ -2107,6 +1963,12 @@ class WorkflowEngine(
                         kind=DispatchKind.CODE,
                         target_project_id=target_project_id,
                         source=source,
+                        permitted_capabilities=(
+                            "invoke_model",
+                            "read_repository",
+                            "run_command",
+                            "write_repository",
+                        ),
                     ),
                     timeout=15,
                     settings=self.runtime.settings,
@@ -2187,6 +2049,9 @@ class WorkflowEngine(
                 "help": help_payload(DirectiveParser(self.runtime.settings), spec.raw, str(exc)),
             }
 
+        door_notice = governed_saga_door_notice(door)
+        if door_notice is not None:
+            result["governed_saga_door"] = door_notice
         artifact = self.runtime.artifact_store.write_json(
             role=ArtifactRole.DIRECTIVE_RESULT.value,
             payload=result,

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=../toolchain-pins.env
+. "$ROOT/scripts/toolchain-pins.env"
+
 # Sign in to the Anthropic subscription through Claude Code.
 #
 # The staff seat in configs/staffing.toml runs on the claude harness under your
@@ -14,7 +18,7 @@ if [ "${1:-}" = "--install" ]; then INSTALL=true; fi
 if ! command -v claude >/dev/null 2>&1; then
   if [ "$INSTALL" = true ] && command -v npm >/dev/null 2>&1; then
     echo "Installing Claude Code..."
-    npm install --global @anthropic-ai/claude-code
+    npm install --global "@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"
   else
     echo "Claude Code missing. Install with: npm install --global @anthropic-ai/claude-code" >&2
     exit 1
@@ -22,6 +26,10 @@ if ! command -v claude >/dev/null 2>&1; then
 fi
 
 claude --version
+[ "$(claude --version | awk '{print $1}')" = "$CLAUDE_CODE_VERSION" ] || {
+  echo "Claude Code must be exactly $CLAUDE_CODE_VERSION." >&2
+  exit 1
+}
 
 if [ -t 0 ] && [ -t 1 ]; then
   echo

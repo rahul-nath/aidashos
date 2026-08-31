@@ -18,6 +18,7 @@ from ..contracts import (
     LeaseStatus,
     ProgressAssessmentStatus,
 )
+from .contracts import DispatchKind
 from .dispatch import dispatch_intent_to_dict, notify_dispatch_status_change
 from .frontier_usage import project_frontier_event
 from .store import (
@@ -795,7 +796,7 @@ def decide_execution_checkpoint(
                 (
                     continuation_id,
                     original["tier"] if original else "senior",
-                    original["kind"] if original else "code",
+                    original["kind"] if original else DispatchKind.CODE.value,
                     prompt,
                     original["target_project_id"] if original else None,
                     f"execution_checkpoint:{checkpoint_id}:continuation:{index}",

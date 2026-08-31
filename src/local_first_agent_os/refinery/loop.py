@@ -53,7 +53,9 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..coordination.availability import ledger_unavailable
@@ -245,6 +247,9 @@ def run_refinery(
     anybody needs a traceback for.
     """
 
+    from ..process_containment import assert_process_containment_available
+
+    assert_process_containment_available()
     with hold_resident_loop(ResidentLoop.REFINERY, scope=target_project_id) as lease:
         if isinstance(lease, ResidentLoopBusy):
             return err(
@@ -266,6 +271,72 @@ def run_refinery(
         polls=[_describe_poll(poll) for poll in polls],
         advanced_the_integrated_branch=advanced,
     )
+
+
+def run_refinery_fleet(
+    target_project_ids: Sequence[str],
+    interval_seconds: float | None = None,
+    max_polls: int | None = None,
+    *,
+    sleep: Any = time.sleep,
+) -> dict[str, Any]:
+    """Continuously give each explicitly named writable project one fair pass."""
+
+    from ..process_containment import assert_process_containment_available
+
+    assert_process_containment_available()
+    with hold_resident_loop(ResidentLoop.REFINERY_FLEET) as lease:
+        if isinstance(lease, ResidentLoopBusy):
+            return err(
+                "resident_loop_busy",
+                message=lease.describe(),
+                loop=lease.loop.value,
+                owner=lease.owner.to_payload() if lease.owner else None,
+            )
+
+        settings = get_settings()
+        center = load_project_center(settings)
+        projects = tuple(center.project_by_id(project_id) for project_id in target_project_ids)
+        if not projects:
+            return err(
+                "refinery_fleet_empty",
+                message="the resident refinery requires at least one explicit project id",
+            )
+        unsuitable = tuple(
+            project.id
+            for project in projects
+            if project.read_only or not (Path(project.expanded_path) / ".git").exists()
+        )
+        if unsuitable:
+            return err(
+                "refinery_project_unavailable",
+                message="every resident refinery project must be writable and present",
+                target_project_ids=list(unsuitable),
+            )
+        idle_interval = (
+            interval_seconds if interval_seconds is not None else settings.refinery_poll_seconds
+        )
+        passes: list[dict[str, Any]] = []
+        while max_polls is None or len(passes) < max_polls:
+            results: list[dict[str, Any]] = []
+            for project in projects:
+                results.append(
+                    run_refinery(
+                        project.id,
+                        interval_seconds=0.0,
+                        max_polls=1,
+                    )
+                )
+            passes.append({"projects": results})
+            advanced = any(
+                result.get("advanced_the_integrated_branch") is True for result in results
+            )
+            if max_polls is not None and len(passes) >= max_polls:
+                break
+            if not advanced:
+                sleep(idle_interval)
+
+    return ok(polls=passes)
 
 
 def _describe_poll(poll: RefineryPoll) -> dict[str, Any]:
@@ -309,4 +380,5 @@ __all__ = [
     "RefineryPoll",
     "Unavailable",
     "run_refinery",
+    "run_refinery_fleet",
 ]

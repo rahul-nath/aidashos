@@ -56,11 +56,18 @@ PY
     assert result.stdout == ""
 
 
-def _parse_runtime_args(*args: str, env: dict[str, str] | None = None) -> str:
-    """Run the script's argument parser and report the ASR decision."""
+def _parse_runtime_flag(
+    variable: str,
+    *args: str,
+    env: dict[str, str] | None = None,
+) -> str:
+    """Run the script's argument parser and report one closed decision."""
 
+    assert variable in {"START_ASR", "PROBE_FRONTIER"}
     repo_root = Path(__file__).resolve().parents[1]
-    command = 'source scripts/start-agent-runtime.sh\nparse_runtime_args "$@"\necho "$START_ASR"'
+    command = (
+        f'source scripts/start-agent-runtime.sh\nparse_runtime_args "$@"\necho "${{{variable}}}"'
+    )
     completed = subprocess.run(
         ["bash", "-c", command, "_", *args],
         cwd=repo_root,
@@ -70,6 +77,10 @@ def _parse_runtime_args(*args: str, env: dict[str, str] | None = None) -> str:
         check=True,
     )
     return completed.stdout.strip()
+
+
+def _parse_runtime_args(*args: str, env: dict[str, str] | None = None) -> str:
+    return _parse_runtime_flag("START_ASR", *args, env=env)
 
 
 def test_asr_is_off_unless_a_human_asks_for_it() -> None:
@@ -90,6 +101,14 @@ def test_an_explicit_flag_beats_the_environment() -> None:
     asked = {"LOCAL_AGENT_START_ASR": "true"}
     assert _parse_runtime_args(env=asked) == "true"
     assert _parse_runtime_args("--no-asr", env=asked) == "false"
+
+
+def test_frontier_probe_is_off_unless_a_human_asks_for_it() -> None:
+    """Restarting services is not authorization to spend a provider request."""
+
+    assert _parse_runtime_flag("PROBE_FRONTIER") == "false"
+    assert _parse_runtime_flag("PROBE_FRONTIER", "--frontier-probe") == "true"
+    assert _parse_runtime_flag("PROBE_FRONTIER", "--no-frontier-probe") == "false"
 
 
 def test_an_unknown_argument_is_refused_before_anything_starts() -> None:

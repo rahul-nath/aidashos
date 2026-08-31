@@ -11,6 +11,7 @@ from local_first_agent_os.browser_acceptance import (
     BrowserAcceptanceRequest,
     BrowserViewport,
 )
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.decomposition import RuleBasedDecompositionPlanner
 from local_first_agent_os.marketing_site_doctrine import CURRENT_MARKETING_SITE_DOCTRINE
 from local_first_agent_os.pow_wow.prompts import build_agent_task_prompt
@@ -19,7 +20,8 @@ from local_first_agent_os.pow_wow.types import PowWowExecutionContext, PowWowTas
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject, load_project_center
 from local_first_agent_os.settings import Settings
-from local_first_agent_os.staffing import JudgmentRole, Tier
+from local_first_agent_os.staffing import JudgmentRole
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 def _context() -> PowWowExecutionContext:
@@ -35,21 +37,21 @@ def _context() -> PowWowExecutionContext:
     )
 
 
-@pytest.mark.parametrize("tier", [Tier.SENIOR, Tier.STAFF])
-def test_marketing_site_doctrine_is_cross_harness_prompt_contract(tier: Tier) -> None:
+@pytest.mark.parametrize("tier", [DispatchTier.SENIOR, DispatchTier.STAFF])
+def test_marketing_site_doctrine_is_cross_harness_prompt_contract(tier: DispatchTier) -> None:
     task = PowWowTaskSpec(
         task_name=f"{tier.value}_site",
-        role="reviewer" if tier is Tier.STAFF else "implementer",
+        role="reviewer" if tier is DispatchTier.STAFF else "implementer",
         description="Implement or review the site",
         judgment=JudgmentRole(name=tier.value, tier=tier),
-        dispatch_kind="code",
+        dispatch_kind=DispatchKind.CODE,
         reference_packs=(ReferencePack.MARKETING_SITE,),
     )
 
     prompt = build_agent_task_prompt(task, _context())
 
     assert CURRENT_MARKETING_SITE_DOCTRINE.render_prompt() in prompt
-    if tier is Tier.STAFF:
+    if tier is DispatchTier.STAFF:
         assert "BLOCK unsupported business claims" in prompt
 
 
@@ -58,8 +60,8 @@ def test_marketing_site_doctrine_is_not_in_unrelated_task() -> None:
         task_name="senior_backend",
         role="implementer",
         description="Change a backend contract",
-        judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-        dispatch_kind="code",
+        judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.CODE,
     )
 
     assert "Marketing-site doctrine contract" not in build_agent_task_prompt(task, _context())
@@ -78,8 +80,8 @@ def test_project_reference_pack_is_attached_to_every_planned_task() -> None:
 
     plan = RuleBasedDecompositionPlanner().plan(
         intent_id="intent-site",
-        tier=Tier.SENIOR,
-        kind="code",
+        tier=DispatchTier.SENIOR,
+        kind=DispatchKind.CODE,
         prompt="Improve the generated homepage",
         target_project=project,
         intent={},

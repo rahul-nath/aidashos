@@ -9,7 +9,7 @@ Verified by reading the running server's own schema (`GET /openapi.json`), not b
 
 The application serves seven WorkUnit routes: list, detail, events, artifacts, decisions, cancel, resume.
 `POST /authoring/design-docs/compile` compiles a DesignDoc and `POST /work-units` creates a WorkUnit, both landed in `f3a3dbf`, so the terminal commands recorded below are one way to run those steps rather than the only way.
-The enqueue outbox has no route and needs none: the drainer is a resident loop - started by `./scripts/start-agent-runtime.sh`, or kept alive across reboots by `./scripts/launchd/install.sh` - so there is nothing for a button to trigger.
+The enqueue outbox has no route and needs none: the drainer is a resident loop, started by `./scripts/start-agent-runtime.sh` and supervised by launchd for as long as the runtime is up, so there is nothing for a button to trigger.
 The cockpit also has one runtime button, `Run dispatcher`, which posts `/start /dispatcher --max-polls 5` to `POST /pi/directive`.
 
 The honest gap is that a *deliberately paused* demo, where you want to watch each step happen, still means not starting the runtime and driving the steps by hand, exactly as below.
@@ -39,19 +39,19 @@ Do **not** run `./scripts/start-agent-runtime.sh` yet if you want to watch each 
 It starts two resident loops, the enqueue drainer and the ledger dispatcher, and the dispatcher will claim any pending intent and spawn a real frontier agent without asking.
 Start it when you want the lane to run unattended, and use the steps below when you want to drive it.
 
-**Not starting it is not the same as it not running.** If `./scripts/launchd/install.sh` was ever run on this machine, launchd supervises those two loops, so `./scripts/stop-agent-runtime.sh` kills them and launchd restarts them within seconds. Check who actually owns them:
+**Not starting it is not the same as it not running.** A previous session's `./scripts/start-agent-runtime.sh` leaves both loops supervised by launchd until `./scripts/stop-agent-runtime.sh` boots them out, and as of 2026-08-23 nothing loads them at login, so a reboot starts none of this. Check who actually owns them:
 
 ```bash
 agent-ledger describe_resident_loops
 ```
 
-An `owned` loop with a pid whose parent is launchd will outlive any stop script. To pause one for a driven run:
+A loop launchd supervises is restarted if it crashes, so killing its pid is not a pause. To pause one for a driven run:
 
 ```bash
 launchctl bootout gui/$(id -u)/com.rahul.local-first-agent.ledger-dispatcher
 ```
 
-`./scripts/launchd/install.sh` puts it back. Leaving it supervised is the right steady state and the wrong setup for watching each step happen.
+`./scripts/start-agent-runtime.sh` puts it back. Leaving it supervised is the right steady state and the wrong setup for watching each step happen.
 
 ## 1. One terminal for the ledger environment
 

@@ -26,6 +26,12 @@ import time
 from dataclasses import dataclass
 
 from ..coordination.availability import ledger_unavailable
+from .auto_resume import (
+    DEFAULT_MAX_TRANSIENT_RESUMES,
+    AutoResumeEnqueued,
+    sweep_transient_blocked,
+)
+from .integration_settlement import settle_landed_integrations
 from .root_workflow import (
     EnqueueDelivery,
     EnqueueFailed,
@@ -126,12 +132,14 @@ class EnqueueDrainer:
         delivery: EnqueueDelivery = EnqueueDelivery.DURABLE,
         stalled_after_passes: int = DEFAULT_UNDELIVERABLE_PASSES_BEFORE_STALLED,
         unavailable_interval_seconds: float = DEFAULT_UNAVAILABLE_INTERVAL_SECONDS,
+        max_transient_resumes: int = DEFAULT_MAX_TRANSIENT_RESUMES,
     ) -> None:
         self.name = name
         self.limit = limit
         self.delivery = delivery
         self.stalled_after_passes = stalled_after_passes
         self.unavailable_interval_seconds = unavailable_interval_seconds
+        self.max_transient_resumes = max_transient_resumes
         self.consecutive_undeliverable_passes = 0
 
     def ensure_delivery_target(self) -> None:
@@ -156,6 +164,20 @@ class EnqueueDrainer:
 
     def poll_once(self) -> DrainOutcome:
         try:
+            # Settlement runs first: a landed commit may complete a milestone
+            # and enqueue the RESUME the drain below then delivers, all in one
+            # pass. The sweep runs next for the same reason. Both share the
+            # drain's unavailability handling because all three are one
+            # conversation with the same database.
+            settle_landed_integrations()
+            for swept in sweep_transient_blocked(self.max_transient_resumes):
+                if isinstance(swept, AutoResumeEnqueued):
+                    logger.info(
+                        "%s queued an automatic resume for work unit %s: %s",
+                        self.name,
+                        swept.work_unit_id,
+                        swept.reason,
+                    )
             outcomes = drain_enqueue_outbox(self.limit, self.delivery)
         except Exception as exc:
             # Only an unreachable ledger. Anything else is a defect, and a loop

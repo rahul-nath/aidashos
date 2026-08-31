@@ -36,6 +36,7 @@ from .design_doc import (
 from .events import (
     ApprovalReceived,
     ApprovalRequested,
+    Approved,
     DecisionKindMismatch,
     DecisionRequestKind,
     DecisionRequestStatus,
@@ -56,6 +57,7 @@ from .projection import WorkUnitView, build_work_unit_view
 from .retry import (
     RetryPermitted,
     RetryRefused,
+    count_charged_failures,
     decide_retry,
 )
 from .root_workflow import (
@@ -316,18 +318,32 @@ def resume_work_unit(
             "recovered": recovered.to_payload(),
         }
     plan = repo.get_compiled_plan_revision(unit.compiled_plan_revision_id).plan
+    failure_attempts = repo.list_milestone_failure_attempts(work_unit_id)
+    failures_by_milestone: dict[str, list[repo.MilestoneFailureAttempt]] = {}
+    for failure in failure_attempts:
+        failures_by_milestone.setdefault(failure.stable_key, []).append(failure)
     exhausted: list[dict[str, Any]] = []
     for execution in repo.list_milestone_executions(work_unit_id):
         if execution.status is not MilestoneExecutionStatus.BLOCKED:
             continue
+        history = failures_by_milestone.get(execution.stable_key, [])
+        current_failure = next(
+            (
+                failure.failure_class
+                for failure in history
+                if failure.execution_ordinal == execution.attempt
+            ),
+            execution.failure_class,
+        )
         request_id = retry_override_request_id(work_unit_id, execution.stable_key)
         decision = decide_retry(
             milestone_key=execution.stable_key,
             phase=execution.phase,
             status=execution.status,
-            attempt=execution.attempt,
-            failure_class=execution.failure_class,
-            max_attempts=plan.milestone(execution.stable_key).failure_policy.max_attempts,
+            execution_ordinal=execution.attempt,
+            charged_failures=count_charged_failures(failure.failure_class for failure in history),
+            failure_class=current_failure,
+            retry_policy=plan.milestone(execution.stable_key).failure_policy.retry_policy,
             operator_override=_retry_override_granted(request_id),
         )
         match decision:
@@ -338,7 +354,7 @@ def resume_work_unit(
                         phase=decision.phase,
                         milestone_key=decision.milestone_key,
                         status=MilestoneExecutionStatus.READY,
-                        attempt=decision.next_attempt,
+                        attempt=decision.next_execution_ordinal,
                     ),
                 )
             case RetryRefused():
@@ -347,13 +363,64 @@ def resume_work_unit(
                     {
                         "milestone_key": decision.milestone_key,
                         "phase": decision.phase.value,
-                        "attempt": decision.attempt,
-                        "permitted": decision.permitted,
+                        "execution_ordinal": decision.execution_ordinal,
+                        "charged_failures": decision.charged_failures,
+                        "retry_policy": decision.retry_policy.to_payload(),
                         "override_request_id": request_id,
                     }
                 )
+    delivered = resume_root_workflow(work_unit_id, delivery)
+    if delivery is EnqueueDelivery.DURABLE and not delivered.get("delivered"):
+        # The intent must not die with this process. A one-shot resume used to
+        # answer `ok: true`, return milestones to READY, and write nothing
+        # durable, so the continuation waited for an operator to notice
+        # `delivered: false` on stderr (observed live: work unit e5d41f8805f4,
+        # 2026-08-29, READY attempt 2 and then silence). A permitted retry now
+        # leaves the same pending RESUME row an approved override leaves, and
+        # the resident drainer delivers it through this very function.
+        #
+        # Gated on a READY milestone rather than on this call's own decisions,
+        # because the stalled shape this repairs is exactly a milestone left
+        # READY by an earlier resume that delivered nothing. A resume that
+        # refused every retry readies nothing, and a continuation for it would
+        # run, find nothing runnable, and halt again.
+        #
+        # A NO_RUNTIME recovery answer also earns the row, when this resume
+        # neither readied nor refused anything. That silence is the crashed
+        # shape: a milestone workflow that dies writes no block fact, so the
+        # milestone sits RUNNING on a dead epoch and there is no decision for
+        # this process to make - and it could not even ask DBOS whether the
+        # execution ended. The drainer delivers this same resume inside a
+        # launched runtime, where recovery can answer and repair. A resume
+        # that refused retries is excluded: its unit is parked on a judgment,
+        # and a continuation for it would run, find nothing runnable, and
+        # halt again. Observed live: work unit c88ff4167c66's milestone
+        # workflow died with its checkpoint on 2026-08-30 and the READY gate
+        # alone refused the one delivery that could have healed it.
+        ready_exists = any(
+            execution.status is MilestoneExecutionStatus.READY
+            for execution in repo.list_milestone_executions(work_unit_id)
+        )
+        crashed_blind = recovered.liveness is ExecutionLiveness.NO_RUNTIME and not exhausted
+        if ready_exists or crashed_blind:
+            pending_resume = repo.enqueue_resume(work_unit_id)
+            delivered = {
+                **delivered,
+                "durable": pending_resume,
+                "resume_enqueued": pending_resume,
+                "reason": (
+                    "no active DBOS runtime; a pending RESUME delivery awaits the enqueue drainer"
+                    if pending_resume
+                    else (
+                        "no active DBOS runtime; a pending START delivery already "
+                        "exists and will run the same root workflow"
+                    )
+                ),
+            }
+        else:
+            delivered = {**delivered, "resume_enqueued": False}
     return {
-        **resume_root_workflow(work_unit_id, delivery),
+        **delivered,
         "recovered": recovered.to_payload(),
         "exhausted": tuple(exhausted),
     }
@@ -424,7 +491,7 @@ def _refuse_retry(work_unit_id: str, decision: RetryRefused, *, request_id: str)
         ApprovalRequested(
             phase=decision.phase,
             milestone_key=decision.milestone_key,
-            attempt=decision.attempt,
+            attempt=decision.execution_ordinal,
             request_id=request_id,
             prompt=(
                 f"{decision.describe()}. Approve to permit one more attempt, or deny "
@@ -572,12 +639,14 @@ def _resume_delivery_after_decision(
     """Enqueue the resume this resolved decision earns, or say why not.
 
     ``None`` means the decision unblocks nothing: it is unresolved, its outcome
-    is not one that lifts a block, or the WorkUnit is not ``BLOCKED``. Only
-    `RetryOverridden` qualifies for now; a denial upholds the budget and a
-    clarification answers a question, and neither is permission to run. An
-    ``APPROVAL`` on a WorkUnit that halted ``WAITING_FOR_OPERATOR`` has the
-    same delivery gap but different unblocking semantics, so extending this
-    predicate is a decision for its own change, not a case quietly added here.
+    is not one that lifts a block, or the WorkUnit is not ``BLOCKED``.
+    `RetryOverridden` and `Approved` qualify; a denial upholds what it denies
+    and a clarification answers a question, and neither is permission to run.
+    `Approved` is here because an approval wait that elapses blocks the unit
+    with an uncharged ``operator_decision_pending``, and the late approval then
+    landed on a dead epoch: observed live on work unit d31b7eaebde0, where the
+    approval arrived 2026-08-23T18:01 and the unit moved only when an operator
+    also typed ``resume_work_unit`` at 20:31.
 
     Everything is re-read from the durable request row rather than taken from
     the caller, so the fresh resolution and the already-resolved replay are the
@@ -603,7 +672,7 @@ def _resume_delivery_after_decision(
         request.decision_payload,
         decided_by=request.decided_by or "operator",
     )
-    if not isinstance(outcome, RetryOverridden):
+    if not isinstance(outcome, RetryOverridden | Approved):
         return None
     unit = repo.get_work_unit(work_unit_id)
     if unit.status is not WorkUnitStatus.BLOCKED:
@@ -622,10 +691,11 @@ def _resume_delivery_after_decision(
                 "will run the same root workflow"
             ),
         }
+    unblocked = "the approved override" if isinstance(outcome, RetryOverridden) else "the approval"
     return {
         "enqueued": True,
         "reason": (
-            "the approved override unblocks this BLOCKED work unit; a pending "
+            f"{unblocked} unblocks this BLOCKED work unit; a pending "
             "RESUME delivery awaits the enqueue drainer"
         ),
     }

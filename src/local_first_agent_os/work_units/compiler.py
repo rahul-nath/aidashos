@@ -32,6 +32,7 @@ from .design_doc import (
     ParsedDesignDoc,
     SourceSpan,
 )
+from .events import ArtifactKind
 from .executors import (
     EXECUTOR_REGISTRY,
     ApprovalRequirement,
@@ -553,7 +554,7 @@ def compile_design_doc(
                 approval_policy=approval_policy,
                 failure_policy=FailurePolicy(
                     default_class=FailureClass.NONRECOVERABLE,
-                    max_attempts=declaration.retry.max_attempts,
+                    retry_policy=declaration.retry_policy,
                     blocks_phase=True,
                 ),
                 source_provenance=SourceProvenance(
@@ -627,6 +628,34 @@ def compile_design_doc(
         return CompilationRejected(tuple(diagnostics))
 
     _apply_lifecycle_policy(milestones, edges, spans, diagnostics)
+    # `## Required Artifacts` is read with `_bullet_lines`, which keeps every
+    # non-empty line that is not a heading and does not strip HTML comments. A
+    # sentence under that heading therefore becomes an artifact kind. Nothing
+    # validated the document-level list, so a real plan compiled VALID and
+    # runnable, ran for two and a half hours, and failed at DELIVER with
+    # `missing_required_final_artifacts` naming one of its own paragraphs.
+    #
+    # The milestone-level check above already refuses artifacts an executor
+    # cannot emit, for the reason its comment gives: failing here costs a
+    # recompile, failing at runtime costs an agent hour and is indistinguishable
+    # from the agent having done poor work. This is the same rule applied to the
+    # other half of the delivery contract.
+    known_artifact_kinds = {item.value for item in ArtifactKind}
+    for artifact in parsed.required_artifacts:
+        if artifact in known_artifact_kinds:
+            continue
+        shown = artifact if len(artifact) <= 60 else f"{artifact[:57]}..."
+        diagnostics.append(
+            _error(
+                "unknown_required_artifact",
+                (
+                    f"document-level Required Artifacts lists {shown!r}, which is not "
+                    "an artifact kind; that section takes one kind per line and no "
+                    f"prose. Known kinds: {', '.join(sorted(known_artifact_kinds))}"
+                ),
+                None,
+            )
+        )
     if any(item.severity is DiagnosticSeverity.ERROR for item in diagnostics):
         return CompilationRejected(tuple(diagnostics))
 

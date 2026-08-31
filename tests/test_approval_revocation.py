@@ -99,7 +99,13 @@ def test_approved_request_can_be_revoked_without_erasing_resolution(
     assert revoked["original_resolved_by"] == "operator"
     assert revoked["revoked_by"] == "operator"
     assert revoked["reason"] == "The target branch advanced."
+    assert revoked["withdrawn_integration_request_id"]
     assert repeated["already_revoked"] is True
+
+    integration = _coord(root, ["list_integration_requests"])["requests"]
+    assert len(integration) == 1
+    assert integration[0]["state"] == "WITHDRAWN"
+    assert integration[0]["state_detail"]["reason"] == "APPROVAL_REVOKED"
 
     listed = _coord(root, ["list_approval_requests", "--status", "REVOKED"])["requests"]
     assert len(listed) == 1

@@ -150,6 +150,7 @@ class StackAbandonment(StrEnum):
     FAST_FORWARD_REFUSED = "FAST_FORWARD_REFUSED"
     INTEGRATION_WORKTREE_UNAVAILABLE = "INTEGRATION_WORKTREE_UNAVAILABLE"
     PROVENANCE_NOT_ESTABLISHED = "PROVENANCE_NOT_ESTABLISHED"
+    APPROVAL_REVOKED = "APPROVAL_REVOKED"
     """The built stack carries work no approved request contributed.
 
     Not attributable to a member, because the refinery adds only merge commits

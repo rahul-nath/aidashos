@@ -70,6 +70,7 @@ _PLAIN_STATUS_RE = re.compile(r"^Status:\s*(?P<value>.+)$", re.MULTILINE)
 _NOT_DESIGN_DOCS = frozenset(
     {
         "AGENT_MANUAL.md",
+        "backup_and_recovery.md",
         "code_structure.md",
         "configuration.md",
         "design_principles.md",
@@ -109,17 +110,10 @@ class LedgerUnavailable(RuntimeError):
 # predate it. This list may only shrink, and the check also fails when an exempt
 # document starts compiling, so an exemption cannot outlive its problem.
 #
-# All four remaining are malformed rather than unwritten: m7 has an "Execution Milestones"
-# heading the parser finds nothing under, and the other three carry a numbered
-# `## Milestones` list with no PLAN and no VERIFY milestone.
-_COMPILE_EXEMPT: Final = frozenset(
-    {
-        "m7_conversion_grade_template_gawd",
-        "privileged_capability_broker_design",
-        "tamper_evident_ledger_design",
-        "whiteboard_intent_design",
-    }
-)
+# Empty since 2026-08-30, when the last four grandfathered documents were
+# restructured to compile. The machinery stays so a future exemption is a
+# deliberate, named decision rather than a new mechanism.
+_COMPILE_EXEMPT: Final = frozenset[str]()
 
 
 def _design_doc_files() -> list[Path]:

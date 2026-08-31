@@ -240,7 +240,7 @@ def build_work_unit_view(work_unit_id: str, *, recent_event_limit: int = 25) -> 
     plan = revision.plan
     executions = repo.list_milestone_executions(work_unit_id)
     artifacts = repo.list_work_unit_artifacts(work_unit_id)
-    events = repo.list_work_unit_events(work_unit_id, limit=1000)
+    events = repo.list_recent_work_unit_events(work_unit_id, limit=recent_event_limit)
     phase_status = repo.phase_statuses(work_unit_id)
     pending = repo.list_decision_requests(work_unit_id, status=DecisionRequestStatus.PENDING)
 
@@ -365,7 +365,7 @@ def build_work_unit_view(work_unit_id: str, *, recent_event_limit: int = 25) -> 
                 occurred_at=iso(item.occurred_at),
                 payload=item.payload,
             )
-            for item in events[-recent_event_limit:]
+            for item in events
         ),
         dbos_workflow_ids=tuple(workflow_ids),
     )
@@ -531,6 +531,22 @@ class ExecutionRecoveryView(OperatorContract):
     abandoned_milestones: tuple[str, ...] = ()
 
 
+class ChargedFailureBudgetView(OperatorContract):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["charged_failure_budget"]
+    max_charged_failures: int
+
+
+class OperatorOnlyRetryView(OperatorContract):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["operator_only"]
+
+
+type RetryPolicyView = ChargedFailureBudgetView | OperatorOnlyRetryView
+
+
 class ExhaustedMilestoneView(OperatorContract):
     """A milestone the resume refused to try again, and the arithmetic behind it.
 
@@ -543,8 +559,9 @@ class ExhaustedMilestoneView(OperatorContract):
 
     milestone_key: str
     phase: LifecyclePhase
-    attempt: int
-    permitted: int
+    execution_ordinal: int
+    charged_failures: int
+    retry_policy: RetryPolicyView
     override_request_id: str
 
 
@@ -563,6 +580,14 @@ class WorkUnitResumeResult(OperatorContract):
     durable: bool
     workflow_id: str | None = None
     reason: str | None = None
+    resume_enqueued: bool | None = None
+    """Whether an undelivered resume left a pending RESUME outbox row.
+
+    ``True`` means the resident enqueue drainer delivers the continuation on
+    its next pass, so ``delivered`` false is a promise rather than a stall.
+    Absent on a delivered or inline resume, where there is nothing to queue.
+    """
+
     result: WorkUnitExecutionResult | None = None
     recovered: ExecutionRecoveryView | None = None
     """What the resume repaired on its way in, when it repaired anything."""

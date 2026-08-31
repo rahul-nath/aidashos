@@ -419,24 +419,24 @@ def test_a_claimed_intent_is_reported_rather_than_silently_left_running(
 ) -> None:
     """The honesty property: cancel must not imply it stopped what it could not.
 
-    `cancel_dispatch_intent` refuses anything past PENDING, so an intent whose
-    agent is already running cannot be stopped here. The cascade has to surface
-    that, because the operator's next move is to kill a process by hand.
+    `cancel_dispatch_intent` refuses active states, so an intent whose agent is
+    already running cannot be stopped here. The cascade has to surface that,
+    because the operator's next move is to cancel its lease or kill the process.
     """
 
     monkeypatch.setattr(
         "local_first_agent_os.coordination.dispatch.cancel_dispatch_intent",
         lambda *_a, **_k: {
             "ok": False,
-            "error": "not_pending",
-            "message": "Only PENDING dispatch intents can be canceled.",
+            "error": "not_cancelable",
+            "message": "Only unstarted or parked dispatch intents can be canceled.",
         },
     )
 
     attempt = cancellation._stop_dispatch_intent("intent-live", "operator stopped the work")
 
     assert attempt.verdict is cancellation.StopVerdict.REFUSED
-    assert "PENDING" in attempt.detail
+    assert "unstarted or parked" in attempt.detail
     assert cancellation.CancellationResult(
         work_unit_id="wu-1",
         status=WorkUnitStatus.CANCELLED,

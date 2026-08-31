@@ -35,6 +35,19 @@ MODE="${2:-full}"
 OBSERVABILITY=(minio minio-init loki tempo pyroscope prometheus alloy grafana)
 MINIMAL_OBSERVABILITY=(prometheus)
 
+require_full_stack_credentials() {
+  local minio_password="${LOCAL_AGENT_MINIO_ROOT_PASSWORD:-}"
+  if [ -z "${LOCAL_AGENT_GRAFANA_ADMIN_PASSWORD:-}" ]; then
+    echo "LOCAL_AGENT_GRAFANA_ADMIN_PASSWORD must be set for full observability." >&2
+    return 1
+  fi
+  if [ "${#minio_password}" -lt 8 ]; then
+    echo "LOCAL_AGENT_MINIO_ROOT_PASSWORD must be set to at least 8 characters." >&2
+    return 1
+  fi
+  export LOCAL_AGENT_GRAFANA_ADMIN_PASSWORD LOCAL_AGENT_MINIO_ROOT_PASSWORD
+}
+
 wait_until_ready() {
   local mode="$1"
   local deadline=$((SECONDS + 120))
@@ -108,6 +121,7 @@ case "$ACTION" in
       wait_until_ready minimal
       echo "minimal observability ready: ${MINIMAL_OBSERVABILITY[*]}"
     else
+      require_full_stack_credentials
       "$ROOT/scripts/start-docker-compose-infra.sh" observability
       wait_until_ready full
       echo "full observability ready: ${OBSERVABILITY[*]}"

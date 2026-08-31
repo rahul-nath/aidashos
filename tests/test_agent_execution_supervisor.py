@@ -29,6 +29,7 @@ from local_first_agent_os.coordination import (
     AttachExecutionArtifact,
     CompleteExecutionLease,
     CreateExecutionCheckpoint,
+    DispatchKind,
     HeartbeatExecutionLease,
     OpenExecutionLease,
     RequestExecutionCancel,
@@ -58,7 +59,8 @@ from local_first_agent_os.pow_wow import (
 from local_first_agent_os.pow_wow.types import ExecutionAttemptLease
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject
-from local_first_agent_os.staffing import Harness, JudgmentRole, Tier
+from local_first_agent_os.staffing import Harness, JudgmentRole
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 class _Artifacts:
@@ -446,7 +448,7 @@ executor with `load_bench(...)` - so the test passes the same bench in.
 def _senior_is(vendor: Harness) -> bool:
     """Whether that bench seats `vendor` as the implementer."""
 
-    return _BENCH[Tier.SENIOR].harness is vendor
+    return _BENCH[DispatchTier.SENIOR].harness is vendor
 
 
 def test_executor_preserves_worktree_when_checkpoint_persistence_fails(
@@ -457,7 +459,7 @@ def test_executor_preserves_worktree_when_checkpoint_persistence_fails(
     repo.mkdir()
     _git_repo(repo)
     artifacts = _Artifacts()
-    claude_ready = tmp_path / "term-resistant-claude-ready.txt"
+    opened_worktree: list[Path] = []
 
     def coordinate(command: Any) -> Any:
         if isinstance(command, CreateExecutionCheckpoint):
@@ -471,11 +473,13 @@ def test_executor_preserves_worktree_when_checkpoint_persistence_fails(
             # load cannot leave SURVIVED.txt unwritten or the SIGTERM guard
             # uninstalled when the deadline fires.
             gate_deadline = time.monotonic() + 20
-            while not claude_ready.exists():
+            while not opened_worktree or not (opened_worktree[0] / "READY").exists():
                 if time.monotonic() >= gate_deadline:
                     raise AssertionError("term-resistant-claude never signaled readiness")
                 time.sleep(0.01)
         if isinstance(command, OpenExecutionLease):
+            assert command.worktree_path is not None
+            opened_worktree[:] = [Path(command.worktree_path)]
             payload = open_execution_lease(
                 command.idempotency_key,
                 command.worker_id,
@@ -512,9 +516,11 @@ def test_executor_preserves_worktree_when_checkpoint_persistence_fails(
         "    raise SystemExit(0)\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "Path('SURVIVED.txt').write_text('preserve me\\n', encoding='utf-8')\n"
-        # The readiness sentinel is written last: observing it means the
+        # The readiness sentinel stays in the leased worktree. The process
+        # boundary correctly forbids the old test from writing it beside the
+        # source repository. Observing it means the
         # SIGTERM guard and SURVIVED.txt are already in place.
-        f"Path({str(claude_ready)!r}).write_text('ready\\n', encoding='utf-8')\n"
+        "Path('READY').write_text('ready\\n', encoding='utf-8')\n"
         "time.sleep(30)\n",
         encoding="utf-8",
     )
@@ -541,8 +547,8 @@ def test_executor_preserves_worktree_when_checkpoint_persistence_fails(
     task = PowWowTaskSpec(
         task_name="checkpoint_failure_implementation",
         role="implementer",
-        judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-        dispatch_kind="code",
+        judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.CODE,
         description="write one file and wait past the deadline",
     )
     executor = CliPowWowExecutor(

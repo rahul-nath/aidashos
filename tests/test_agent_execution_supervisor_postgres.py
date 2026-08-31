@@ -26,6 +26,7 @@ from local_first_agent_os.artifacts import ArtifactStore
 from local_first_agent_os.coordination import (
     CoordinationCommand,
     CoordinationResult,
+    DispatchKind,
     EntityResult,
     OpenExecutionLease,
 )
@@ -46,7 +47,9 @@ from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject
 from local_first_agent_os.repository import Repository
 from local_first_agent_os.settings import Settings
-from local_first_agent_os.staffing import JudgmentRole, Tier
+from local_first_agent_os.spawn_authority import UnattendedImplementation
+from local_first_agent_os.staffing import JudgmentRole
+from local_first_agent_os.vocabulary import DispatchTier
 from local_first_agent_os.workflow.engine import (
     _find_latest_dependency_ready_gawd,
     _find_latest_retryable_milestone,
@@ -311,6 +314,7 @@ def test_real_postgres_sigkill_recovery_completes_lease_and_releases_intent(
             saga_id="integration-saga",
             pow_wow_id="integration-pow-wow",
             task_contract="escaped descendant must not pin process.wait",
+            posture=UnattendedImplementation(),
         )
     finally:
         if escaped_pid_path.exists():
@@ -491,8 +495,8 @@ def test_real_postgres_claude_limit_switches_to_supervised_codex_lease(
     task = PowWowTaskSpec(
         task_name="integration_implementation",
         role="implementer",
-        judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-        dispatch_kind="code",
+        judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.CODE,
         description="Create the fallback proof file.",
     )
     artifact_writer = _OneRealForeignKeyFailure(postgres_harness.artifacts)
@@ -559,7 +563,16 @@ def test_real_postgres_claude_limit_switches_to_supervised_codex_lease(
         None,
     )
     assert transcript_rows == [(None,)]
-    assert artifact_links == [(codex_lease[0], "agent_execution_transcript")]
+    # The transcript rides the completing lease; the deadline-checkpoint
+    # evidence rides the failed one. Asserted as membership rather than the
+    # exact list, because the checkpoint supervisor legitimately grew the link
+    # set after this test was written and a strict equality read that growth
+    # as a failover defect.
+    links = set(artifact_links)
+    assert (codex_lease[0], "agent_execution_transcript") in links
+    for lease_id, artifact_type in links - {(codex_lease[0], "agent_execution_transcript")}:
+        assert lease_id == claude_lease[0]
+        assert artifact_type.startswith("agent_checkpoint_")
     claude_event_kinds = [row[0] for row in claude_events]
     assert claude_event_kinds.index("agent.finished") < claude_event_kinds.index(
         "artifact.persist.failed"

@@ -30,6 +30,7 @@ from . import repository as repo
 from .events import ArtifactKind, MilestoneTransition, RequirableArtifact
 from .execution import (
     DispatchBackedExecutorRuntime,
+    MilestoneAwaitingIntegration,
     MilestoneContext,
     MilestoneFailed,
     MilestoneSucceeded,
@@ -436,10 +437,74 @@ def adopt_integrated_milestone(
         "integrated_commit_sha": commit_sha,
         "provider_blocked_dispatch_intent_id": milestone.dispatch_intent_id,
     }
+    outcome = record_integrated_completion(
+        work_unit_id,
+        phase=milestone.phase,
+        milestone_key=milestone_key,
+        attempt=attempt,
+        child_workflow_id=child_workflow_id,
+        dispatch_intent_id=milestone.dispatch_intent_id,
+        artifact=artifact,
+        shared_payload=shared_payload,
+        result_summary=f"operator adopted integrated ancestor commit {commit_sha}",
+    )
+    return IntegratedMilestoneAdoption(
+        work_unit_id=work_unit_id,
+        milestone_key=milestone_key,
+        attempt=attempt,
+        commit_sha=commit_sha,
+        accepted_by=actor,
+        applied=outcome.applied,
+    )
+
+
+def record_integrated_completion(
+    work_unit_id: str,
+    *,
+    phase: Any,
+    milestone_key: str,
+    attempt: int,
+    child_workflow_id: str,
+    dispatch_intent_id: str | None,
+    artifact: Any,
+    shared_payload: dict[str, Any],
+    result_summary: str,
+) -> Any:
+    """Complete one milestone from an integrated commit, as facts.
+
+    The shared core of the two paths that credit a milestone with a commit the
+    refinery already holds: the operator's `adopt_integrated_milestone` and the
+    automatic `integration_settlement` consumer. One function so the READY,
+    RUNNING, SUCCEEDED triple and its payload conventions cannot drift between
+    them. `record_fact`'s own idempotency makes a replay of the same attempt a
+    no-op rather than a second write.
+    """
+
+    milestone = next(
+        item
+        for item in repo.list_milestone_executions(work_unit_id)
+        if item.stable_key == milestone_key
+    )
+    if milestone.status is MilestoneExecutionStatus.RUNNING:
+        return repo.record_fact(
+            work_unit_id,
+            MilestoneTransition(
+                phase=phase,
+                milestone_key=milestone_key,
+                status=MilestoneExecutionStatus.SUCCEEDED,
+                attempt=attempt,
+                child_workflow_id=child_workflow_id,
+                dispatch_intent_id=dispatch_intent_id,
+                result_summary=result_summary,
+                artifacts=(artifact,),
+                payload=shared_payload,
+            ),
+            child_workflow_id=child_workflow_id,
+        )
     repo.record_fact(
         work_unit_id,
         MilestoneTransition(
-            phase=milestone.phase,
+            phase=phase,
             milestone_key=milestone_key,
             status=MilestoneExecutionStatus.READY,
             attempt=attempt,
@@ -449,38 +514,30 @@ def adopt_integrated_milestone(
     repo.record_fact(
         work_unit_id,
         MilestoneTransition(
-            phase=milestone.phase,
+            phase=phase,
             milestone_key=milestone_key,
             status=MilestoneExecutionStatus.RUNNING,
             attempt=attempt,
             child_workflow_id=child_workflow_id,
-            dispatch_intent_id=milestone.dispatch_intent_id,
+            dispatch_intent_id=dispatch_intent_id,
             payload=shared_payload,
         ),
         child_workflow_id=child_workflow_id,
     )
-    outcome = repo.record_fact(
+    return repo.record_fact(
         work_unit_id,
         MilestoneTransition(
-            phase=milestone.phase,
+            phase=phase,
             milestone_key=milestone_key,
             status=MilestoneExecutionStatus.SUCCEEDED,
             attempt=attempt,
             child_workflow_id=child_workflow_id,
-            dispatch_intent_id=milestone.dispatch_intent_id,
-            result_summary=f"operator adopted integrated ancestor commit {commit_sha}",
+            dispatch_intent_id=dispatch_intent_id,
+            result_summary=result_summary,
             artifacts=(artifact,),
             payload=shared_payload,
         ),
         child_workflow_id=child_workflow_id,
-    )
-    return IntegratedMilestoneAdoption(
-        work_unit_id=work_unit_id,
-        milestone_key=milestone_key,
-        attempt=attempt,
-        commit_sha=commit_sha,
-        accepted_by=actor,
-        applied=outcome.applied,
     )
 
 
@@ -619,6 +676,12 @@ def adopt_settled_dispatch(work_unit_id: str, milestone_key: str) -> SettledDisp
             )
         case MilestoneSucceeded():
             pass
+        case MilestoneAwaitingIntegration():
+            raise DispatchAdoptionRefused(
+                "settled_adoption_requires_integrated_row",
+                "the dispatch is MERGE_PENDING; adopt the matching Integrated row, "
+                "not the pre-landing dispatch result",
+            )
 
     shared_payload = {
         "adoption_kind": "settled_dispatch.v1",
@@ -804,4 +867,5 @@ __all__ = [
     "IntegratedMilestoneAdoption",
     "adopt_integrated_milestone",
     "adopt_recovered_dispatch",
+    "record_integrated_completion",
 ]

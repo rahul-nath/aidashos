@@ -19,6 +19,7 @@ in any of the policy's tool-name sets.
 from __future__ import annotations
 
 import threading
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,12 @@ from local_first_agent_os.capability_gate import (
     granted_violations_for,
     revoked_capabilities_for,
 )
-from local_first_agent_os.coordination.pow_wows import revoke_tool_permission
+from local_first_agent_os.coordination import DispatchKind
+from local_first_agent_os.coordination.pow_wows import (
+    grant_tool_permission,
+    restore_tool_permission,
+    revoke_tool_permission,
+)
 from local_first_agent_os.coordination.store import tx
 from local_first_agent_os.pow_wow import (
     CliPowWowExecutor,
@@ -49,16 +55,17 @@ from local_first_agent_os.pow_wow import (
 from local_first_agent_os.pow_wow.protocol import TaskPurpose
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject
+from local_first_agent_os.settings import get_settings
 from local_first_agent_os.spawn_authority import SpawnAuthority
 from local_first_agent_os.staffing import (
     JudgmentRole,
-    Tier,
 )
+from local_first_agent_os.vocabulary import DispatchTier
 
 scenarios("features/agent_caller_gate.feature")
 
 
-AGENT = seat_agent_name(Tier.SENIOR)
+AGENT = seat_agent_name(DispatchTier.SENIOR)
 """Whichever harness the repo's staffing config seats as the implementer.
 
 These scenarios are about grants and revocations for a principal that may write,
@@ -76,8 +83,8 @@ with the same irrelevant denial.
 # choice, but an outage staffing can put one vendor in both frontier seats, and
 # this test's premise is per-agent scoping, not the current seating.
 _OTHER_AGENT = (
-    seat_agent_name(Tier.STAFF)
-    if seat_agent_name(Tier.STAFF) != AGENT
+    seat_agent_name(DispatchTier.STAFF)
+    if seat_agent_name(DispatchTier.STAFF) != AGENT
     else ("codex" if AGENT == "claude" else "claude")
 )
 """The other frontier vendor, for the scopes that must not reach `AGENT`."""
@@ -109,25 +116,39 @@ def pow_wows(work_unit_ledger: Path) -> tuple[str, str]:
     return made[0], made[1]
 
 
-def _grant(pow_wow_id: str, capability: Capability, *, agent: str = AGENT) -> None:
-    """A GRANTED row, so there is something for a revocation to take back."""
+def _grant(
+    pow_wow_id: str,
+    capability: Capability,
+    *,
+    agent: str = AGENT,
+    status: str = "GRANTED",
+) -> str:
+    """A row in the given status, so there is something to take back or grant.
 
+    The request_id is fresh per call: the regrant scenarios need a second row
+    for the same scope, agent, and tool, which is exactly what the real
+    request-and-grant path writes beside a REVOKED row.
+    """
+
+    request_id = f"req-{uuid.uuid4()}"
     with tx() as c:
         c.execute(
             """
             INSERT INTO tool_permission_requests(
                 request_id, session_id, agent_name, task_id, pow_wow_id,
                 tool_name, reason, status, granted_by, created_at, resolved_at
-            ) VALUES (?, NULL, ?, NULL, ?, ?, ?, 'GRANTED', 'test', 0, 0)
+            ) VALUES (?, NULL, ?, NULL, ?, ?, ?, ?, 'test', 0, 0)
             """,
             (
-                f"req-{pow_wow_id}-{capability.value}-{agent}",
+                request_id,
                 agent,
                 pow_wow_id,
                 capability.value,
                 "declared by the compiled plan",
+                status,
             ),
         )
+    return request_id
 
 
 def _revoke(pow_wow_id: str, capability: Capability, *, agent: str = AGENT) -> None:
@@ -184,14 +205,16 @@ def _executor(tmp_path: Path, *, ceiling: SpawnAuthority) -> CliPowWowExecutor:
     )
 
 
-def _task(purpose: TaskPurpose, tier: Tier = Tier.SENIOR) -> PowWowTaskSpec:
+def _task(purpose: TaskPurpose, tier: DispatchTier = DispatchTier.SENIOR) -> PowWowTaskSpec:
     return PowWowTaskSpec(
         task_name="do_the_thing",
         role="implementer",
         description="do the thing",
         purpose=purpose,
         judgment=JudgmentRole(name="implementer", tier=tier),
-        dispatch_kind="advisory" if purpose is TaskPurpose.ADVISORY else "code",
+        dispatch_kind=(
+            DispatchKind.ADVISORY if purpose is TaskPurpose.ADVISORY else DispatchKind.CODE
+        ),
     )
 
 
@@ -284,7 +307,7 @@ def _failed_unspawned(world: dict[str, Any]) -> None:
 def _names_remedy(world: dict[str, Any]) -> None:
     risk = world["result"].risks[0]
     assert "write_repository" in risk
-    assert "request_tool_permission" in risk
+    assert "restore_tool_permission" in risk
 
 
 @then("the task is not refused by the gate")
@@ -506,7 +529,7 @@ def test_the_local_delegate_lane_is_gated_too(pow_wows: tuple[str, str], tmp_pat
     )
 
     denial = executor._authorize_spawn(
-        _task(TaskPurpose.DETERMINISTIC_CHECK, tier=Tier.JUNIOR),
+        _task(TaskPurpose.DETERMINISTIC_CHECK, tier=DispatchTier.JUNIOR),
         pow_wow_id=pow_wow,
         agent_name="pi",
     )
@@ -547,11 +570,16 @@ def test_a_denial_is_a_recorded_failure_not_a_crash(
     assert result.artifacts[0].content["capability"] == "run_command"
 
 
-def test_a_denial_names_the_request_that_would_lift_it(
+def test_a_revocation_denial_names_the_restore_that_would_lift_it(
     pow_wows: tuple[str, str], tmp_path: Path
 ) -> None:
-    """A capability an operator can grant, and a message that does not say so,
-    is a gate that reads as a dead end."""
+    """The remedy must be the one that works.
+
+    This denial used to print the request-and-grant path, which cannot lift a
+    revocation: following it wrote a second row beside the REVOKED row that
+    kept refusing, and the printed way out was a dead end. The message now
+    names the exact restore command, arguments included.
+    """
 
     pow_wow, _ = pow_wows
     _revoke(pow_wow, Capability.WRITE_REPOSITORY)
@@ -563,8 +591,11 @@ def test_a_denial_names_the_request_that_would_lift_it(
     denial = executor._authorize_spawn(task, pow_wow_id=pow_wow, agent_name=AGENT)
     assert denial is not None
 
-    assert "request_tool_permission" in denial.remedy
-    assert "grant_tool_permission" in denial.remedy
+    assert "restore_tool_permission" in denial.remedy
+    assert pow_wow in denial.remedy
+    assert AGENT in denial.remedy
+    assert Capability.WRITE_REPOSITORY.value in denial.remedy
+    assert "request_tool_permission" not in denial.remedy
 
 
 # Variable 6: the revocation command itself.
@@ -615,6 +646,231 @@ def test_revoking_twice_is_refused_the_second_time(pow_wows: tuple[str, str]) ->
 
     assert first["ok"] is True
     assert second["ok"] is False
+
+
+def test_an_outage_seated_implementer_is_authorized_by_its_plan_seat(
+    pow_wows: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The 2026-08-29 milestone denial, replayed through the spawn path.
+
+    The static staffing file declares the cross-vendor pairing; a fallback
+    seating has claude implementing anyway. The task arrives with role
+    ``implementer`` and judgment tier SENIOR. The gate used to hear only the
+    role, fall to the bench, resolve claude to its static seat ``staff``, and
+    refuse ``run_command`` to the implementer its own plan had granted it
+    (work unit e5d41f8805f4f955d7b1e832cc7fd4ee, milestone b). The spawn path
+    now declares the plan's seat, so the bench is never asked.
+    """
+
+    pow_wow, _ = pow_wows
+    configs = tmp_path / "configs"
+    configs.mkdir(exist_ok=True)
+    (configs / "staffing.toml").write_text(
+        'seated_pairing = "cross-vendor"\n'
+        "\n"
+        "[pairings.cross-vendor.senior]\n"
+        'harness = "codex"\n'
+        'model = "gpt-test"\n'
+        "capacity = 2\n"
+        "\n"
+        "[pairings.cross-vendor.staff]\n"
+        'harness = "claude"\n'
+        'model = "claude-test"\n'
+        "capacity = 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOCAL_AGENT_CONFIG_DIR", str(configs))
+    get_settings.cache_clear()
+
+    # Seat-blind, the bench misfiles the outage implementer as the reviewer.
+    # This is the live denial, verbatim but for the ids.
+    seat_blind = check_capability(
+        agent_name="claude",
+        agent_role="implementer",
+        capability=Capability.RUN_COMMAND,
+        pow_wow_id=pow_wow,
+    )
+    assert isinstance(seat_blind, CapabilityDenied)
+    assert "principal 'staff'" in seat_blind.reason
+
+    ceiling = SpawnAuthority.of(
+        (Capability.READ_REPOSITORY, Capability.WRITE_REPOSITORY, Capability.RUN_COMMAND)
+    )
+    executor = _executor(tmp_path, ceiling=ceiling)
+    task = _task(TaskPurpose.IMPLEMENTATION)
+
+    denial = executor._authorize_spawn(task, pow_wow_id=pow_wow, agent_name="claude")
+
+    assert denial is None
+
+
+# Variable 7: the restore command, the operator-held key to the one-way door.
+def test_a_regrant_does_not_lift_a_revocation(pow_wows: tuple[str, str]) -> None:
+    pow_wow, _ = pow_wows
+    """The dead end, as an assertion.
+
+    The old refusal's own printed remedy was request again, grant again. That
+    writes a fresh GRANTED row beside the REVOKED one, and the REVOKED row is
+    what the gate reads: written policy outranks grants, and a revocation is
+    the operator's written change of mind, so it keeps refusing until an
+    operator restores it rather than until somebody grants around it.
+    """
+
+    _revoke(pow_wow, Capability.WRITE_REPOSITORY)
+    _grant(pow_wow, Capability.WRITE_REPOSITORY)
+
+    verdict = check_capability(
+        agent_name=AGENT,
+        agent_role="implementer",
+        capability=Capability.WRITE_REPOSITORY,
+        pow_wow_id=pow_wow,
+    )
+    assert isinstance(verdict, CapabilityDenied)
+    assert "restore_tool_permission" in verdict.remedy
+
+
+def test_granting_over_a_standing_revocation_says_so(pow_wows: tuple[str, str]) -> None:
+    pow_wow, _ = pow_wows
+    """The grant is not refused, but it must not be silent about changing nothing."""
+
+    _revoke(pow_wow, Capability.WRITE_REPOSITORY)
+    request_id = _grant(pow_wow, Capability.WRITE_REPOSITORY, status="PENDING")
+
+    granted = grant_tool_permission(request_id, granted_by="operator")
+
+    assert granted["ok"] is True
+    assert granted["standing_revocation"] is True
+    assert "restore_tool_permission" in granted["warning"]
+
+
+def test_a_restored_revocation_no_longer_refuses(pow_wows: tuple[str, str], tmp_path: Path) -> None:
+    pow_wow, _ = pow_wows
+    _revoke(pow_wow, Capability.WRITE_REPOSITORY)
+
+    restored = restore_tool_permission(
+        pow_wow_id=pow_wow,
+        agent_name=AGENT,
+        tool_name=Capability.WRITE_REPOSITORY.value,
+        restored_by="operator",
+        reason="false alarm; the agent's write was the planned one",
+    )
+    assert restored["ok"] is True, restored
+    assert restored["status"] == "RESTORED"
+    _grant(pow_wow, Capability.WRITE_REPOSITORY)
+
+    verdict = check_capability(
+        agent_name=AGENT,
+        agent_role="implementer",
+        capability=Capability.WRITE_REPOSITORY,
+        pow_wow_id=pow_wow,
+    )
+    assert isinstance(verdict, CapabilityGranted)
+
+    executor = _executor(
+        tmp_path,
+        ceiling=SpawnAuthority.of((Capability.READ_REPOSITORY, Capability.WRITE_REPOSITORY)),
+    )
+    denial = executor._authorize_spawn(
+        _task(TaskPurpose.IMPLEMENTATION), pow_wow_id=pow_wow, agent_name=AGENT
+    )
+    assert denial is None
+
+
+def test_restoring_nothing_revoked_is_refused(pow_wows: tuple[str, str]) -> None:
+    pow_wow, _ = pow_wows
+    """A restore that cannot say no would let an operator believe a refusal was
+    lifted when there was never one standing."""
+
+    result = restore_tool_permission(
+        pow_wow_id=pow_wow,
+        agent_name=AGENT,
+        tool_name=Capability.WRITE_REPOSITORY.value,
+        restored_by="operator",
+        reason="nothing to lift",
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "not_revoked"
+
+
+def test_restoring_twice_is_refused_the_second_time(pow_wows: tuple[str, str]) -> None:
+    pow_wow, _ = pow_wows
+    _revoke(pow_wow, Capability.WRITE_REPOSITORY)
+    first = restore_tool_permission(
+        pow_wow_id=pow_wow,
+        agent_name=AGENT,
+        tool_name=Capability.WRITE_REPOSITORY.value,
+        restored_by="operator",
+        reason="lifting the refusal",
+    )
+    second = restore_tool_permission(
+        pow_wow_id=pow_wow,
+        agent_name=AGENT,
+        tool_name=Capability.WRITE_REPOSITORY.value,
+        restored_by="operator",
+        reason="lifting it again",
+    )
+
+    assert first["ok"] is True
+    assert second["ok"] is False
+    assert second["error"] == "not_revoked"
+
+
+def test_restoring_an_unknown_capability_is_refused(pow_wows: tuple[str, str]) -> None:
+    pow_wow, _ = pow_wows
+    result = restore_tool_permission(
+        pow_wow_id=pow_wow,
+        agent_name=AGENT,
+        tool_name="become_root",
+        restored_by="operator",
+        reason="no such door",
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "unknown_capability"
+
+
+def test_restoring_without_a_reason_is_refused(pow_wows: tuple[str, str]) -> None:
+    pow_wow, _ = pow_wows
+    """Lifting a refusal is the audited act; a blank reason says nothing."""
+
+    _revoke(pow_wow, Capability.WRITE_REPOSITORY)
+    result = restore_tool_permission(
+        pow_wow_id=pow_wow,
+        agent_name=AGENT,
+        tool_name=Capability.WRITE_REPOSITORY.value,
+        restored_by="operator",
+        reason="   ",
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "missing_reason"
+
+
+def test_a_restore_can_itself_be_revoked_again(pow_wows: tuple[str, str]) -> None:
+    pow_wow, _ = pow_wows
+    """RESTORED is terminal and neutral: it does not grant, so revoking again
+    needs a fresh GRANTED row to take back, exactly like the first time."""
+
+    _revoke(pow_wow, Capability.WRITE_REPOSITORY)
+    restore_tool_permission(
+        pow_wow_id=pow_wow,
+        agent_name=AGENT,
+        tool_name=Capability.WRITE_REPOSITORY.value,
+        restored_by="operator",
+        reason="lifting the refusal",
+    )
+    _revoke(pow_wow, Capability.WRITE_REPOSITORY)
+
+    verdict = check_capability(
+        agent_name=AGENT,
+        agent_role="implementer",
+        capability=Capability.WRITE_REPOSITORY,
+        pow_wow_id=pow_wow,
+    )
+    assert isinstance(verdict, CapabilityDenied)
 
 
 def test_concurrent_gate_checks_do_not_crash(pow_wows: tuple[str, str]) -> None:

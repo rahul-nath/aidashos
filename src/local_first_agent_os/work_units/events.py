@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Final, Literal, overload
 
+from ..dispatch_kinds import DispatchKind
 from .lifecycle import (
     FailureClass,
     LifecyclePhase,
@@ -741,7 +742,7 @@ class DispatchIntentCreated:
     attempt: int
     dispatch_intent_id: str
     tier: str
-    kind: str
+    kind: DispatchKind
     # The commit this intent's worktree branches from, resolved from the
     # milestone's dependency's settled result. None means HEAD, which is both
     # the no-dependency case and every event recorded before the field existed.
@@ -764,7 +765,7 @@ class DispatchIntentCreated:
             "attempt": self.attempt,
             "dispatch_intent_id": self.dispatch_intent_id,
             "tier": self.tier,
-            "kind": self.kind,
+            "kind": self.kind.value,
             "base_commit_sha": self.base_commit_sha,
         }
 

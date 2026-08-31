@@ -15,6 +15,7 @@ from typing import Any, Final, Literal, assert_never
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from .constants import APPROVAL_REQUEST_TYPES, DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS
+from .vocabulary import DispatchTier
 from .work_units.events import OperatorDecision
 
 SCHEMA_VERSION_INGRESS = "ingress_event.v1"
@@ -634,7 +635,7 @@ class DirectiveSpec:
     agent_harness: AgentHarness | None = None
     # Dispatcher / reactor fields
     dispatcher_name: str | None = None
-    dispatcher_tier: Literal["junior", "senior", "staff"] | None = None
+    dispatcher_tier: DispatchTier | None = None
     dispatcher_interval_seconds: float | None = None
     dispatcher_max_polls: int | None = None
     target_project_id: str | None = None

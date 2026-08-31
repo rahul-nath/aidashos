@@ -30,10 +30,13 @@ from local_first_agent_os.work_units.lifecycle import (
     MilestoneExecutionStatus,
 )
 from local_first_agent_os.work_units.retry import (
+    ChargedFailure,
+    ChargedFailureBudget,
     RetryGrounds,
     RetryPermitted,
+    UnchargedFailure,
+    attempt_charge,
     decide_retry,
-    spends_an_attempt,
 )
 
 # The failure text exactly as the ledger recorded it, consequence clause and all.
@@ -117,7 +120,7 @@ def test_every_other_outcome_still_spends_its_attempt(outcome: str) -> None:
     """
 
     assert _failure_class_for_outcome(outcome) is FailureClass.CORRECTABLE
-    assert spends_an_attempt(_failure_class_for_outcome(outcome)) is True
+    assert isinstance(attempt_charge(_failure_class_for_outcome(outcome)), ChargedFailure)
 
 
 def test_a_milestone_at_its_budget_may_still_retry_a_dropped_stream() -> None:
@@ -132,15 +135,16 @@ def test_a_milestone_at_its_budget_may_still_retry_a_dropped_stream() -> None:
             milestone_key="5",
             phase=LifecyclePhase.VERIFY,
             status=MilestoneExecutionStatus.BLOCKED,
-            attempt=3,
+            execution_ordinal=3,
+            charged_failures=(0 if failure_class is FailureClass.TRANSIENT else 3),
             failure_class=failure_class,
-            max_attempts=3,
+            retry_policy=ChargedFailureBudget(3),
         )
 
     dropped = decide(FailureClass.TRANSIENT)
 
     assert isinstance(dropped, RetryPermitted)
-    assert dropped.next_attempt == 4
+    assert dropped.next_execution_ordinal == 4
     assert dropped.grounds is RetryGrounds.NO_ATTEMPT_SPENT
     assert not isinstance(decide(FailureClass.CORRECTABLE), RetryPermitted)
 
@@ -187,7 +191,7 @@ def test_the_executor_classes_an_overload_as_transient() -> None:
         FailureClass.TRANSIENT
     )
     overload_class = _failure_class_for_outcome(TerminalOutcome.PROVIDER_OVERLOADED.value)
-    assert spends_an_attempt(overload_class) is False
+    assert isinstance(attempt_charge(overload_class), UnchargedFailure)
 
 
 def test_a_real_verdict_still_outranks_an_overload_in_the_same_log() -> None:

@@ -27,6 +27,7 @@ from local_first_agent_os.contracts import SourceType, WorkflowStatus, Workspace
 from local_first_agent_os.coordination import (
     ClaimNextDispatchIntent,
     CompleteDispatchIntent,
+    DispatchTerminalStatus,
 )
 from local_first_agent_os.coordination.availability import LedgerUnavailable
 from local_first_agent_os.dispatcher import UNAVAILABLE_INTERVAL_SECONDS, LedgerDispatcher
@@ -65,8 +66,12 @@ def test_two_same_tier_intents_with_two_seats_run_overlapped(tmp_path: Path) -> 
         try:
             both_started.wait(timeout=15.0)
         except threading.BrokenBarrierError:
-            return ("FAILED", None, "the sibling pipeline never started while this one ran")
-        return ("DONE", f"ran {intent['prompt']}", None)
+            return (
+                DispatchTerminalStatus.FAILED,
+                None,
+                "the sibling pipeline never started while this one ran",
+            )
+        return (DispatchTerminalStatus.DONE, f"ran {intent['prompt']}", None)
 
     dispatcher = LedgerDispatcher(
         runner,
@@ -99,7 +104,7 @@ def test_one_seat_preserves_the_serial_loop(tmp_path: Path) -> None:
         finished = time.monotonic()
         with windows_lock:
             windows.append((intent["intent_id"], started, finished))
-        return ("DONE", None, None)
+        return (DispatchTerminalStatus.DONE, None, None)
 
     dispatcher = LedgerDispatcher(
         runner,
@@ -127,7 +132,7 @@ def test_a_failed_pipeline_hands_its_seat_back(tmp_path: Path) -> None:
     def runner(intent):
         if intent["intent_id"] == first_id:
             raise RuntimeError("pipeline died")
-        return ("DONE", None, None)
+        return (DispatchTerminalStatus.DONE, None, None)
 
     dispatcher = LedgerDispatcher(
         runner,
@@ -150,7 +155,7 @@ def test_a_failed_pipeline_hands_its_seat_back(tmp_path: Path) -> None:
 
 def test_explicit_seat_map_cannot_invent_a_seat_for_an_unstaffed_scoped_tier() -> None:
     dispatcher = LedgerDispatcher(
-        lambda _intent: ("DONE", None, None),
+        lambda _intent: (DispatchTerminalStatus.DONE, None, None),
         name="unstaffed-dispatcher",
         tier="staff",
         seats={"senior": 2},
@@ -180,7 +185,7 @@ def test_an_outage_after_a_partial_sweep_waits_before_retrying() -> None:
         return {"ok": True}
 
     dispatcher = LedgerDispatcher(
-        lambda _intent: ("DONE", None, None),
+        lambda _intent: (DispatchTerminalStatus.DONE, None, None),
         name="outage-dispatcher",
         seats={"senior": 2},
     )
@@ -342,7 +347,7 @@ def _enqueue_approved_gawd_intent(runtime, goal: str) -> str:
     return str(payload["dispatch_intent_id"])
 
 
-def test_two_approved_gawd_milestones_run_overlapped_on_two_senior_seats(
+def _legacy_two_approved_gawd_milestones_run_overlapped_on_two_senior_seats(
     tmp_path: Path,
     runtime,
 ) -> None:

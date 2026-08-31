@@ -12,6 +12,7 @@ from local_first_agent_os.coordination.contracts import (
     AcknowledgementResult,
     CollectionResult,
     CoordinationCommandName,
+    DispatchKind,
     LatestRepoAudit,
     LedgerRecord,
     SubmitArtifact,
@@ -24,6 +25,7 @@ from local_first_agent_os.pow_wow import (
     PowWowTaskResult,
 )
 from local_first_agent_os.pow_wow.planning import (
+    build_planning_evidence_artifact,
     persist_repo_audit,
     validate_planning_visibility_contract,
 )
@@ -32,7 +34,7 @@ from local_first_agent_os.pow_wow.protocol import PlanningPhase
 from local_first_agent_os.pow_wow.repo_audit import RepoAudit
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject
-from local_first_agent_os.staffing import Tier
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 def _target(path: Path) -> LinkedProject:
@@ -51,8 +53,8 @@ def _target(path: Path) -> LinkedProject:
 def _plan(target: LinkedProject):
     return RuleBasedDecompositionPlanner().plan(
         intent_id="planning-contract",
-        tier=Tier.SENIOR,
-        kind="code",
+        tier=DispatchTier.SENIOR,
+        kind=DispatchKind.CODE,
         prompt="implement the raw contract",
         target_project=target,
         intent={},
@@ -301,7 +303,7 @@ def test_next_same_tier_prompt_partitions_audit_against_real_git_diff(
                 {"claim": "value remains one", "file": "changed.py", "line_start": 1},
             ],
             "phase": PlanningPhase.SENIOR_INDEPENDENT_READING.value,
-            "tier": Tier.SENIOR.value,
+            "tier": DispatchTier.SENIOR.value,
             "task_name": "prior_reading",
         }
     )
@@ -309,7 +311,7 @@ def test_next_same_tier_prompt_partitions_audit_against_real_git_diff(
     def coordination(command):
         assert isinstance(command, LatestRepoAudit)
         assert command.target_project_id == target.id
-        assert command.tier == Tier.SENIOR.value
+        assert command.tier == DispatchTier.SENIOR.value
         return CollectionResult(
             CoordinationCommandName.LATEST_REPO_AUDIT,
             "artifacts",
@@ -452,3 +454,43 @@ def test_executor_fails_closed_on_invalid_visibility_graph(tmp_path: Path) -> No
     assert result.external_agents_started is False
     assert "junior verification plan must wait" in result.output_summary
     assert result.tasks == ()
+
+
+def test_a_fallback_rescued_planning_task_keeps_its_model_output(tmp_path: Path) -> None:
+    """The failover's answer lives under `fallback_output`, and it must count.
+
+    Observed live on work unit c88ff4167c66 (2026-08-30): codex hit its usage
+    limit mid `senior_owned_plan`, the claude fallback ran sixteen minutes and
+    completed, and the evidence barrier raised `completed without model output
+    to persist` because it read only the primary-run keys from the fallback
+    wrapper. The rescue must persist exactly like a primary run.
+    """
+
+    plan = _plan(_target(tmp_path / "target"))
+    senior_plan = next(
+        task for task in plan.tasks if task.planning_phase is PlanningPhase.SENIOR_OWNED_PLAN
+    )
+    result = PowWowTaskResult(
+        task_name=senior_plan.task_name,
+        role=senior_plan.role,
+        status="completed",
+        summary="codex hit USAGE_LIMIT; fresh claude fallback completed.",
+        artifacts=(
+            PowWowArtifact(
+                artifact_type="frontier_fallback_run",
+                schema_version="frontier_fallback_run.v2",
+                task_name=senior_plan.task_name,
+                content={
+                    "reason": "USAGE_LIMIT",
+                    "failed_harness": "codex",
+                    "fallback_harness": "claude",
+                    "fallback_output": "the plan the fallback wrote",
+                },
+            ),
+        ),
+    )
+
+    artifact = build_planning_evidence_artifact(senior_plan, result)
+
+    assert artifact is not None
+    assert artifact.content["model_output"] == "the plan the fallback wrote"

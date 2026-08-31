@@ -257,6 +257,25 @@ def test_an_explicit_migration_restores_a_stale_database(disposable_postgres_url
         reconnected.close()
 
 
+@pytest.mark.parametrize("starting_version", range(store.SCHEMA_VERSION))
+def test_every_declared_older_schema_marker_upgrades_to_current(
+    disposable_postgres_url: str,
+    starting_version: int,
+) -> None:
+    """The monolithic idempotent DDL supports every marker, not only N minus one."""
+
+    initialized = store.connect()
+    initialized.close()
+    _set_durable_version(disposable_postgres_url, starting_version)
+    store._SCHEMA_READY.clear()
+
+    result = store.migrate_postgres_schema()
+
+    assert result["previous_version"] == starting_version
+    assert result["version"] == store.SCHEMA_VERSION
+    assert result["migrated"] is True
+
+
 def test_an_explicit_migration_reports_a_database_that_needed_nothing(
     disposable_postgres_url: str,
 ) -> None:

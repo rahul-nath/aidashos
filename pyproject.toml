@@ -38,7 +38,7 @@ dependencies = [
     "dbos==2.29.0",
     "fastapi[standard]>=0.136.1",
     "httpx>=0.28.1",
-    "mcp[cli]>=1.27.0",
+    "mcp[cli]>=1.28.1,<2",
     "minio>=7.2.18",
     "opentelemetry-api>=1.39.0",
     "opentelemetry-exporter-otlp-proto-http>=1.39.0",
@@ -50,9 +50,9 @@ dependencies = [
     "prometheus-client>=0.25.0",
     "psycopg[binary,pool]>=3.3.3",
     "pydantic>=2.13.3",
-    "pydantic-settings>=2.14.0",
+    "pydantic-settings>=2.14.2",
     "pyroscope-io>=1.0.5",
-    "python-multipart>=0.0.26",
+    "python-multipart>=0.0.31",
     "rich>=15.0.0",
     "sounddevice>=0.5.1",
     "sqlalchemy>=2.0.49",
@@ -60,6 +60,14 @@ dependencies = [
     "watchdog>=6.0.0",
     "webrtcvad-wheels>=2.0.14",
     "networkx>=3.3",
+    # Security floors for runtime transitives that parse network or identity
+    # input. Keeping them here makes an old vulnerable resolution impossible
+    # even when a parent package temporarily broadens its lower bound.
+    "cryptography>=50.0.0",
+    "idna>=3.15",
+    "pyjwt>=2.13.0",
+    "starlette>=1.3.1",
+    "urllib3>=2.7.0",
 ]
 
 [project.scripts]

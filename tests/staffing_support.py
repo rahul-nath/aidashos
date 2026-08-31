@@ -27,7 +27,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from local_first_agent_os.staffing import Bench, FrontierPairing, Harness, Tier, load_bench
+from local_first_agent_os.staffing import Bench, FrontierPairing, Harness, load_bench
+from local_first_agent_os.vocabulary import DispatchTier
 
 REPO_STAFFING_CONFIG = Path(__file__).resolve().parent.parent / "configs" / "staffing.toml"
 
@@ -38,13 +39,13 @@ def repo_bench() -> Bench:
     return load_bench(REPO_STAFFING_CONFIG)
 
 
-def seat_vendor(tier: Tier) -> Harness:
+def seat_vendor(tier: DispatchTier) -> Harness:
     """The harness seated at `tier` by the repo's staffing config."""
 
     return repo_bench()[tier].harness
 
 
-def seat_agent_name(tier: Tier) -> str:
+def seat_agent_name(tier: DispatchTier) -> str:
     """The agent name a fake filling `tier`'s seat must answer to."""
 
     return seat_vendor(tier).value
@@ -74,14 +75,14 @@ def two_vendor_bench() -> Bench:
     pairing = FrontierPairing(
         name="two_vendor_bench",
         senior=replace(
-            bench[Tier.SENIOR],
+            bench[DispatchTier.SENIOR],
             harness=Harness.CODEX,
             model=None,
             backup_models=(),
             workload_profiles=(),
         ),
         staff=replace(
-            bench[Tier.STAFF],
+            bench[DispatchTier.STAFF],
             harness=Harness.CLAUDE,
             model=None,
             backup_models=(),

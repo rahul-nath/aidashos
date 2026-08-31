@@ -119,6 +119,7 @@ Apply the advanced software design principles this repo uses:
 - Preserve durable truth: if work is coordinated, record it in the ledger and artifacts, not only chat.
 - Make dependencies explicit: use `blocked_by`; do not rely on prompt order or chat history.
 - Crash or fail visibly on invalid planner/task output; do not silently coerce illegal states.
+- Make comments and docstrings reduce code knowledge: document the present contract, invariant, ownership reason, or non-obvious assumption needed for correctness, and leave implementation history in version control.
 - Do not auto-merge, deploy, purchase, or send external communications without the approval gate.
 
 ## Work Pattern

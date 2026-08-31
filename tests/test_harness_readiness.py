@@ -33,8 +33,8 @@ from local_first_agent_os.staffing import (
     BenchSlot,
     FrontierHarness,
     Harness,
-    Tier,
 )
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 def _completed(stdout: str = "", returncode: int = 0) -> subprocess.CompletedProcess[str]:
@@ -62,18 +62,18 @@ def _senior_vendor() -> FrontierHarness:
     was reseated, for a reason none of them is testing.
     """
 
-    return FrontierHarness(DEFAULT_BENCH[Tier.SENIOR].harness.value)
+    return FrontierHarness(DEFAULT_BENCH[DispatchTier.SENIOR].harness.value)
 
 
 def _staff_vendor() -> FrontierHarness:
-    return FrontierHarness(DEFAULT_BENCH[Tier.STAFF].harness.value)
+    return FrontierHarness(DEFAULT_BENCH[DispatchTier.STAFF].harness.value)
 
 
 def _nothing_can_staff_senior(**_kwargs: object) -> tuple[TierStaffing, ...]:
     return (
         TierUnstaffable(
-            tier=Tier.SENIOR,
-            configured=DEFAULT_BENCH[Tier.SENIOR],
+            tier=DispatchTier.SENIOR,
+            configured=DEFAULT_BENCH[DispatchTier.SENIOR],
             detail=_UNSTAFFABLE_DETAIL,
         ),
     )
@@ -142,14 +142,14 @@ def test_codex_is_read_by_its_exit_code(monkeypatch: pytest.MonkeyPatch) -> None
 def test_an_all_local_bench_needs_no_frontier_account() -> None:
     """A supported configuration, and one this check must not refuse."""
 
-    bench: Any = {tier: BenchSlot(harness=Harness.PI, model="gemma4") for tier in Tier}
+    bench: Any = {tier: BenchSlot(harness=Harness.PI, model="gemma4") for tier in DispatchTier}
 
     assert frontier_harnesses_on_bench(bench) == frozenset()
 
 
 def test_only_the_harnesses_the_bench_names_are_probed() -> None:
-    bench: Any = {tier: BenchSlot(harness=Harness.PI, model="gemma4") for tier in Tier}
-    bench[Tier.SENIOR] = BenchSlot(harness=Harness.CLAUDE)
+    bench: Any = {tier: BenchSlot(harness=Harness.PI, model="gemma4") for tier in DispatchTier}
+    bench[DispatchTier.SENIOR] = BenchSlot(harness=Harness.CLAUDE)
 
     assert frontier_harnesses_on_bench(bench) == frozenset({FrontierHarness.CLAUDE})
 
@@ -291,9 +291,9 @@ def test_a_logged_out_provider_moves_the_tier_to_its_ready_peer() -> None:
         )
     )
 
-    senior = next(item for item in plan if item.tier is Tier.SENIOR)
+    senior = next(item for item in plan if item.tier is DispatchTier.SENIOR)
     assert isinstance(senior, TierRestaffed)
-    assert senior.replacement.harness is DEFAULT_BENCH[Tier.STAFF].harness
+    assert senior.replacement.harness is DEFAULT_BENCH[DispatchTier.STAFF].harness
     assert staffing_refusals(plan) == (), "a covered tier is not grounds to refuse"
 
 
@@ -341,7 +341,7 @@ def test_an_unanswerable_probe_does_not_move_a_tier() -> None:
         )
     )
 
-    senior = next(item for item in plan if item.tier is Tier.SENIOR)
+    senior = next(item for item in plan if item.tier is DispatchTier.SENIOR)
     assert isinstance(senior, TierServed)
     assert staffing_refusals(plan) == ()
 
@@ -361,7 +361,7 @@ def test_a_frontier_tier_is_never_handed_to_the_local_model() -> None:
         )
     )
 
-    senior = next(item for item in plan if item.tier is Tier.SENIOR)
+    senior = next(item for item in plan if item.tier is DispatchTier.SENIOR)
     assert isinstance(senior, TierUnstaffable)
 
 
@@ -380,16 +380,19 @@ def test_a_moved_tier_keeps_its_own_capacity_and_takes_the_peers_knobs() -> None
     )
     bench = effective_bench(plan)
 
-    assert bench[Tier.SENIOR].harness is DEFAULT_BENCH[Tier.STAFF].harness
-    assert bench[Tier.SENIOR].capacity == DEFAULT_BENCH[Tier.SENIOR].capacity
-    assert bench[Tier.SENIOR].reasoning_effort == DEFAULT_BENCH[Tier.STAFF].reasoning_effort
-    assert bench[Tier.STAFF].harness is DEFAULT_BENCH[Tier.STAFF].harness, (
+    assert bench[DispatchTier.SENIOR].harness is DEFAULT_BENCH[DispatchTier.STAFF].harness
+    assert bench[DispatchTier.SENIOR].capacity == DEFAULT_BENCH[DispatchTier.SENIOR].capacity
+    assert (
+        bench[DispatchTier.SENIOR].reasoning_effort
+        == DEFAULT_BENCH[DispatchTier.STAFF].reasoning_effort
+    )
+    assert bench[DispatchTier.STAFF].harness is DEFAULT_BENCH[DispatchTier.STAFF].harness, (
         "an untouched tier is unchanged"
     )
 
 
 def test_an_all_local_bench_plans_without_asking_any_provider() -> None:
-    local_bench: Bench = {tier: BenchSlot(harness=Harness.PI) for tier in Tier}
+    local_bench: Bench = {tier: BenchSlot(harness=Harness.PI) for tier in DispatchTier}
 
     plan = plan_tier_staffing(bench=local_bench, states=())
 
@@ -407,9 +410,9 @@ def test_the_door_starts_the_run_when_a_tier_merely_moved(
     def _moved(**_kwargs: object) -> tuple[TierStaffing, ...]:
         return (
             TierRestaffed(
-                tier=Tier.SENIOR,
-                configured=DEFAULT_BENCH[Tier.SENIOR],
-                replacement=DEFAULT_BENCH[Tier.STAFF],
+                tier=DispatchTier.SENIOR,
+                configured=DEFAULT_BENCH[DispatchTier.SENIOR],
+                replacement=DEFAULT_BENCH[DispatchTier.STAFF],
                 detail="claude: not signed in",
             ),
         )
@@ -446,7 +449,7 @@ def _matrix_staffing():
     return Staffing(
         pairings={p.name: p for p in (claude_only, codex_only)},
         seated=claude_only,
-        solo={Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4)},
+        solo={DispatchTier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4)},
     )
 
 
@@ -468,9 +471,9 @@ def test_a_logged_out_vendor_moves_the_whole_pair_at_the_door() -> None:
             HarnessReady(harness=FrontierHarness.CODEX),
         ),
     )
-    moved = {item.tier: item for item in plan if item.tier is not Tier.JUNIOR}
+    moved = {item.tier: item for item in plan if item.tier is not DispatchTier.JUNIOR}
 
-    senior, staff = moved[Tier.SENIOR], moved[Tier.STAFF]
+    senior, staff = moved[DispatchTier.SENIOR], moved[DispatchTier.STAFF]
     assert isinstance(senior, TierRestaffed) and isinstance(staff, TierRestaffed)
     assert (senior.slot.harness, senior.slot.model) == (Harness.CODEX, "gpt-5.6-terra")
     assert (staff.slot.harness, staff.slot.model) == (Harness.CODEX, "gpt-5.6-sol")
@@ -494,7 +497,7 @@ def test_an_unprobed_fallback_is_not_moved_onto() -> None:
             HarnessUnknown(harness=FrontierHarness.CODEX, detail="probe did not run"),
         ),
     )
-    frontier = [item for item in plan if item.tier is not Tier.JUNIOR]
+    frontier = [item for item in plan if item.tier is not DispatchTier.JUNIOR]
 
     assert all(isinstance(item, TierUnstaffable) for item in frontier)
     assert len(staffing_refusals(plan)) == 2
@@ -510,7 +513,7 @@ def test_an_unprobed_seated_vendor_is_reported_rather_than_acted_on() -> None:
             HarnessReady(harness=FrontierHarness.CODEX),
         ),
     )
-    frontier = [item for item in plan if item.tier is not Tier.JUNIOR]
+    frontier = [item for item in plan if item.tier is not DispatchTier.JUNIOR]
 
     assert all(isinstance(item, TierServed) for item in frontier)
 
@@ -564,3 +567,62 @@ def test_the_operator_door_passes_one_whole_staffing_to_probe_and_plan(
         "plan_bench": staffing,
         "plan_states": states,
     }
+
+
+def test_a_restaffed_seat_keeps_the_workload_profiles_it_arrived_with() -> None:
+    """The cheap reading profile must survive the move, or the outage costs more.
+
+    Observed on work unit c88ff4167c66 (2026-08-30): `TierRestaffed.slot`
+    rebuilt the seat field by field and left `workload_profiles` behind, so
+    `resolve_bench_for_workload` found no profile and handed both
+    independent-reading tasks the full seat model. The file declared
+    `claude-sonnet-5` for that phase; `claude-opus-5` and `claude-fable-5` ran
+    it, and the Fable reading exhausted that model's credits. A restaffing is
+    exactly when the cheap profile matters most, so dropping it there is the
+    worst possible place to drop it.
+    """
+
+    from dataclasses import replace as _replace
+
+    from local_first_agent_os.staffing import (
+        JudgmentWorkload,
+        WorkloadModelProfile,
+        resolve_bench_for_workload,
+    )
+
+    reading = WorkloadModelProfile(
+        workload=JudgmentWorkload.INDEPENDENT_READING,
+        model="claude-sonnet-5",
+        reasoning_effort="medium",
+    )
+    replacement = _replace(
+        DEFAULT_BENCH[DispatchTier.STAFF],
+        harness=Harness.CLAUDE,
+        model="claude-fable-5",
+        workload_profiles=(reading,),
+    )
+    moved = TierRestaffed(
+        tier=DispatchTier.STAFF,
+        configured=DEFAULT_BENCH[DispatchTier.STAFF],
+        replacement=replacement,
+        detail="codex: usage limit",
+    )
+
+    slot = moved.slot
+    assert slot.workload_profiles == (reading,)
+
+    resolved = resolve_bench_for_workload(
+        DispatchTier.STAFF,
+        JudgmentWorkload.INDEPENDENT_READING,
+        {DispatchTier.STAFF: slot},
+    )
+    assert resolved.model == "claude-sonnet-5"
+    assert resolved.reasoning_effort == "medium"
+    # The standard workload still gets the seat's own model, so the profile is
+    # a phase-scoped swap rather than a demotion of the whole seat.
+    standard = resolve_bench_for_workload(
+        DispatchTier.STAFF,
+        JudgmentWorkload.STANDARD,
+        {DispatchTier.STAFF: slot},
+    )
+    assert standard.model == "claude-fable-5"

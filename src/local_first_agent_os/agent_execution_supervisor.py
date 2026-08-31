@@ -389,6 +389,7 @@ class StreamingCommandSupervisor:
         harness: str,
         timeout_seconds: float,
         env: Mapping[str, str] | None = None,
+        complete_environment: bool = False,
         source_repo_path: Path | None = None,
         base_head_sha: str | None = None,
         saga_id: str | None = None,
@@ -488,7 +489,7 @@ class StreamingCommandSupervisor:
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=cwd,
-            env=project_environment(cwd, env),
+            env=(dict(env or {}) if complete_environment else project_environment(cwd, env)),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

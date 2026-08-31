@@ -11,6 +11,7 @@ from local_first_agent_os.constants import CLI_AGENT_RUN_ARTIFACT_TYPE
 from local_first_agent_os.coordination.contracts import (
     CoordinationCommand,
     CoordinationResult,
+    DispatchKind,
     EntityResult,
     FindAgentContinuation,
     LedgerRecord,
@@ -39,9 +40,9 @@ from local_first_agent_os.staffing import (
     Harness,
     JudgmentRole,
     JudgmentWorkload,
-    Tier,
     WorkloadModelProfile,
 )
+from local_first_agent_os.vocabulary import DispatchTier
 
 
 def _target(path: Path) -> LinkedProject:
@@ -122,17 +123,17 @@ def _implementation_task() -> PowWowTaskSpec:
         success_criteria=("Focused tests pass.",),
         capabilities=("read_repository", "write_repository", "run_command", "invoke_model"),
         purpose=TaskPurpose.IMPLEMENTATION,
-        judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-        dispatch_kind="code",
+        judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+        dispatch_kind=DispatchKind.CODE,
         blocked_by=("senior_read", "junior_plan"),
         worktree_group="code",
         planning_phase=PlanningPhase.SENIOR_OWNED_PLAN,
     )
 
 
-def _codex_bench() -> dict[Tier, BenchSlot]:
+def _codex_bench() -> dict[DispatchTier, BenchSlot]:
     return {
-        Tier.SENIOR: BenchSlot(
+        DispatchTier.SENIOR: BenchSlot(
             harness=Harness.CODEX,
             model="gpt-5.6-sol",
             workload_profiles=(

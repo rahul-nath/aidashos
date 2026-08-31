@@ -43,7 +43,7 @@ Not here at all, and named so the gap is legible rather than merely absent:
 - the verification gate on a stack, and the one ``--ff-only`` advance of the
   integrated branch. Milestone 3 builds and proves the stack and stops; a stack
   that builds cleanly is abandoned under
-  ``StackAbandonment.INTEGRATED_BRANCH_ADVANCE_UNIMPLEMENTED``.
+  a typed gate verdict followed by one exact fast-forward.
 - the ``MERGE_APPROVED -> MERGED`` transition that nothing performs.
 """
 

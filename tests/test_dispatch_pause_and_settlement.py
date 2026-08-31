@@ -390,6 +390,34 @@ def test_cancelling_an_intent_wakes_the_milestone_waiting_on_it(
     assert sent == [intent_id]
 
 
+def test_a_paused_intent_can_be_cancelled(work_unit_ledger: Path) -> None:
+    """Parked work has no running process, so cancellation is a ledger transition."""
+
+    from local_first_agent_os.coordination.checkpoints import create_execution_checkpoint
+    from local_first_agent_os.coordination.dispatch import (
+        cancel_dispatch_intent,
+        claim_next_dispatch_intent,
+        list_dispatch_intents,
+    )
+
+    intent_id = _intent_with_waiter()
+    claim_next_dispatch_intent("test-dispatcher")
+    create_execution_checkpoint(
+        _open_lease_for(intent_id),
+        reason="operator_cancel",
+        status="PAUSED",
+    )
+
+    result = cancel_dispatch_intent(intent_id, reason="operator stopped the work")
+
+    assert result["ok"] is True
+    assert result["status"] == DispatchIntentStatus.CANCELED.value
+    assert result["canceled_children"] == 0
+    rows = list_dispatch_intents()["intents"]
+    parent = next(row for row in rows if row["intent_id"] == intent_id)
+    assert parent["status"] == DispatchIntentStatus.CANCELED.value
+
+
 def test_superseding_an_intent_wakes_the_milestone_waiting_on_it(
     work_unit_ledger: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

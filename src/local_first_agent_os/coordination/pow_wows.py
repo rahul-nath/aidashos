@@ -14,7 +14,9 @@ from typing import Any, Literal
 from local_first_agent_os.constants import DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS
 
 from ..capabilities import UnknownCapability, parse_capability
-from ..contracts import ApprovalStatus, PowWowStatus, TaskStatus
+from ..contracts import PowWowStatus, TaskStatus
+from ..operator_identity import OperatorIdentityRefused, verify_operator_actor
+from ..vocabulary import ToolPermissionStatus
 from .store import (
     connect,
     decode_json_array,
@@ -642,7 +644,7 @@ def request_tool_permission(
             INSERT INTO tool_permission_requests(
                 request_id, session_id, agent_name, task_id, pow_wow_id,
                 tool_name, reason, status, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, '{ApprovalStatus.PENDING}', ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, '{ToolPermissionStatus.PENDING}', ?)
             """,
             (request_id, sid, agent_name, task_id, pow_wow_id, tool_name, reason, t),
         )
@@ -651,7 +653,7 @@ def request_tool_permission(
         agent_name=agent_name,
         tool_name=tool_name,
         reason=reason,
-        status="PENDING",
+        status=ToolPermissionStatus.PENDING.value,
         created_at=iso(t),
     )
     emit("request_tool_permission", data)
@@ -674,7 +676,17 @@ def revoke_tool_permission(
 
     It does not stop a process already running. That is `cancellation.py`'s job,
     and conflating them would give an operator one verb with two meanings.
+
+    A revocation is a standing refusal: the gate keeps refusing the capability
+    while the REVOKED row exists, and a newer grant does not override it.
+    Requesting and granting again writes a fresh row beside the REVOKED one, so
+    the only way back through this door is `restore_tool_permission`.
     """
+
+    try:
+        verify_operator_actor(revoked_by)
+    except OperatorIdentityRefused as exc:
+        return err(exc.code, message=str(exc), token_file=str(exc.token_file))
 
     try:
         capability = parse_capability(tool_name).value
@@ -683,9 +695,17 @@ def revoke_tool_permission(
     t = now()
     with tx() as c:
         cur = c.execute(
-            "UPDATE tool_permission_requests SET status='REVOKED', granted_by=?, resolved_at=? "
-            "WHERE agent_name=? AND pow_wow_id=? AND tool_name=? AND status='GRANTED'",
-            (revoked_by, t, agent_name, pow_wow_id, capability),
+            "UPDATE tool_permission_requests SET status=?, granted_by=?, resolved_at=? "
+            "WHERE agent_name=? AND pow_wow_id=? AND tool_name=? AND status=?",
+            (
+                ToolPermissionStatus.REVOKED.value,
+                revoked_by,
+                t,
+                agent_name,
+                pow_wow_id,
+                capability,
+                ToolPermissionStatus.GRANTED.value,
+            ),
         )
         if cur.rowcount < 1:
             return err(
@@ -698,10 +718,89 @@ def revoke_tool_permission(
         pow_wow_id=pow_wow_id,
         agent_name=agent_name,
         tool_name=capability,
-        status="REVOKED",
+        status=ToolPermissionStatus.REVOKED.value,
         revoked_by=revoked_by,
     )
     emit("revoke_tool_permission", data)
+    return data
+
+
+def restore_tool_permission(
+    *,
+    pow_wow_id: str,
+    agent_name: str,
+    tool_name: str,
+    restored_by: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Lift a revocation, returning the capability to what the plan says.
+
+    The operator-held key to `revoke_tool_permission`'s one-way door. A
+    revocation is a standing refusal that no newer grant overrides, so without
+    this verb the gate's own printed remedy (request again, grant again) wrote a
+    second row beside the REVOKED one and the refusal was permanent.
+
+    Restoring is terminal and neutral for the row: RESTORED no longer revokes
+    and does not grant, so the capability returns to whatever the compiled plan
+    and any live grants say. Revoking again later needs a GRANTED row to take
+    back, exactly as the first revocation did.
+
+    ``restored_by`` lands in ``granted_by``, the column that records whichever
+    actor resolved the row into its current status - the same reuse
+    `revoke_tool_permission` makes for ``revoked_by``. The reason travels in the
+    result and the emitted ledger event, which is the durable audit record for
+    this table's transitions; the row's own ``reason`` column keeps the original
+    request text.
+    """
+
+    try:
+        verify_operator_actor(restored_by)
+    except OperatorIdentityRefused as exc:
+        return err(exc.code, message=str(exc), token_file=str(exc.token_file))
+    try:
+        capability = parse_capability(tool_name).value
+    except UnknownCapability as exc:
+        return err("unknown_capability", message=str(exc), tool_name=tool_name)
+    if not reason.strip():
+        # Lifting a refusal is the audited act; a blank reason would make the
+        # audit row say nothing.
+        return err(
+            "missing_reason",
+            pow_wow_id=pow_wow_id,
+            agent_name=agent_name,
+            tool_name=capability,
+        )
+    t = now()
+    with tx() as c:
+        cur = c.execute(
+            "UPDATE tool_permission_requests SET status=?, granted_by=?, resolved_at=? "
+            "WHERE agent_name=? AND pow_wow_id=? AND tool_name=? AND status=?",
+            (
+                ToolPermissionStatus.RESTORED.value,
+                restored_by,
+                t,
+                agent_name,
+                pow_wow_id,
+                capability,
+                ToolPermissionStatus.REVOKED.value,
+            ),
+        )
+        if cur.rowcount < 1:
+            return err(
+                "not_revoked",
+                pow_wow_id=pow_wow_id,
+                agent_name=agent_name,
+                tool_name=capability,
+            )
+    data = ok(
+        pow_wow_id=pow_wow_id,
+        agent_name=agent_name,
+        tool_name=capability,
+        status=ToolPermissionStatus.RESTORED.value,
+        restored_by=restored_by,
+        reason=reason,
+    )
+    emit("restore_tool_permission", data)
     return data
 
 
@@ -721,7 +820,17 @@ def grant_tool_permission(
     granted_by: str,
     ttl_seconds: int = DEFAULT_GRANT_TTL_SECONDS,
 ) -> dict[str, Any]:
-    """Grant a pending tool-permission request."""
+    """Grant a pending tool-permission request.
+
+    A grant does not lift a revocation. When a REVOKED row stands for the same
+    agent, pow-wow, and tool, the gate keeps refusing whatever this row says,
+    so the result names the standing revocation and the restore verb rather
+    than letting the operator believe the grant changed anything.
+    """
+    try:
+        verify_operator_actor(granted_by)
+    except OperatorIdentityRefused as exc:
+        return err(exc.code, message=str(exc), token_file=str(exc.token_file))
     if ttl_seconds < 0:
         raise ValueError("ttl_seconds must be non-negative; use 0 for a standing grant")
     t = now()
@@ -731,8 +840,21 @@ def grant_tool_permission(
         ).fetchone()
         if not r:
             return err("not_found", request_id=request_id)
-        if TaskStatus(str(r["status"])) is not TaskStatus.PENDING:
+        if ToolPermissionStatus(str(r["status"])) is not ToolPermissionStatus.PENDING:
             return err("already_resolved", request_id=request_id, status=r["status"])
+        standing_revocation = r["pow_wow_id"] is not None and (
+            c.execute(
+                "SELECT 1 FROM tool_permission_requests "
+                "WHERE agent_name=? AND pow_wow_id=? AND tool_name=? AND status=?",
+                (
+                    r["agent_name"],
+                    r["pow_wow_id"],
+                    r["tool_name"],
+                    ToolPermissionStatus.REVOKED.value,
+                ),
+            ).fetchone()
+            is not None
+        )
         c.execute(
             """
             UPDATE tool_permission_requests
@@ -743,18 +865,31 @@ def grant_tool_permission(
         )
     data = ok(
         request_id=request_id,
-        status="GRANTED",
+        status=ToolPermissionStatus.GRANTED.value,
         granted_by=granted_by,
         # Said at the moment the grant is made, not discovered when it lapses.
         expires_at=iso(t + ttl_seconds) if ttl_seconds > 0 else None,
         resolved_at=iso(t),
+        standing_revocation=standing_revocation,
     )
+    if standing_revocation:
+        data["warning"] = (
+            f"a revocation of {r['tool_name']!r} still stands for agent "
+            f"{r['agent_name']!r} in pow-wow {r['pow_wow_id']}; the gate keeps refusing "
+            "until an operator lifts it with restore_tool_permission("
+            f"pow_wow_id={r['pow_wow_id']!r}, agent_name={r['agent_name']!r}, "
+            f"tool_name={r['tool_name']!r}, restored_by=..., reason=...)"
+        )
     emit("grant_tool_permission", data)
     return data
 
 
 def deny_tool_permission(request_id: str, denied_by: str) -> dict[str, Any]:
     """Deny a pending tool-permission request."""
+    try:
+        verify_operator_actor(denied_by)
+    except OperatorIdentityRefused as exc:
+        return err(exc.code, message=str(exc), token_file=str(exc.token_file))
     t = now()
     with tx() as c:
         r = c.execute(
@@ -762,19 +897,19 @@ def deny_tool_permission(request_id: str, denied_by: str) -> dict[str, Any]:
         ).fetchone()
         if not r:
             return err("not_found", request_id=request_id)
-        if TaskStatus(str(r["status"])) is not TaskStatus.PENDING:
+        if ToolPermissionStatus(str(r["status"])) is not ToolPermissionStatus.PENDING:
             return err("already_resolved", request_id=request_id, status=r["status"])
         c.execute(
             f"""
             UPDATE tool_permission_requests
-            SET status = '{ApprovalStatus.DENIED}', granted_by = ?, resolved_at = ?
+            SET status = '{ToolPermissionStatus.DENIED}', granted_by = ?, resolved_at = ?
             WHERE request_id = ?
             """,
             (denied_by, t, request_id),
         )
     data = ok(
         request_id=request_id,
-        status="DENIED",
+        status=ToolPermissionStatus.DENIED.value,
         denied_by=denied_by,
         resolved_at=iso(t),
     )

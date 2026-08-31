@@ -46,14 +46,15 @@
 
 # The operator's matrix, 2026-08-23. Three declared seatings:
 #   cross-vendor (both vendors up):  senior gpt-5.6-sol/high, staff claude-opus-5/xhigh
-#   claude-only  (codex out):        senior claude-opus-5/high, staff claude-fable-5/high
+#   claude-only  (codex out):        senior claude-sonnet-5/xhigh, staff claude-opus-5/high
 #   codex-only   (claude out):       senior gpt-5.6-terra/max, staff gpt-5.6-sol/high
 # Both vendors out: nothing declared avoids it, both seats queue. The intended
 # answer there is a local fallback pairing; the compilable plan is
 # docs/local_fallback_seating_gawd.md.
 #
 # Seated today: the normal cross-vendor pair. Both CLIs and every model id in
-# the two same-vendor fallbacks were proved live on 2026-08-23. A reported
+# the two same-vendor fallbacks were proved live on 2026-08-23, and the
+# claude-only pairing's re-seated ids again on 2026-08-30. A reported
 # single-vendor quota outage moves the whole pair to its declared fallback;
 # both vendors out leaves both frontier tiers queued.
 seated_pairing = "cross-vendor"
@@ -73,7 +74,8 @@ fallback = ["claude-only", "codex-only"]
 harness = "codex"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
-capacity = 2
+# One per tier; see the claude-only senior seat for the ruling.
+capacity = 1
 
 # The senior reading workload keeps a cheaper codex id, restoring the
 # 2026-08-16 declaration this seat held before the outage moved everything to
@@ -96,13 +98,22 @@ capacity = 1
 model = "claude-sonnet-5"
 reasoning_effort = "medium"
 
-# The codex-outage seating. Restaffed 2026-08-18 by the operator's call:
-# senior is claude-opus-5 (implementer), staff is claude-fable-5
-# (reviewer). Fable 5 is the Mythos-class tier above Opus, so the stronger
-# model holds the critic seat, which is the shape the 2026-08-09 assessment
-# (the better critic reviews) asks for within one vendor. All three ids in
-# this pairing were probed live on 2026-08-18 with the one-line nonce and
-# answered.
+# The codex-outage seating. Restaffed 2026-08-30 by the operator's call:
+# senior is claude-sonnet-5 at xhigh (implementer), staff is claude-opus-5
+# (reviewer). Opus is the stronger model of the pair, so the critic seat still
+# holds it, which is the shape the 2026-08-09 assessment (the better critic
+# reviews) asks for within one vendor.
+#
+# This replaces the 2026-08-18 seating of opus implementing and fable
+# reviewing. Both frontier seats spend one claude subscription window here, and
+# on 2026-08-30 that window refused a concurrent turn: two claude calls started
+# in the same second on work unit c88ff4167c66, one completed and the other
+# came back `USAGE_LIMIT`. Moving the implementer down to Sonnet buys the depth
+# back through effort rather than through the model, and leaves the expensive
+# model on the one seat that runs at capacity 1.
+#
+# `claude-sonnet-5`, `claude-opus-5`, and `--effort xhigh` were each probed
+# live on 2026-08-30 with the one-line nonce and answered.
 [pairings.claude-only]
 fallback = ["codex-only"]
 
@@ -110,40 +121,46 @@ fallback = ["codex-only"]
 harness = "claude"
 # Pinned rather than left to the CLI default, so which model ran a milestone is
 # a fact in the compiled record instead of whatever the harness happened to
-# pick that week. Becomes `claude --model claude-opus-5` with high effort.
-model = "claude-opus-5"
-# "high" rather than the top of the range: effort is paid on every concurrent
-# senior turn at once, and this is the seat that runs at capacity 2 on long
-# implementation turns.
-reasoning_effort = "high"
-# 2, and both frontier seats share the one claude subscription while this
-# pairing is seated, so this must not go up until a run shows the window can
-# take it.
-capacity = 2
+# pick that week. Becomes `claude --model claude-sonnet-5 --effort xhigh`.
+model = "claude-sonnet-5"
+# xhigh, which is the top of the range and the opposite dial from the model.
+# Sonnet is the cheaper of the two seats' models, so depth on implementation
+# turns is bought with effort instead; that trade is what frees the claude
+# window this pairing shares between both frontier seats.
+reasoning_effort = "xhigh"
+# One. A tier is a statement about quality, not about how many processes
+# carry it: two senior agents are not one staff agent, and running two of
+# them only spent the window faster. Where a task really does divide - a
+# parallel implementation over disjoint files - the seated agent is told to
+# spawn its own subagents and make that call itself, because it can see the
+# file set and this file cannot.
+capacity = 1
 
 # Independent reading is still senior-owned work, but it does not need the
-# implementation seat's most expensive model and effort profile. The executor
-# selects this override only for the typed independent-reading planning phase.
+# implementation seat's effort profile. Since 2026-08-30 the seat itself is
+# Sonnet, so this override is purely an effort demotion from xhigh to medium
+# rather than a change of model. The executor selects it only for the typed
+# independent-reading planning phase.
 [pairings.claude-only.senior.workloads.independent_reading]
 model = "claude-sonnet-5"
 reasoning_effort = "medium"
 
 [pairings.claude-only.staff]
 harness = "claude"
-# Fable on the dedicated review seat. Same vendor as senior during the codex
-# outage, but a different model, which is what keeps this review rather than
-# the author re-reading itself.
-model = "claude-fable-5"
+# Opus on the dedicated review seat. Same vendor as senior during the codex
+# outage, but a different and stronger model, which is what keeps this review
+# rather than the author re-reading itself.
+model = "claude-opus-5"
 # "high", down from the xhigh this seat runs in cross-vendor: both frontier
 # seats spend one claude subscription window here, so the top of the effort
-# range is no longer a free dial; operator's call 2026-08-18.
+# range is no longer a free dial; operator's call 2026-08-30.
 reasoning_effort = "high"
 capacity = 1
 
 # The staff reading phase routes through the same workload
 # (`_judgment_workload` sends both reading phases to INDEPENDENT_READING), so
 # it gets the same demotion: reading the repository does not need the review
-# seat's model. The staff FINAL review keeps the full Fable slot - that pass
+# seat's model. The staff FINAL review keeps the full Opus slot - that pass
 # is the safety net and stays expensive on purpose.
 [pairings.claude-only.staff.workloads.independent_reading]
 model = "claude-sonnet-5"
@@ -165,7 +182,8 @@ fallback = ["claude-only"]
 harness = "codex"
 model = "gpt-5.6-terra"
 reasoning_effort = "max"
-capacity = 2
+# One per tier; see the claude-only senior seat for the ruling.
+capacity = 1
 
 [pairings.codex-only.staff]
 harness = "codex"
@@ -187,3 +205,16 @@ capacity = 4
 # Restaffing never reaches it: a local harness has no quota to spend, and it is
 # refused as a replacement for a frontier seat.
 backup_models = [{ harness = "pi", model = "qwen3.8-27b-mtp" }]
+
+# The junior verification plan gets the heavier local model.
+#
+# gemma4 is the fast path and stays the junior seat, but this one task is the
+# junior's hypothesis pass over the senior's reading - it reasons rather than
+# reports, and gemma4 kept making calls above its paygrade on it. qwen3.8-27b
+# scores 52 at xhigh on the 2026-08-30 leaderboard, level with claude-opus-5 at
+# low effort, so this is not a consolation model.
+#
+# No effort knob: a local model has no per-token bill to economise against, so
+# it runs at its top setting by the operator's ruling.
+[bench.junior.workloads.verification_plan]
+model = "qwen3.8-27b-mtp"

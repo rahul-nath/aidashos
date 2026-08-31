@@ -10,6 +10,7 @@ from typing import Any
 from ..contracts import ApprovalRequestType, DispatchIntentStatus
 from ..review_recovery import ReviewRecoveryRefused, recover_unparsed_dispatch_review
 from .approvals import submit_idempotent_approval_request
+from .contracts import DispatchKind
 from .store import connect, emit, err, ok, rowdict
 
 
@@ -29,7 +30,7 @@ def recover_unparsed_staff_review(intent_id: str) -> dict[str, Any]:
             intent_id=intent_id,
             status=intent.get("status"),
         )
-    if intent.get("kind") != "code":
+    if DispatchKind(str(intent.get("kind"))) is not DispatchKind.CODE:
         return err("dispatch_intent_not_code", intent_id=intent_id)
     target_project_id = str(intent.get("target_project_id") or "").strip()
     if not target_project_id:

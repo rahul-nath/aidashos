@@ -2,6 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=toolchain-pins.env
+. "$ROOT/scripts/toolchain-pins.env"
 INSTALL_SYSTEM=false
 WITH_MODEL_RUNTIMES=false
 WITH_FRONTIER_CLIS=false
@@ -35,17 +37,38 @@ done
 os="$(uname -s)"
 
 install_uv() {
-  if command -v uv >/dev/null 2>&1; then return; fi
+  if command -v uv >/dev/null 2>&1; then
+    [ "$(uv --version | awk '{print $2}')" = "$UV_VERSION" ] && return
+    echo "uv $(uv --version | awk '{print $2}') is installed; this checkout requires $UV_VERSION." >&2
+    exit 1
+  fi
   if [ "$INSTALL_SYSTEM" != true ]; then
     echo "uv is missing. Re-run with --install-system." >&2
     exit 1
   fi
-  if [ "$os" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
-    brew install uv
-  else
-    curl --connect-timeout 15 --max-time 120 -LsSf https://astral.sh/uv/install.sh | sh
-    export PATH="$HOME/.local/bin:$PATH"
-  fi
+  local architecture archive checksum platform temporary
+  architecture="$(uname -m)"
+  case "$os:$architecture" in
+    Darwin:arm64) platform="aarch64-apple-darwin"; checksum="$UV_SHA256_DARWIN_ARM64" ;;
+    Darwin:x86_64) platform="x86_64-apple-darwin"; checksum="$UV_SHA256_DARWIN_X86_64" ;;
+    Linux:aarch64|Linux:arm64) platform="aarch64-unknown-linux-gnu"; checksum="$UV_SHA256_LINUX_ARM64" ;;
+    Linux:x86_64) platform="x86_64-unknown-linux-gnu"; checksum="$UV_SHA256_LINUX_X86_64" ;;
+    *) echo "No pinned uv artifact for $os $architecture." >&2; exit 1 ;;
+  esac
+  archive="uv-${platform}.tar.gz"
+  temporary="$(mktemp -d)"
+  trap 'rm -rf "$temporary"' EXIT
+  curl --proto '=https' --tlsv1.2 --connect-timeout 15 --max-time 120 -LsSf \
+    "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/${archive}" \
+    -o "$temporary/$archive"
+  printf '%s  %s\n' "$checksum" "$temporary/$archive" | shasum -a 256 -c -
+  tar -xzf "$temporary/$archive" -C "$temporary"
+  mkdir -p "$HOME/.local/bin"
+  install -m 0755 "$temporary/uv-${platform}/uv" "$HOME/.local/bin/uv"
+  install -m 0755 "$temporary/uv-${platform}/uvx" "$HOME/.local/bin/uvx"
+  rm -rf "$temporary"
+  trap - EXIT
+  export PATH="$HOME/.local/bin:$PATH"
 }
 
 install_docker() {
@@ -75,7 +98,11 @@ install_docker() {
 
 install_node() {
   local wanted
-  wanted="$(cat "$ROOT/.node-version")"
+  wanted="$NODE_VERSION"
+  [ "$(cat "$ROOT/.node-version")" = "$wanted" ] || {
+    echo ".node-version and toolchain-pins.env disagree" >&2
+    exit 1
+  }
   if command -v node >/dev/null 2>&1 && [ "$(node --version)" = "v$wanted" ]; then
     return
   fi
@@ -85,7 +112,10 @@ install_node() {
   fi
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-    git clone --depth 1 https://github.com/nvm-sh/nvm.git "$NVM_DIR"
+    git clone --branch "$NVM_VERSION" --depth 1 https://github.com/nvm-sh/nvm.git "$NVM_DIR"
+  elif [ "$(git -C "$NVM_DIR" describe --tags --exact-match 2>/dev/null || true)" != "$NVM_VERSION" ]; then
+    echo "$NVM_DIR is not at pinned NVM tag $NVM_VERSION; reconcile it explicitly." >&2
+    exit 1
   fi
   # shellcheck source=/dev/null
   source "$NVM_DIR/nvm.sh"

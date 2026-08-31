@@ -261,6 +261,7 @@ def test_project_action_http_endpoint(
     )
     response = route.endpoint("pest_site_factory")
 
+    assert route.methods is not None
     assert "GET" in route.methods
     # The route returns the model and declares it. The declaration is what puts a
     # real shape in the published schema, which is what the generated TypeScript

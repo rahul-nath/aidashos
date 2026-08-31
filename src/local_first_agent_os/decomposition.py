@@ -17,12 +17,14 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Final, Protocol
 
-from .pow_wow import DispatchKind, PowWowTaskSpec
+from .coordination.contracts import DispatchKind
+from .pow_wow import PowWowTaskSpec
 from .pow_wow.cast import CastMember, build_cast_tasks
 from .pow_wow.planning import PlanningContractError, validate_planning_visibility_contract
 from .pow_wow.protocol import PlanningPhase, ReferencePack, TaskPurpose
 from .project_center import LinkedProject
-from .staffing import JudgmentRole, Tier
+from .staffing import JudgmentRole
+from .vocabulary import DispatchTier
 
 SCHEMA_VERSION_DECOMPOSITION_PLAN = "decomposition_plan.v1"
 SCHEMA_VERSION_MINI_GAWD_DOC = "mini_gawd_doc.v1"
@@ -134,7 +136,7 @@ class DecompositionPlanner(Protocol):
         self,
         *,
         intent_id: str,
-        tier: Tier,
+        tier: DispatchTier,
         kind: DispatchKind,
         prompt: str,
         target_project: LinkedProject,
@@ -161,7 +163,7 @@ class PromptedDecompositionPlanner:
         self,
         *,
         intent_id: str,
-        tier: Tier,
+        tier: DispatchTier,
         kind: DispatchKind,
         prompt: str,
         target_project: LinkedProject,
@@ -219,7 +221,7 @@ def _add_marketing_site_browser_acceptance(
     """Insert one host-owned responsive check between implementation and review."""
 
     required = tuple(getattr(target_project, "reference_packs", ()))
-    if kind != "code" or ReferencePack.MARKETING_SITE not in required:
+    if kind is not DispatchKind.CODE or ReferencePack.MARKETING_SITE not in required:
         return tuple(tasks)
     implementation = next(
         (task for task in tasks if task.purpose is TaskPurpose.IMPLEMENTATION),
@@ -246,7 +248,7 @@ def _add_marketing_site_browser_acceptance(
             "Overflow, console, network, selector, and process cleanup evidence passes.",
         ),
         purpose=TaskPurpose.BROWSER_ACCEPTANCE,
-        dispatch_kind="code",
+        dispatch_kind=DispatchKind.CODE,
         blocked_by=(implementation.task_name,),
         worktree_group=implementation.worktree_group,
         reference_packs=(ReferencePack.MARKETING_SITE,),
@@ -275,7 +277,7 @@ def _add_marketing_site_browser_acceptance(
 def build_decomposition_prompt(
     *,
     intent_id: str,
-    tier: Tier,
+    tier: DispatchTier,
     kind: DispatchKind,
     prompt: str,
     target_project: LinkedProject,
@@ -324,7 +326,7 @@ def build_decomposition_prompt(
         '      "task_name": "snake_case_unique_name",\n'
         '      "role": "role_name",\n'
         '      "tier": "junior|senior|staff",\n'
-        '      "dispatch_kind": "advisory|code",\n'
+        f'      "dispatch_kind": "{"|".join(item.value for item in DispatchKind)}",\n'
         '      "planning_phase": "one required typed planning phase or null",\n'
         '      "reference_packs": ["marketing_site"],\n'
         '      "description": "bounded work instruction",\n'
@@ -361,7 +363,7 @@ class RuleBasedDecompositionPlanner:
         self,
         *,
         intent_id: str,
-        tier: Tier,
+        tier: DispatchTier,
         kind: DispatchKind,
         prompt: str,
         target_project: LinkedProject,
@@ -376,25 +378,25 @@ class RuleBasedDecompositionPlanner:
             target_project=target_project,
         )
         prefix = _task_prefix(intent_id)
-        if kind == "cast":
+        if kind is DispatchKind.CAST:
             tasks = _cast_plan(prefix, prompt)
             rationale = (
                 "Cast work runs several stances concurrently and reduces them with a "
                 "synthesizer, because the disagreement between stances is the output."
             )
-        elif kind == "code":
+        elif kind is DispatchKind.CODE:
             tasks = _code_plan(prefix, prompt)
             rationale = (
                 "Code work is split into local context extraction, senior implementation, "
                 "and staff review in the same code worktree."
             )
-        elif tier == Tier.STAFF:
+        elif tier == DispatchTier.STAFF:
             tasks = _staff_advisory_plan(prefix, prompt)
             rationale = (
                 "Staff advisory work gets cheap junior context, senior synthesis, "
                 "then a staff verdict."
             )
-        elif tier == Tier.SENIOR:
+        elif tier == DispatchTier.SENIOR:
             tasks = _senior_advisory_plan(prefix, prompt)
             rationale = "Senior advisory work gets a junior context pass before synthesis."
         else:
@@ -402,8 +404,8 @@ class RuleBasedDecompositionPlanner:
                 _task(
                     name=f"{prefix}_junior_answer",
                     role="junior",
-                    tier=Tier.JUNIOR,
-                    dispatch_kind="advisory",
+                    tier=DispatchTier.JUNIOR,
+                    dispatch_kind=DispatchKind.ADVISORY,
                     description=prompt,
                     success_criteria=(
                         "Answer the operator intent directly.",
@@ -448,10 +450,14 @@ def parse_task_specs_from_planner_payload(
         task_name = _clean_task_name(str(raw.get("task_name") or ""))
         if not task_name:
             raise DecompositionError("planner task is missing task_name")
-        tier = Tier(str(raw.get("tier") or "junior"))
-        dispatch_kind = str(raw.get("dispatch_kind") or default_dispatch_kind)
-        if dispatch_kind not in {"advisory", "code"}:
-            raise DecompositionError(f"invalid dispatch_kind for {task_name}: {dispatch_kind}")
+        tier = DispatchTier(str(raw.get("tier") or "junior"))
+        raw_dispatch_kind = str(raw.get("dispatch_kind") or default_dispatch_kind.value)
+        try:
+            dispatch_kind = DispatchKind(raw_dispatch_kind)
+        except ValueError as exc:
+            raise DecompositionError(
+                f"invalid dispatch_kind for {task_name}: {raw_dispatch_kind}"
+            ) from exc
         blocked_by = _string_tuple(raw.get("blocked_by"))
         success_criteria = _string_tuple(raw.get("success_criteria"))
         worktree_group_raw = raw.get("worktree_group")
@@ -468,7 +474,7 @@ def parse_task_specs_from_planner_payload(
                 description=str(raw.get("description") or "").strip(),
                 success_criteria=success_criteria,
                 judgment=JudgmentRole(name=str(raw.get("role") or tier.value), tier=tier),
-                dispatch_kind=dispatch_kind,  # type: ignore[arg-type]
+                dispatch_kind=dispatch_kind,
                 blocked_by=blocked_by,
                 worktree_group=worktree_group,
                 planning_phase=planning_phase,
@@ -479,7 +485,7 @@ def parse_task_specs_from_planner_payload(
     try:
         validate_planning_visibility_contract(
             tasks,
-            required=default_dispatch_kind == "code",
+            required=default_dispatch_kind is DispatchKind.CODE,
         )
     except PlanningContractError as exc:
         raise DecompositionError(str(exc)) from exc
@@ -543,7 +549,7 @@ def parse_mini_gawd_from_planner_payload(payload: Mapping[str, Any]) -> MiniGawd
 # one heavy model is resident at a time (gemma4 at 5.6GB plus one of qwen3.8 at
 # 20.6GB or glimmer at ~21GB, against 36GB), so a cast may hold at most one heavy
 # stance before it starts paying a swap per member. `Midlevel tier and deferred
-# frontier review` adds the seat those heavy models would occupy, since `Tier`
+# frontier review` adds the seat those heavy models would occupy, since `DispatchTier`
 # has only JUNIOR, SENIOR, and STAFF and the junior seat is defined as cheap and
 # advisory.
 #
@@ -558,14 +564,14 @@ DEFAULT_CAST: Final[tuple[CastMember, ...]] = (
             "Argue the strongest version of the proposal and say what has to be "
             "true for it to work."
         ),
-        tier=Tier.JUNIOR,
+        tier=DispatchTier.JUNIOR,
     ),
     CastMember(
         name="skeptic",
         stance=(
             "Argue the strongest case against, naming the failure that would actually happen first."
         ),
-        tier=Tier.JUNIOR,
+        tier=DispatchTier.JUNIOR,
     ),
     CastMember(
         name="pragmatist",
@@ -573,7 +579,7 @@ DEFAULT_CAST: Final[tuple[CastMember, ...]] = (
             "Ignore whether it is a good idea and say what it would cost to do the "
             "smallest real version."
         ),
-        tier=Tier.JUNIOR,
+        tier=DispatchTier.JUNIOR,
     ),
 )
 
@@ -592,8 +598,8 @@ def _code_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...]:
         _task(
             name=senior_reading_task,
             role="independent_reader",
-            tier=Tier.SENIOR,
-            dispatch_kind="advisory",
+            tier=DispatchTier.SENIOR,
+            dispatch_kind=DispatchKind.ADVISORY,
             description=(
                 "Read the raw saga contract and repository independently. Record source-anchored "
                 "claims, affected seams, invariants, risks, uncertainties, and candidate "
@@ -609,8 +615,8 @@ def _code_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...]:
         _task(
             name=staff_reading_task,
             role="independent_reviewer",
-            tier=Tier.STAFF,
-            dispatch_kind="advisory",
+            tier=DispatchTier.STAFF,
+            dispatch_kind=DispatchKind.ADVISORY,
             description=(
                 "Independently read the raw saga contract and repository. Record the acceptance "
                 "boundary, likely failure seams, and review oracles without receiving junior or "
@@ -625,8 +631,8 @@ def _code_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...]:
         _task(
             name=junior_plan_task,
             role="verification_planner",
-            tier=Tier.JUNIOR,
-            dispatch_kind="advisory",
+            tier=DispatchTier.JUNIOR,
+            dispatch_kind=DispatchKind.ADVISORY,
             description=(
                 "Generate non-exhaustive verification hypotheses: explicit claims, evidence "
                 "pointers, suggested invariants and oracles, adversarial cases, affected seams, "
@@ -643,8 +649,8 @@ def _code_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...]:
         _task(
             name=implementation_task,
             role="implementer",
-            tier=Tier.SENIOR,
-            dispatch_kind="code",
+            tier=DispatchTier.SENIOR,
+            dispatch_kind=DispatchKind.CODE,
             description=(
                 "Implement the smallest safe change that satisfies the saga goal above. "
                 "Own the final implementation and verification plan: reconcile the independent "
@@ -665,8 +671,8 @@ def _code_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...]:
         _task(
             name=f"{prefix}_staff_review",
             role="reviewer",
-            tier=Tier.STAFF,
-            dispatch_kind="code",
+            tier=DispatchTier.STAFF,
+            dispatch_kind=DispatchKind.CODE,
             description=(
                 "Review the implementation worktree for correctness, missing tests, "
                 "approval needs, and residual risks."
@@ -690,16 +696,16 @@ def _senior_advisory_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...
         _task(
             name=context_task,
             role="junior_context",
-            tier=Tier.JUNIOR,
-            dispatch_kind="advisory",
+            tier=DispatchTier.JUNIOR,
+            dispatch_kind=DispatchKind.ADVISORY,
             description=f"Extract facts, constraints, and open questions for: {prompt}",
             success_criteria=("Facts, constraints, and uncertainty are separated.",),
         ),
         _task(
             name=f"{prefix}_senior_synthesis",
             role="senior_synthesis",
-            tier=Tier.SENIOR,
-            dispatch_kind="advisory",
+            tier=DispatchTier.SENIOR,
+            dispatch_kind=DispatchKind.ADVISORY,
             description=f"Synthesize an actionable answer for: {prompt}",
             success_criteria=("The answer is actionable and bounded by the evidence.",),
             blocked_by=(context_task,),
@@ -714,16 +720,16 @@ def _staff_advisory_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...]
         _task(
             name=junior_task,
             role="junior_context",
-            tier=Tier.JUNIOR,
-            dispatch_kind="advisory",
+            tier=DispatchTier.JUNIOR,
+            dispatch_kind=DispatchKind.ADVISORY,
             description=f"Extract context and candidate options for: {prompt}",
             success_criteria=("Candidate options and uncertainty are explicit.",),
         ),
         _task(
             name=senior_task,
             role="senior_synthesis",
-            tier=Tier.SENIOR,
-            dispatch_kind="advisory",
+            tier=DispatchTier.SENIOR,
+            dispatch_kind=DispatchKind.ADVISORY,
             description=f"Evaluate tradeoffs and prepare a recommendation for: {prompt}",
             success_criteria=("Tradeoffs and recommendation are explicit.",),
             blocked_by=(junior_task,),
@@ -731,8 +737,8 @@ def _staff_advisory_plan(prefix: str, prompt: str) -> tuple[PowWowTaskSpec, ...]
         _task(
             name=f"{prefix}_staff_verdict",
             role="reviewer",
-            tier=Tier.STAFF,
-            dispatch_kind="advisory",
+            tier=DispatchTier.STAFF,
+            dispatch_kind=DispatchKind.ADVISORY,
             description=f"Give the final staff-level verdict for: {prompt}",
             success_criteria=("The final verdict is direct and names residual risk.",),
             blocked_by=(senior_task,),
@@ -744,7 +750,7 @@ def _task(
     *,
     name: str,
     role: str,
-    tier: Tier,
+    tier: DispatchTier,
     dispatch_kind: DispatchKind,
     description: str,
     success_criteria: tuple[str, ...],
@@ -779,7 +785,7 @@ def _mini_gawd_for_plan(
     tasks: Sequence[PowWowTaskSpec],
 ) -> MiniGawdDoc:
     task_names = ", ".join(task.task_name for task in tasks)
-    if kind == "code":
+    if kind is DispatchKind.CODE:
         time_budget = (
             TimeBudgetPhase(
                 phase="scope",

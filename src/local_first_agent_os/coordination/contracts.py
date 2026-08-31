@@ -12,6 +12,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
+from ..dispatch_kinds import DispatchKind
+from ..vocabulary import DispatchTier
 from .outcomes import TerminalOutcome
 
 
@@ -93,6 +95,7 @@ class CoordinationCommandName(StrEnum):
     READ_EXECUTION_LEDGER = "read_execution_ledger"
     RUN_LEDGER_DISPATCHER = "run_ledger_dispatcher"
     RUN_REFINERY = "run_refinery"
+    RUN_REFINERY_FLEET = "run_refinery_fleet"
     READ_NOTES = "read_notes"
     RECONCILE_SAGA_MILESTONES = "reconcile_saga_milestones"
     RECOVER_UNPARSED_STAFF_REVIEW = "recover_unparsed_staff_review"
@@ -101,7 +104,9 @@ class CoordinationCommandName(StrEnum):
     REQUEST_EXECUTION_CANCEL = "request_execution_cancel"
     REQUEST_RECOVERY_STAFF_REVIEW = "request_recovery_staff_review"
     RESOLVE_APPROVAL_REQUEST = "resolve_approval_request"
+    RESTORE_TOOL_PERMISSION = "restore_tool_permission"
     REVOKE_APPROVAL_REQUEST = "revoke_approval_request"
+    REVOKE_TOOL_PERMISSION = "revoke_tool_permission"
     RETRY_SAGA_MILESTONE = "retry_saga_milestone"
     SERVE = "serve"
     START_SAGA_MILESTONE = "start_saga_milestone"
@@ -160,6 +165,7 @@ class CoordinationFlag(StrEnum):
     LIMIT = "--limit"
     MAX_AUTOMATIC_RECOVERIES = "--max-automatic-recoveries"
     MAX_POLLS = "--max-polls"
+    MAX_TRANSIENT_RESUMES = "--max-transient-resumes"
     MAX_TOKENS = "--max-tokens"
     MILESTONE_ID = "--milestone-id"
     MODEL_ROLE = "--model-role"
@@ -170,6 +176,7 @@ class CoordinationFlag(StrEnum):
     PAYLOAD = "--payload"
     PAYLOAD_FILE = "--payload-file"
     PAYLOAD_SHA256 = "--payload-sha256"
+    PERMITTED_CAPABILITY = "--permitted-capability"
     PERMISSION_ENVELOPE_SHA256 = "--permission-envelope-sha256"
     PLANNING_PHASE = "--planning-phase"
     POW_WOW_ID = "--pow-wow-id"
@@ -181,6 +188,7 @@ class CoordinationFlag(StrEnum):
     REQUIRED_ARTIFACT = "--required-artifact"
     REQUIRED_OUTPUTS = "--required-outputs"
     RESOLVED_BY = "--resolved-by"
+    RESTORED_BY = "--restored-by"
     REVOKED_BY = "--revoked-by"
     RESULT = "--result"
     RESUMED_THREAD_ID = "--resumed-thread-id"
@@ -243,17 +251,6 @@ class ExecutionLeaseTerminalStatus(StrEnum):
 class ApprovalDecision(StrEnum):
     APPROVE = "approve"
     DENY = "deny"
-
-
-class DispatchTier(StrEnum):
-    JUNIOR = "junior"
-    SENIOR = "senior"
-    STAFF = "staff"
-
-
-class DispatchKind(StrEnum):
-    ADVISORY = "advisory"
-    CODE = "code"
 
 
 class DispatchReduce(StrEnum):
@@ -605,6 +602,7 @@ class SubmitDispatchIntent:
     allow_tiers: tuple[DispatchTier, ...] = ()
     reduce: DispatchReduce = DispatchReduce.NONE
     reducer_tier: DispatchTier | None = None
+    permitted_capabilities: tuple[str, ...] = ()
     name: CoordinationCommandName = CoordinationCommandName.SUBMIT_DISPATCH_INTENT
 
     def to_argv(self) -> list[str]:
@@ -630,6 +628,11 @@ class SubmitDispatchIntent:
             argv,
             CoordinationFlag.REDUCER_TIER,
             self.reducer_tier.value if self.reducer_tier else None,
+        )
+        _append_repeated(
+            argv,
+            CoordinationFlag.PERMITTED_CAPABILITY,
+            self.permitted_capabilities,
         )
         return argv
 

@@ -8,7 +8,7 @@ import re
 import shlex
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 from .constants import DEFAULT_DISPATCHER_NAME
 from .contracts import (
@@ -21,6 +21,7 @@ from .contracts import (
 )
 from .model_registry import ModelRegistry
 from .settings import Settings
+from .vocabulary import DispatchTier
 
 CHROME_ACTION_ALIASES: dict[str, str] = {
     "back": "back",
@@ -107,7 +108,6 @@ TRY_MILESTONE_ALIAS = "/try-milestone"
 DISPATCH_ALIAS = "/dispatch"
 REVIEW_MERGE_ALIAS = "/review-merge"
 APPROVE_MERGE_ALIAS = "/approve-merge"
-DispatcherTier = Literal["junior", "senior", "staff"]
 
 AGENT_QUERY_ALIASES: dict[str, AgentHarness] = {
     "/claude": AgentHarness.CLAUDE_CODE,
@@ -648,7 +648,7 @@ class DirectiveParser(Parser):
 
     def _parse_dispatcher(self, raw: str, tail: list[str]) -> DirectiveSpec:
         name = DEFAULT_DISPATCHER_NAME
-        tier: DispatcherTier | None = None
+        tier: DispatchTier | None = None
         interval_seconds = 2.0
         max_polls: int | None = None
         i = 0
@@ -661,7 +661,7 @@ class DirectiveParser(Parser):
                 raw_tier = tail[i + 1]
                 if raw_tier not in {"junior", "senior", "staff"}:
                     raise ValueError("/start /dispatcher --tier must be junior, senior, or staff")
-                tier = cast(DispatcherTier, raw_tier)
+                tier = DispatchTier(raw_tier)
                 i += 2
             elif token == "--interval" and i + 1 < len(tail):
                 try:

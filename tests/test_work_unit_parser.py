@@ -241,10 +241,10 @@ def test_a_display_banner_never_outranks_an_explicit_target_project() -> None:
 
     banner_first = parse_design_doc(
         "# Doc\n\n**Project:** shiny | **Version:** v4 | **Status:** DRAFT\n\n"
-        "Target project: local_first_agent_os\n\n## 1. Theory\n\nprose\n",
+        "Target project: local-first-agent-os\n\n## 1. Theory\n\nprose\n",
         design_doc_id="banner_first",
     )
-    assert banner_first.declared_target_project_id == "local_first_agent_os"
+    assert banner_first.declared_target_project_id == "local-first-agent-os"
 
     # The alias still works when it is the only thing the document says.
     alias_only = parse_design_doc(

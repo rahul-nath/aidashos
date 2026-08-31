@@ -16,9 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from ..constants import CLI_AGENT_RUN_ARTIFACT_TYPE, DELEGATED_TASK_RUN_ARTIFACT_TYPE
+from ..coordination.contracts import DispatchKind
 from ..engineering_doctrine import CURRENT_ENGINEERING_DOCTRINE
 from ..marketing_site_doctrine import CURRENT_MARKETING_SITE_DOCTRINE
-from ..staffing import Tier
+from ..vocabulary import DispatchTier
 from .protocol import PlanningPhase, ReferencePack
 from .repo_audit import AUDIT_EMISSION_INSTRUCTION
 from .types import PowWowExecutionContext, PowWowTaskResult, PowWowTaskSpec
@@ -44,6 +45,23 @@ FRONTIER_CONTEXT_DISCIPLINE = """Context/token discipline:
   5. next action.
 - Do not re-read unchanged files unless needed.
 - Do not re-litigate accepted architecture unless there is a concrete contradiction in the repo."""
+
+
+SEATED_AGENT_PARALLELISM = """Parallelism is yours to decide:
+- Exactly one agent is seated for your tier. That is a statement about quality,
+  not about throughput: the bench declares which model is good enough to hold
+  this seat, and two agents of a lower tier do not add up to one of a higher.
+- If this task genuinely divides - independent changes over disjoint files, or
+  several files to read that do not inform each other - spawn your own
+  subagents and run those parts concurrently. You can see the file set and the
+  staffing file cannot, so the decision belongs to you rather than to a
+  capacity number written weeks ago.
+- Do not split work whose parts share a file, or where one part's outcome
+  changes what another should do. Sequential is correct there, and a merge
+  conflict inside your own worktree costs more than the wall-clock saved.
+- Subagents you spawn inherit the permissions this process was granted. They
+  are a way to use your envelope in parallel, never a way to widen it: if an
+  action is refused to you, it is refused to them."""
 
 
 def _render_dependency_text_view(
@@ -138,15 +156,15 @@ def render_dependency_context_block(
 
 def _uses_frontier_context_discipline(task: PowWowTaskSpec) -> bool:
     return task.judgment is not None and task.judgment.tier in {
-        Tier.SENIOR,
-        Tier.STAFF,
+        DispatchTier.SENIOR,
+        DispatchTier.STAFF,
     }
 
 
 def _uses_engineering_doctrine(task: PowWowTaskSpec) -> bool:
     return task.judgment is not None and task.judgment.tier in {
-        Tier.SENIOR,
-        Tier.STAFF,
+        DispatchTier.SENIOR,
+        DispatchTier.STAFF,
     }
 
 
@@ -189,7 +207,15 @@ def build_agent_task_prompt(
         lines.extend(("", CURRENT_ENGINEERING_DOCTRINE.render_prompt()))
     if _uses_frontier_context_discipline(task):
         lines.extend(("", FRONTIER_CONTEXT_DISCIPLINE))
-    if _uses_engineering_doctrine(task) and task.judgment and task.judgment.tier is Tier.STAFF:
+        # Same predicate, emitted adjacently on purpose: both blocks are shared
+        # by every senior and staff dispatch, so keeping them together keeps the
+        # cacheable prefix one contiguous run.
+        lines.extend(("", SEATED_AGENT_PARALLELISM))
+    if (
+        _uses_engineering_doctrine(task)
+        and task.judgment
+        and task.judgment.tier is DispatchTier.STAFF
+    ):
         lines.extend(
             (
                 "",
@@ -202,11 +228,11 @@ def build_agent_task_prompt(
         )
     if (
         task.judgment is not None
-        and task.judgment.tier in {Tier.SENIOR, Tier.STAFF}
+        and task.judgment.tier in {DispatchTier.SENIOR, DispatchTier.STAFF}
         and ReferencePack.MARKETING_SITE in task.reference_packs
     ):
         lines.extend(("", CURRENT_MARKETING_SITE_DOCTRINE.render_prompt()))
-        if task.judgment.tier is Tier.STAFF:
+        if task.judgment.tier is DispatchTier.STAFF:
             lines.extend(
                 (
                     "",
@@ -228,6 +254,12 @@ def build_agent_task_prompt(
         )
     )
     lines.extend(("Task:", task.description))
+    if context.reuse_checkpoint_worktree and context.checkpoint_worktree_path:
+        lines.append(
+            "Interrupted-attempt recovery: continue the existing durable changes in this "
+            "retained worktree. Inspect and finish them in place; do not recreate work that "
+            "is already present."
+        )
     if task.success_criteria:
         lines.append("Success criteria:")
         lines.extend(f"- {criterion}" for criterion in task.success_criteria)
@@ -245,7 +277,7 @@ def build_agent_task_prompt(
     if audit_context_block:
         lines.append(audit_context_block)
     dispatch_kind = task.dispatch_kind or context.dispatch_kind
-    if dispatch_kind == "code":
+    if dispatch_kind is DispatchKind.CODE:
         constraints = (
             "Constraints: work only inside the assigned worktree; make the minimal necessary "
             "change. Do NOT merge, rebase, switch branches, push, or deploy. The control plane "
@@ -398,6 +430,7 @@ def build_assigned_worktree_environment(context: PowWowExecutionContext) -> dict
 
 __all__ = [
     "FRONTIER_CONTEXT_DISCIPLINE",
+    "SEATED_AGENT_PARALLELISM",
     "build_assigned_worktree_context",
     "build_assigned_worktree_environment",
     "build_agent_task_prompt",

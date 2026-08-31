@@ -57,7 +57,13 @@ from local_first_agent_os.coordination.store import connect
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject
 from local_first_agent_os.refinery.bisect import RunAbandoned, RunCompleted, StackAbandonment
-from local_first_agent_os.refinery.loop import Drained, Idle, Refinery, run_refinery
+from local_first_agent_os.refinery.loop import (
+    Drained,
+    Idle,
+    Refinery,
+    run_refinery,
+    run_refinery_fleet,
+)
 from local_first_agent_os.refinery.requests import (
     BisectedOut,
     GateFailed,
@@ -162,6 +168,12 @@ def _enqueue(repository: StackRepository, *names: str) -> None:
                     "pow_wow_id": f"pow-{name}",
                 },
                 requested_by="dispatcher_runner",
+            )
+            c.execute(
+                "UPDATE approval_requests "
+                "SET status='APPROVED', resolved_by='test-operator', resolved_at=? "
+                "WHERE approval_id=?",
+                (1_700_000_000.0, str(approval["approval_id"])),
             )
             record_queued_request(
                 c,
@@ -445,6 +457,24 @@ def test_a_dirty_target_checkout_refuses_fast_forward_and_requeues(
     assert isinstance(poll, Drained)
     assert isinstance(poll.run.outcome, RunAbandoned)
     assert poll.run.outcome.reason is StackAbandonment.FAST_FORWARD_REFUSED
+
+
+def test_refinery_rechecks_live_approval_before_fast_forward(
+    refinery: Refinery,
+    repository: StackRepository,
+) -> None:
+    """A stale queued row cannot turn a no-longer-approved commit into authority."""
+
+    _enqueue(repository, "alpha")
+    with connect() as connection:
+        connection.execute("UPDATE approval_requests SET status='REVOKED' WHERE status='APPROVED'")
+
+    poll = refinery.poll_once()
+
+    assert isinstance(poll, Drained)
+    assert isinstance(poll.run.outcome, RunAbandoned)
+    assert poll.run.outcome.reason is StackAbandonment.APPROVAL_REVOKED
+    _assert_branch_never_advanced(repository)
     assert isinstance(_requests()["req-alpha"], Queued)
     assert git(repository.path, "rev-parse", "refs/heads/main") == repository.base_sha
 
@@ -727,3 +757,25 @@ def test_the_command_names_the_parked_request_and_what_refused_it(
         }
     ]
     assert result["polls"][0]["integrated"] == ["req-alpha"]
+
+
+def test_the_resident_fleet_requires_an_explicit_project_allowlist(
+    registered_project: StackRepository,
+) -> None:
+    result = run_refinery_fleet((), interval_seconds=0.0, max_polls=1)
+
+    assert result["ok"] is False
+    assert result["error"] == "refinery_fleet_empty"
+
+
+def test_the_resident_fleet_drains_only_the_named_project(
+    registered_project: StackRepository,
+) -> None:
+    _enqueue(registered_project, "alpha")
+
+    result = run_refinery_fleet((_PROJECT,), interval_seconds=0.0, max_polls=1)
+
+    assert result["ok"] is True
+    project_result = result["polls"][0]["projects"][0]
+    assert project_result["target_project_id"] == _PROJECT
+    assert project_result["advanced_the_integrated_branch"] is True

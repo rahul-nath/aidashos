@@ -60,6 +60,7 @@ from ..coordination.contracts import (
     CollectionResult,
     CompleteExecutionLease,
     CreateExecutionCheckpoint,
+    DispatchKind,
     EntityResult,
     ExecutionLeaseTerminalStatus,
     FindAgentContinuation,
@@ -84,6 +85,7 @@ from ..lifecycle_failure_harness import (
 )
 from ..marketing_site_doctrine import CURRENT_MARKETING_SITE_DOCTRINE
 from ..observability import profiled_step
+from ..process_containment import ProcessContainer, process_container_for_host
 from ..progress_events import emit_progress
 from ..project_center import LinkedProject
 from ..spawn_authority import (
@@ -103,12 +105,12 @@ from ..staffing import (
     HarnessKind,
     JudgmentWorkload,
     LocalHarness,
-    Tier,
     classify_harness,
     resolve_bench,
     resolve_bench_for_workload,
 )
 from ..toolchains import project_environment
+from ..vocabulary import DispatchTier
 from .dry_run import DryRunPowWowExecutor
 from .git_ops import (
     WorktreeAllocation,
@@ -171,7 +173,6 @@ from .types import (
     CommandRunCapture,
     CoordinationCommandFn,
     DelegateFn,
-    DispatchKind,
     ExecutionAttemptLease,
     ExecutionLeaseStatus,
     PowWowArtifact,
@@ -316,7 +317,7 @@ def _commit_worktree_checkpoint_at_lifecycle_boundary(
 
 
 def _build_engineering_doctrine_provenance(task: PowWowTaskSpec) -> dict[str, str] | None:
-    if task.judgment is None or task.judgment.tier not in {Tier.SENIOR, Tier.STAFF}:
+    if task.judgment is None or task.judgment.tier not in {DispatchTier.SENIOR, DispatchTier.STAFF}:
         return None
     return CURRENT_ENGINEERING_DOCTRINE.provenance_payload()
 
@@ -326,7 +327,7 @@ def _build_marketing_site_doctrine_provenance(
 ) -> dict[str, str] | None:
     if (
         task.judgment is None
-        or task.judgment.tier not in {Tier.SENIOR, Tier.STAFF}
+        or task.judgment.tier not in {DispatchTier.SENIOR, DispatchTier.STAFF}
         or ReferencePack.MARKETING_SITE not in task.reference_packs
     ):
         return None
@@ -497,7 +498,7 @@ _CLAUDE_SHELL_TOOLS: Final = ("Bash",)
 # solo agent's would. Policing it here would also be harness-specific theatre:
 # `codex exec` has no equivalent facility, and this repository keeps its
 # boundaries where every harness meets them, which is git output.
-# `engineering_doctrine.v2` states the same boundary to the agent in prose.
+# `engineering_doctrine.v3` states the same boundary to the agent in prose.
 
 
 def _claude_disallowed(*tools: tuple[str, ...]) -> list[str]:
@@ -596,6 +597,8 @@ class _WorktreePowWowExecutorBase:
         match task.planning_phase:
             case PlanningPhase.SENIOR_INDEPENDENT_READING | PlanningPhase.STAFF_INDEPENDENT_READING:
                 return JudgmentWorkload.INDEPENDENT_READING
+            case PlanningPhase.JUNIOR_VERIFICATION_PLAN:
+                return JudgmentWorkload.VERIFICATION_PLAN
             case _:
                 return JudgmentWorkload.STANDARD
 
@@ -644,8 +647,18 @@ class _WorktreePowWowExecutorBase:
         joins them - `AgentCaller` - was constructed nowhere in the codebase.
 
         It is constructed here, at the moment of spawning, because that is the
-        one place where all three facts exist at once: who is acting (the
-        harness), in what role (the task), and on whose behalf (the pow-wow).
+        one place where all four facts exist at once: who is acting (the
+        harness), in what role (the task), on which seat (the judgment tier the
+        compiled plan bound to the task), and on whose behalf (the pow-wow).
+
+        The seat travels separately from the role because they answer different
+        questions and only the role used to be sent. A plan role like
+        ``implementer`` names no `POLICIES.md` section, so resolution fell to
+        the static bench, which keys on the vendor - and under an outage
+        pairing the vendor implementing is the vendor the bench calls the
+        reviewer. That denied ``run_command`` to a live implementation
+        milestone on 2026-08-29. The plan already knows the seat; handing it
+        over is what lets the gate stop guessing.
 
         Only the *gated* capabilities are asked about. `read_repository` and
         `invoke_model` have no policy rule and would pass by having nothing to
@@ -664,6 +677,7 @@ class _WorktreePowWowExecutorBase:
             # Required, not optional. Unscoped, the ledger answers with every
             # grant this agent name ever received in any pow-wow.
             pow_wow_id=pow_wow_id,
+            seat=task.judgment.tier if task.judgment is not None else None,
         )
         authority = self._task_spawn_authority(task)
         for capability in sorted(authority.capabilities & gated_capabilities()):
@@ -672,6 +686,7 @@ class _WorktreePowWowExecutorBase:
                 agent_role=caller.agent_role,
                 capability=capability,
                 pow_wow_id=caller.pow_wow_id,
+                seat=caller.seat,
             )
             if isinstance(verdict, CapabilityDenied):
                 return verdict
@@ -867,7 +882,7 @@ class _WorktreePowWowExecutorBase:
         by task_name."""
         if not junior_tasks:
             return {}
-        capacity = max(1, resolve_bench(Tier.JUNIOR, self.bench).capacity)
+        capacity = max(1, resolve_bench(DispatchTier.JUNIOR, self.bench).capacity)
         if len(junior_tasks) == 1 or capacity == 1:
             return {
                 task.task_name: self._run_delegate_task(
@@ -1332,6 +1347,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         artifact_write_timeout_seconds: float = DEFAULT_ARTIFACT_WRITE_TIMEOUT_SECONDS,
         stream_drain_timeout_seconds: float = DEFAULT_STREAM_DRAIN_TIMEOUT_SECONDS,
         spawn_ceiling: SpawnAuthority | None = None,
+        process_container: ProcessContainer | None = None,
     ) -> None:
         super().__init__(
             worktree_root=worktree_root,
@@ -1356,7 +1372,11 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         self.progress_assessment_timeout_seconds = progress_assessment_timeout_seconds
         self.artifact_write_timeout_seconds = artifact_write_timeout_seconds
         self.stream_drain_timeout_seconds = stream_drain_timeout_seconds
+        self.process_container = process_container
         self._codex_auth_ok_cache: bool | None = None
+
+    def _process_container(self) -> ProcessContainer:
+        return self.process_container or process_container_for_host()
 
     def _resolve_execution_task_id(
         self,
@@ -1782,7 +1802,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         if self.coordination_command is None:
             return StartFreshBounded("coordination ledger is unavailable")
         reader_slot = resolve_bench_for_workload(
-            Tier.SENIOR,
+            DispatchTier.SENIOR,
             JudgmentWorkload.INDEPENDENT_READING,
             self.bench,
         )
@@ -1914,6 +1934,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         saga_id: str,
         pow_wow_id: str,
         task_contract: str,
+        posture: SpawnPosture,
     ) -> tuple[CommandRunCapture, SupervisedCommandResult | None]:
         env = _headless_agent_environment(env)
         if execution_attempt is not None and execution_attempt.open_error:
@@ -1930,64 +1951,99 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 ),
                 None,
             )
+        frontier = FrontierHarness(harness)
         if (
             self.coordination_command is None
             or self.artifact_writer is None
             or execution_attempt is None
             or not execution_attempt.lease_id
         ):
-            return (
-                run_captured_command(
+            try:
+                with self._process_container().contain(
                     command,
                     cwd,
-                    timeout_seconds=self.timeout_seconds,
-                    env=env,
-                ),
-                None,
-            )
-        supervisor = self.supervisor_factory(
-            coordination_command=self.coordination_command,
-            artifact_writer=self.artifact_writer,
-            progress_assessor=(
-                self._assess_stalled_progress if self.delegate_fn is not None else None
-            ),
-            coordination_timeout_seconds=self.coordination_timeout_seconds,
-            git_timeout_seconds=self.git_timeout_seconds,
-            progress_assessment_timeout_seconds=self.progress_assessment_timeout_seconds,
-            artifact_write_timeout_seconds=self.artifact_write_timeout_seconds,
-            stream_drain_timeout_seconds=self.stream_drain_timeout_seconds,
-        )
-        try:
-            with profiled_step(
-                "frontier_execution_supervisor",
-                workflow_type="agent_execution",
-                lease_id=execution_attempt.lease_id,
-                harness=harness,
-                saga_id=saga_id,
-                pow_wow_id=pow_wow_id,
-            ):
-                result = asyncio.run(
-                    supervisor.run(
-                        command,
-                        cwd,
-                        lease=execution_attempt,
-                        harness=harness,
-                        timeout_seconds=self.timeout_seconds,
-                        env=env,
-                        source_repo_path=source_repo_path,
-                        base_head_sha=base_head_sha,
-                        saga_id=saga_id,
-                        pow_wow_id=pow_wow_id,
-                        task_contract=task_contract,
+                    posture=posture,
+                    harness=frontier,
+                    overrides=env,
+                ) as contained:
+                    return (
+                        run_captured_command(
+                            contained.command,
+                            cwd,
+                            timeout_seconds=self.timeout_seconds,
+                            env=contained.environment,
+                            complete_environment=True,
+                        ),
+                        None,
                     )
+            except Exception as exc:  # noqa: BLE001 - fail the process closed
+                return (
+                    CommandRunCapture(
+                        command=shlex.join(str(part) for part in command),
+                        cwd=str(cwd),
+                        stdout="",
+                        stderr=f"process containment failed: {type(exc).__name__}: {exc}",
+                        exit_code=125,
+                    ),
+                    None,
                 )
+        coordination_command = self.coordination_command
+        artifact_writer = self.artifact_writer
+        attempt = execution_attempt
+        assert coordination_command is not None
+        assert artifact_writer is not None
+        assert attempt is not None and attempt.lease_id
+        try:
+            with self._process_container().contain(
+                command,
+                cwd,
+                posture=posture,
+                harness=frontier,
+                overrides=env,
+            ) as contained:
+                supervisor = self.supervisor_factory(
+                    coordination_command=coordination_command,
+                    artifact_writer=artifact_writer,
+                    progress_assessor=(
+                        self._assess_stalled_progress if self.delegate_fn is not None else None
+                    ),
+                    coordination_timeout_seconds=self.coordination_timeout_seconds,
+                    git_timeout_seconds=self.git_timeout_seconds,
+                    progress_assessment_timeout_seconds=self.progress_assessment_timeout_seconds,
+                    artifact_write_timeout_seconds=self.artifact_write_timeout_seconds,
+                    stream_drain_timeout_seconds=self.stream_drain_timeout_seconds,
+                )
+                with profiled_step(
+                    "frontier_execution_supervisor",
+                    workflow_type="agent_execution",
+                    lease_id=attempt.lease_id,
+                    harness=harness,
+                    saga_id=saga_id,
+                    pow_wow_id=pow_wow_id,
+                ):
+                    result = asyncio.run(
+                        supervisor.run(
+                            contained.command,
+                            cwd,
+                            lease=attempt,
+                            harness=harness,
+                            timeout_seconds=self.timeout_seconds,
+                            env=contained.environment,
+                            complete_environment=True,
+                            source_repo_path=source_repo_path,
+                            base_head_sha=base_head_sha,
+                            saga_id=saga_id,
+                            pow_wow_id=pow_wow_id,
+                            task_contract=task_contract,
+                        )
+                    )
         except Exception as exc:  # noqa: BLE001 - convert supervisor failure to recovery state
             error = f"streaming supervisor failed: {type(exc).__name__}: {exc}"
             transcript_artifact_id: str | None = None
             checkpoint_id: str | None = None
             checkpoint_error = error
             try:
-                transcript_ref = self.artifact_writer.write_text(
+                transcript_ref = artifact_writer.write_text(
                     role="agent_execution_transcript",
                     text=json.dumps(
                         {
@@ -2003,9 +2059,9 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     mime_type="application/x-ndjson",
                 )
                 transcript_artifact_id = str(transcript_ref.artifact_id)
-                checkpoint_result = self.coordination_command(
+                checkpoint_result = coordination_command(
                     CreateExecutionCheckpoint(
-                        lease_id=execution_attempt.lease_id,
+                        lease_id=attempt.lease_id,
                         reason="supervisor_error",
                         status="FAILED",
                         saga_id=saga_id,
@@ -2071,7 +2127,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
 
         if self.delegate_fn is None:
             raise RuntimeError("junior progress assessor is not configured")
-        slot = resolve_bench(Tier.JUNIOR, self.bench)
+        slot = resolve_bench(DispatchTier.JUNIOR, self.bench)
         prompt = (
             "A deterministic process supervisor observed no meaningful progress from a "
             "senior/staff frontier agent. Heartbeats prove only ownership/liveness and "
@@ -2087,7 +2143,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 prompt=prompt,
                 task_name=f"progress_assessment_{str(evidence.get('lease_id') or '')[:12]}",
                 role="progress_assessor",
-                tier=Tier.JUNIOR.value,
+                tier=DispatchTier.JUNIOR.value,
                 model=slot.model,
                 model_params={"cache_prompt": False},
                 timeout_seconds=self.progress_assessment_timeout_seconds,
@@ -2182,6 +2238,22 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         changed_files: tuple[str, ...] = (),
         diff_summary: Mapping[str, Any] | None = None,
     ) -> PowWowTaskResult | None:
+        if context.pairing_assignment_id is not None and task.judgment is not None:
+            if failure_reason == "usage_limit" and context.dispatch_intent_id:
+                from ..pairing_assignment import assignment_for_intent, invalidate_assignment
+
+                assignment = assignment_for_intent(context.dispatch_intent_id)
+                if assignment is not None:
+                    invalidate_assignment(
+                        assignment,
+                        harness=Harness(failed_harness.value),
+                        model=failed_model,
+                        reason=str(failure_reason),
+                    )
+            # A governed attempt owns one complete pair. Replacing one seat
+            # would make its reviewer relationship a different, undeclared
+            # pairing, so the attempt fails and the next attempt re-seats whole.
+            return None
         alternate = self._select_alternate_frontier_slot(failed_harness)
         if alternate is None:
             return None
@@ -2266,6 +2338,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     saga_id=context.saga_id,
                     pow_wow_id=pow_wow_id,
                     task_contract=prompt,
+                    posture=fallback_authority.posture(),
                 )
 
         fallback_changed_files = (
@@ -2614,6 +2687,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                         task_name=task.task_name,
                         content={
                             "schema_version": "cli_agent_run.v1",
+                            "pairing_assignment_id": context.pairing_assignment_id,
                             "engineering_doctrine": _build_engineering_doctrine_provenance(task),
                             "mode": self.mode,
                             "harness": harness,
@@ -2713,6 +2787,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     saga_id=context.saga_id,
                     pow_wow_id=pow_wow_id,
                     task_contract=prompt,
+                    posture=posture,
                 )
             changed_files = list_changed_worktree_files(
                 worktree_path,
@@ -2858,6 +2933,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
 
         run_capture = {
             "schema_version": "cli_agent_run.v1",
+            "pairing_assignment_id": context.pairing_assignment_id,
             "engineering_doctrine": _build_engineering_doctrine_provenance(task),
             "mode": self.mode,
             "harness": harness,
@@ -2904,9 +2980,9 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         if parsed_verdict is not None:
             reviewer_tier = (
                 ReviewerTier.STAFF
-                if task.judgment and task.judgment.tier is Tier.STAFF
+                if task.judgment and task.judgment.tier is DispatchTier.STAFF
                 else ReviewerTier.SENIOR
-                if task.judgment and task.judgment.tier is Tier.SENIOR
+                if task.judgment and task.judgment.tier is DispatchTier.SENIOR
                 else ReviewerTier.OPERATOR
             )
             round_match = re.search(r"_r(\d+)$", task.task_name)
@@ -3037,9 +3113,10 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                         task_name=task.task_name,
                         content={
                             "schema_version": "cli_agent_run.v1",
+                            "pairing_assignment_id": context.pairing_assignment_id,
                             "engineering_doctrine": _build_engineering_doctrine_provenance(task),
                             "mode": self.mode,
-                            "dispatch_kind": "advisory",
+                            "dispatch_kind": DispatchKind.ADVISORY.value,
                             "harness": harness,
                             "model": model,
                             "is_review": True,
@@ -3068,11 +3145,12 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         # Advisory work is explicitly read-only/no-worktree. The command builder
         # treats review=True as the non-mutating CLI posture: codex read-only
         # sandbox and claude without dangerous skip permissions.
+        posture = self._task_spawn_authority(task).posture()
         command = self._build_agent_cli_command(
             frontier,
             model,
             prompt,
-            self._task_spawn_authority(task).posture(),
+            posture,
             reasoning_effort=slot.reasoning_effort if slot else None,
         )
         execution_attempt = self._open_execution_attempt_lease(
@@ -3105,6 +3183,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 saga_id=context.saga_id,
                 pow_wow_id=pow_wow_id,
                 task_contract=prompt,
+                posture=posture,
             )
         self._complete_execution_attempt_lease(
             execution_attempt,
@@ -3182,9 +3261,10 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     task_name=task.task_name,
                     content={
                         "schema_version": "cli_agent_run.v1",
+                        "pairing_assignment_id": context.pairing_assignment_id,
                         "engineering_doctrine": _build_engineering_doctrine_provenance(task),
                         "mode": self.mode,
-                        "dispatch_kind": "advisory",
+                        "dispatch_kind": DispatchKind.ADVISORY.value,
                         "harness": harness,
                         "model": model,
                         "is_review": True,
@@ -3230,7 +3310,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
     ) -> DispatchKind:
         return task.dispatch_kind or context.dispatch_kind
 
-    def _resolve_task_tier(self, task: PowWowTaskSpec) -> Tier | None:
+    def _resolve_task_tier(self, task: PowWowTaskSpec) -> DispatchTier | None:
         return task.judgment.tier if task.judgment else None
 
     def _resolve_task_worktree_group(self, task: PowWowTaskSpec) -> str:
@@ -3594,7 +3674,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             )
         if not is_agent_task(task):
             return self._build_non_implementation_task_result(task, target_project)
-        if self._resolve_task_dispatch_kind(task, context) == "advisory":
+        if self._resolve_task_dispatch_kind(task, context) is DispatchKind.ADVISORY:
             return self._run_advisory_agent_task(
                 pow_wow_id=pow_wow_id,
                 target_project=target_project,
@@ -3660,12 +3740,14 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         pending: list[PowWowTaskSpec] = list(tasks)
         running: dict[
             concurrent.futures.Future[PowWowTaskResult],
-            tuple[PowWowTaskSpec, Tier | None, str | None],
+            tuple[PowWowTaskSpec, DispatchTier | None, str | None],
         ] = {}
-        active_by_tier = {tier: 0 for tier in Tier}
+        active_by_tier = {tier: 0 for tier in DispatchTier}
         active_code_groups: set[str] = set()
         code_worktree_lock = threading.Lock()
-        tier_capacities = {tier: max(1, resolve_bench(tier, self.bench).capacity) for tier in Tier}
+        tier_capacities = {
+            tier: max(1, resolve_bench(tier, self.bench).capacity) for tier in DispatchTier
+        }
         max_workers = max(1, sum(tier_capacities.values()))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -3714,7 +3796,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                         self._resolve_task_worktree_group(task)
                         if is_agent_task(task)
                         and self._local_harness_for(task) is None
-                        and self._resolve_task_dispatch_kind(task, context) == "code"
+                        and self._resolve_task_dispatch_kind(task, context) is DispatchKind.CODE
                         else None
                     )
                     if code_group is not None and code_group in active_code_groups:
@@ -3836,7 +3918,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 continue
             if not is_review_task(task):
                 continue
-            if self._resolve_task_dispatch_kind(task, context) != "code":
+            if self._resolve_task_dispatch_kind(task, context) is not DispatchKind.CODE:
                 continue
             result = results_by_name.get(task.task_name)
             if result is None or result.status != "completed":
@@ -3868,7 +3950,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 continue
             if is_review_task(task):
                 continue
-            if self._resolve_task_dispatch_kind(task, context) == "code":
+            if self._resolve_task_dispatch_kind(task, context) is DispatchKind.CODE:
                 return task
         return None
 
@@ -3890,7 +3972,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             return "circling", "identical_verdicts"
         if self.delegate_fn is None:
             return "progress", "no_classifier"
-        slot = resolve_bench(Tier.JUNIOR, self.bench)
+        slot = resolve_bench(DispatchTier.JUNIOR, self.bench)
         prompt = (
             "Two consecutive code-review verdicts for the same change follow. "
             "Answer with exactly one word on the first line: PROGRESS if the "
@@ -3908,7 +3990,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     prompt=prompt,
                     task_name=f"review_convergence_r{round_number}",
                     role="review_convergence_classifier",
-                    tier=Tier.JUNIOR.value,
+                    tier=DispatchTier.JUNIOR.value,
                     model=slot.model,
                     model_params={"cache_prompt": False},
                 )
@@ -4510,7 +4592,8 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         review_tasks = [
             task
             for task in tasks
-            if is_review_task(task) and self._resolve_task_dispatch_kind(task, context) == "code"
+            if is_review_task(task)
+            and self._resolve_task_dispatch_kind(task, context) is DispatchKind.CODE
         ]
         if not review_tasks:
             return task_results

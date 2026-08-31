@@ -3,54 +3,6 @@ logging {
   format = "logfmt"
 }
 
-discovery.docker "local" {
-  host = "unix:///var/run/docker.sock"
-}
-
-// Discovery attaches what it knows about a container as `__meta_` labels, and
-// everything under that prefix is dropped on the way to Loki unless a rule here
-// promotes it. Without these rules every container on the socket wrote into one
-// undifferentiated stream: postgres, loki, minio and the app were all just
-// `collector="alloy"`, so a query could not name the container a line came from.
-//
-// The three below are the ones that answer "who wrote this". `container` is the
-// name a person types into `docker logs`, and the compose pair is what survives a
-// container being replaced, so a service's history stays one stream across
-// restarts and recreates rather than fragmenting per container instance.
-//
-// Deliberately not `service`. The JSON stage further down sets that from the
-// application's own log field, and reusing the name here would mean a container's
-// identity and an application's identity silently overwrote each other depending
-// on whether a given line happened to parse as JSON.
-discovery.relabel "local_containers" {
-  targets = discovery.docker.local.targets
-
-  // Docker reports the name with a leading slash (`/local-agent-postgres`), which
-  // is not how anyone refers to it. The optional group strips it.
-  rule {
-    source_labels = ["__meta_docker_container_name"]
-    regex         = "/?(.*)"
-    target_label  = "container"
-  }
-
-  rule {
-    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
-    target_label  = "compose_project"
-  }
-
-  rule {
-    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
-    target_label  = "compose_service"
-  }
-}
-
-loki.source.docker "local" {
-  host       = "unix:///var/run/docker.sock"
-  targets    = discovery.relabel.local_containers.output
-  labels     = { collector = "alloy" }
-  forward_to = [loki.process.local_agent.receiver]
-}
-
 local.file_match "local_agent_files" {
   path_targets = [
     { __path__ = "/var/log/local-agent/repo/pi-daemon*.log", service = "pi-daemon", env = "local", log_source = "repo-runtime" },

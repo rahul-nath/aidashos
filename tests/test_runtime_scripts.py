@@ -189,7 +189,16 @@ def test_pi_daemon_service_does_not_source_dotenv_as_shell(tmp_path: Path) -> No
     assert shell == (f"cd '{fake_repo.resolve()}' && exec '{fake_uv.resolve()}' run pi-daemon")
     assert payload["WorkingDirectory"] == str(fake_repo.resolve())
     assert payload["RunAtLoad"] is True
-    assert payload["KeepAlive"] is False
+    assert payload["KeepAlive"] is True
+
+
+def test_runtime_start_delegates_pi_lifecycle_to_the_typed_reconciler() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    script = (repo_root / "scripts" / "start-agent-runtime.sh").read_text(encoding="utf-8")
+
+    assert "local_first_agent_os.runtime_services pi-daemon" in script
+    assert "pi_daemon_is_launchd_owned()" not in script
+    assert "stop_stale_pi_daemon()" not in script
 
 
 # --- The two resident loops, supervised ---------------------------------------

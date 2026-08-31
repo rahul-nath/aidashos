@@ -13,6 +13,8 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
+from ..coordination.contracts import DispatchKind
+
 
 class TaskPurpose(StrEnum):
     """Semantic purpose of a pow-wow task."""
@@ -166,7 +168,7 @@ def infer_legacy_task_purpose(
     task_name: str,
     role: str,
     judgment_name: str | None,
-    dispatch_kind: str | None,
+    dispatch_kind: DispatchKind | None,
 ) -> TaskPurpose:
     """Parse old string-shaped tasks once while persisted v1 payloads remain.
 
@@ -177,13 +179,13 @@ def infer_legacy_task_purpose(
     if judgment_name == "reviewer":
         return TaskPurpose.REVIEW
     if judgment_name is not None:
-        if dispatch_kind == "code":
+        if dispatch_kind is DispatchKind.CODE:
             return TaskPurpose.IMPLEMENTATION
         return TaskPurpose.ADVISORY
     marker = f"{role} {task_name}".casefold()
     if "review" in marker:
         return TaskPurpose.REVIEW
-    if dispatch_kind == "code" or "implement" in marker:
+    if dispatch_kind is DispatchKind.CODE or "implement" in marker:
         return TaskPurpose.IMPLEMENTATION
     return TaskPurpose.DETERMINISTIC_CHECK
 

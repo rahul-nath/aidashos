@@ -26,8 +26,9 @@ from ..contracts import (
     DispatchProgress,
     classify_dispatch_progress,
 )
+from ..coordination.contracts import DispatchKind
 from ..coordination.failures import DurableFailureError, expected_failure
-from ..coordination.outcomes import FailureCategory, TerminalOutcome
+from ..coordination.outcomes import DispatchPromotionState, FailureCategory, TerminalOutcome
 from ..coordination.store import rowdict, tx
 from ..ids import sha256_text
 from .events import (
@@ -121,6 +122,21 @@ class MilestoneAwaitingDispatch:
     timeout_seconds: float
 
 
+@dataclass(frozen=True)
+class MilestoneAwaitingIntegration:
+    """A successful source patch is reviewed but has not landed yet.
+
+    ``MERGE_PENDING`` proves that the dispatch produced reviewable work, not
+    that the approved commit is present on the integrated branch. Keeping that
+    distinction in the result type prevents the ordinary dispatch path from
+    manufacturing ``MILESTONE_SUCCEEDED`` before an ``Integrated`` row exists.
+    """
+
+    dispatch_intent_id: str
+    timeout_seconds: float
+
+
+MilestoneSettle = MilestoneOutcome | MilestoneAwaitingIntegration
 MilestoneStart = MilestoneOutcome | MilestoneAwaitingDispatch
 
 
@@ -158,7 +174,7 @@ class DeferrableMilestoneRuntime(Protocol):
 
     def settle(
         self, context: MilestoneContext, awaiting: MilestoneAwaitingDispatch
-    ) -> MilestoneOutcome: ...
+    ) -> MilestoneSettle: ...
 
 
 @runtime_checkable
@@ -383,6 +399,16 @@ def _agent_run_result(result_text: str) -> Mapping[str, Any] | None:
     sentence. The caller must not treat that as evidence.
     """
 
+    payload = _dispatch_runner_payload(result_text)
+    if payload is None:
+        return None
+    run_result = payload.get("run_result")
+    return run_result if isinstance(run_result, Mapping) else None
+
+
+def _dispatch_runner_payload(result_text: str) -> Mapping[str, Any] | None:
+    """The typed dispatcher envelope, before selecting its nested run result."""
+
     if not result_text:
         return None
     try:
@@ -393,8 +419,7 @@ def _agent_run_result(result_text: str) -> Mapping[str, Any] | None:
         return None
     if payload.get("schema_version") != "dispatch_runner_result.v1":
         return None
-    run_result = payload.get("run_result")
-    return run_result if isinstance(run_result, Mapping) else None
+    return payload
 
 
 def _agent_evidence(kind: ArtifactKind, run_result: Mapping[str, Any]) -> str | None:
@@ -727,7 +752,7 @@ class DispatchBackedExecutorRuntime:
     """
 
     tier: str = "senior"
-    kind: str = "code"
+    kind: DispatchKind = DispatchKind.CODE
     poll_interval_seconds: float = 2.0
     wait_seconds: float = 3600.0
     intent_submitter: Any = None
@@ -736,6 +761,7 @@ class DispatchBackedExecutorRuntime:
     # this runtime for a specific project on purpose.
     target_project_id: str | None = None
     fact_recorder: Any = None
+    pairing_selector: Any = None
 
     def dispatch_source(self, context: MilestoneContext) -> str:
         return (
@@ -765,9 +791,44 @@ class DispatchBackedExecutorRuntime:
 
     def submit(self, context: MilestoneContext) -> str:
         from ..coordination.dispatch import submit_dispatch_intent
+        from ..interrupted_recovery import (
+            InterruptedEffectsConflict,
+            RetainedWorktree,
+            inspect_interrupted_attempt,
+        )
+        from ..pairing_assignment import (
+            assignment_for_idempotency_key,
+            select_assignment,
+        )
+        from ..settings import get_settings
         from ..spawn_authority import SpawnAuthority
 
         submitter = self.intent_submitter or submit_dispatch_intent
+        assignment = None
+        interrupted_recovery = None
+        if self.intent_submitter is None or self.pairing_selector is not None:
+            assignment = assignment_for_idempotency_key(self.idempotency_key(context))
+            if assignment is None:
+                selector = self.pairing_selector or select_assignment
+                settings = get_settings()
+                assignment = selector(
+                    work_unit_id=context.work_unit_id,
+                    milestone_key=context.milestone.stable_key,
+                    attempt=context.attempt,
+                    chart_path=settings.config_dir / "model_quality.toml",
+                )
+        if self.intent_submitter is None:
+            inspected = inspect_interrupted_attempt(
+                context.work_unit_id,
+                context.milestone.stable_key,
+                context.attempt,
+            )
+            if isinstance(inspected, InterruptedEffectsConflict):
+                from ..interrupted_recovery import InterruptedRecoveryRefused
+
+                raise InterruptedRecoveryRefused(inspected)
+            if isinstance(inspected, RetainedWorktree):
+                interrupted_recovery = inspected
         base_commit_sha = resolve_dependency_base_commit(context)
         result = submitter(
             self.tier,
@@ -782,6 +843,10 @@ class DispatchBackedExecutorRuntime:
             # and parsing the names here refuses an unknown persisted capability.
             permitted_capabilities=SpawnAuthority.from_names(context.permitted_tools).to_names(),
             base_commit_sha=base_commit_sha,
+            pairing_assignment=(assignment.to_payload() if assignment is not None else None),
+            interrupted_recovery=(
+                interrupted_recovery.to_payload() if interrupted_recovery is not None else None
+            ),
         )
         if not result.get("ok"):
             raise RuntimeError(f"dispatch intent submission rejected: {result}")
@@ -805,7 +870,7 @@ class DispatchBackedExecutorRuntime:
             return self.target_project_id
         if context.target_project_id:
             return context.target_project_id
-        if self.kind != "code":
+        if self.kind is not DispatchKind.CODE:
             return None
         from ..project_center import load_project_center
 
@@ -919,7 +984,23 @@ class DispatchBackedExecutorRuntime:
         row, which is why the wait no longer has to happen inside the same step.
         """
 
-        intent_id = self.submit(context)
+        from ..interrupted_recovery import InterruptedRecoveryRefused
+        from ..pairing_assignment import NoLivePairing
+
+        try:
+            intent_id = self.submit(context)
+        except NoLivePairing as exc:
+            return MilestoneFailed(
+                failure_class=FailureClass.CORRECTABLE,
+                failure_code="no_live_pairing",
+                failure_summary=str(exc),
+            )
+        except InterruptedRecoveryRefused as exc:
+            return MilestoneFailed(
+                failure_class=FailureClass.REQUIRES_OPERATOR,
+                failure_code=exc.code,
+                failure_summary=str(exc),
+            )
         bound = (
             self.wait_seconds
             if context.milestone.timeout_seconds is None
@@ -929,7 +1010,7 @@ class DispatchBackedExecutorRuntime:
 
     def settle(
         self, context: MilestoneContext, awaiting: MilestoneAwaitingDispatch
-    ) -> MilestoneOutcome:
+    ) -> MilestoneSettle:
         """Translate the settled intent row into a milestone outcome.
 
         Reads the row rather than trusting the notification's payload. A wake is
@@ -969,11 +1050,21 @@ class DispatchBackedExecutorRuntime:
         if not isinstance(started, MilestoneAwaitingDispatch):
             return started
         settled = self.wait_for(started.dispatch_intent_id, context.milestone.timeout_seconds)
-        return self._outcome_from_settled_row(context, started.dispatch_intent_id, settled)
+        outcome = self._outcome_from_settled_row(context, started.dispatch_intent_id, settled)
+        if isinstance(outcome, MilestoneAwaitingIntegration):
+            return MilestoneFailed(
+                failure_class=FailureClass.REQUIRES_OPERATOR,
+                failure_code="integration_pending_without_event_channel",
+                failure_summary=(
+                    f"dispatch intent {started.dispatch_intent_id} is MERGE_PENDING; "
+                    "run it through the durable WorkUnit workflow so its landing can wake it"
+                ),
+            )
+        return outcome
 
     def _outcome_from_settled_row(
         self, context: MilestoneContext, intent_id: str, settled: dict[str, Any]
-    ) -> MilestoneOutcome:
+    ) -> MilestoneSettle:
         status = DispatchIntentStatus(str(settled["status"]))
         result_text = str(settled.get("result") or "")
         if status != _DISPATCH_SUCCESS:
@@ -987,8 +1078,9 @@ class DispatchBackedExecutorRuntime:
                 artifacts=_dispatch_failure_evidence(context, intent_id, status, result_text),
             )
 
+        dispatch_payload = _dispatch_runner_payload(result_text)
         run_result = _agent_run_result(result_text)
-        if run_result is None:
+        if dispatch_payload is None or run_result is None:
             # A DONE intent whose result is not a `dispatch_runner_result.v1`
             # payload was settled by something other than the runner, most often
             # an operator completing it by hand. It may well be finished; what it
@@ -1018,7 +1110,21 @@ class DispatchBackedExecutorRuntime:
                     RequirableArtifact(kind),
                     content=content,
                     step_name=f"dispatch:{intent_id}",
-                    metadata={"dispatch_intent_id": intent_id},
+                    metadata={
+                        "dispatch_intent_id": intent_id,
+                        "pairing_assignment_id": (
+                            dispatch_payload.get("pairing_assignment") or {}
+                        ).get("assignment_id"),
+                        "quality_chart_hash": (
+                            dispatch_payload.get("pairing_assignment") or {}
+                        ).get("chart_hash"),
+                        "interrupted_recovery_effect_id": (
+                            dispatch_payload.get("interrupted_recovery") or {}
+                        ).get("effect_id"),
+                        "interrupted_recovery_source_intent_id": (
+                            dispatch_payload.get("interrupted_recovery") or {}
+                        ).get("previous_intent_id"),
+                    },
                 )
             )
         if missing:
@@ -1028,6 +1134,15 @@ class DispatchBackedExecutorRuntime:
                 failure_summary=(
                     f"dispatch intent {intent_id} completed without producing " + ", ".join(missing)
                 ),
+            )
+        if (
+            ArtifactKind.SOURCE_PATCH.value in context.milestone.required_artifacts
+            and dispatch_payload.get("promotion_state")
+            == DispatchPromotionState.MERGE_PENDING.value
+        ):
+            return MilestoneAwaitingIntegration(
+                dispatch_intent_id=intent_id,
+                timeout_seconds=context.milestone.timeout_seconds,
             )
         return MilestoneSucceeded(
             result_summary=f"dispatch intent {intent_id} completed",
@@ -1072,7 +1187,7 @@ class CompositeExecutorRuntime:
 
     def settle(
         self, context: MilestoneContext, awaiting: MilestoneAwaitingDispatch
-    ) -> MilestoneOutcome:
+    ) -> MilestoneSettle:
         """Routed by the same key as ``start``, so a settle reaches the runtime
         that submitted. The executor kind comes from the plan, which is frozen
         for the life of the attempt, so the two cannot resolve differently.
@@ -1141,7 +1256,7 @@ def dispatch_backed_runtime() -> CompositeExecutorRuntime:
     """
 
     agent_runtime = DispatchBackedExecutorRuntime()
-    advisory_runtime = DispatchBackedExecutorRuntime(kind="advisory")
+    advisory_runtime = DispatchBackedExecutorRuntime(kind=DispatchKind.ADVISORY)
     delivery_runtime = DeliveryRecordRuntime()
     return CompositeExecutorRuntime(
         routes={
@@ -1164,10 +1279,12 @@ __all__ = [
     "DispatchBackedExecutorRuntime",
     "DispatchWaitTimeout",
     "MilestoneAwaitingDispatch",
+    "MilestoneAwaitingIntegration",
     "MilestoneContext",
     "MilestoneExecutorRuntime",
     "MilestoneFailed",
     "MilestoneOutcome",
+    "MilestoneSettle",
     "MilestoneStart",
     "MilestoneSucceeded",
     "SimulatedExecutorRuntime",

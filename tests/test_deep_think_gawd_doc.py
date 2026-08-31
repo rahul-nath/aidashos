@@ -82,7 +82,7 @@ def test_the_deep_think_document_targets_this_repository(work_unit_ledger: Path)
     assert result.compiled_plan_revision_id is not None
     plan = repo.get_compiled_plan_revision(result.compiled_plan_revision_id).plan
 
-    assert plan.target_project_id == "local_first_agent_os"
+    assert plan.target_project_id == "local-first-agent-os"
 
 
 def test_every_implement_milestone_demands_a_real_patch(work_unit_ledger: Path) -> None:

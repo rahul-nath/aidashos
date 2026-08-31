@@ -44,7 +44,6 @@ def run_ledger_dispatcher(
     from ..dbos_app import launch_dbos
     from ..dispatcher import LedgerDispatcher
     from ..dispatcher_runner import build_dispatcher_runner
-    from ..harness_availability import build_quota_claim_gate
     from ..runtime import build_runtime
     from ..staffing import dispatch_seat_counts, load_staffing
 
@@ -90,14 +89,12 @@ def run_ledger_dispatcher(
             tier=tier,
             settings=runtime.settings,
             seats=dispatch_seat_counts(staffing.bench),
-            # A tier whose seating has reported a spent quota is not claimed
-            # from at all, so its intents keep their place in the queue instead
-            # of being spent against a provider that will refuse. The gate holds
-            # the full staffing, so the frontier pair answers as a pair: both
-            # seats claimable when a fallback pairing can take them, neither
-            # when nothing declared can. This loop's own interval is what picks
-            # them up again once the quota returns.
-            tier_claimable=build_quota_claim_gate(staffing, settings=runtime.settings),
+            # Governed WorkUnit intents already carry the pair selected from
+            # recent real dispatch outcomes. A tier-only cooldown gate cannot
+            # see that assignment and could refuse the live replacement pair,
+            # so claimability belongs to the attempt-scoped assignment instead.
+            # Legacy saga intents retain the runner's compatibility fallback.
+            tier_claimable=None,
         )
         dispatched = dispatcher.dispatch_pending_intents(
             interval_seconds=interval_seconds,

@@ -229,6 +229,85 @@ def apply_integration_transition(
             f"refinery tried to make it {state_of(target)}; the per-project advisory lock is "
             "the only thing that makes that impossible, so it was not held"
         )
+    if isinstance(target, Integrated):
+        _record_integration_landed(c, target, recorded_at=recorded_at)
+
+
+# The one durable signal the landing emits, in the family the ledger-event
+# verbs already provide: the work-unit side claims it with
+# `claim_next_ledger_event(event_type=INTEGRATION_LANDED_EVENT)` under SKIP
+# LOCKED, so there is exactly one trigger and no second reader racing the
+# first. The refinery side knows nothing of what consumes it; the subject of
+# the event is a commit and the intent that produced it.
+INTEGRATION_LANDED_EVENT = "integration_landed"
+
+
+def _record_integration_landed(
+    c: ConnectionLike, target: Integrated, *, recorded_at: float
+) -> None:
+    """Write the landing's durable signal in the transaction that lands it.
+
+    Deliberately not `store.emit`: that mirror is best-effort, swallows write
+    failures, and is disabled when `ledger_outbox_destination` is unset, and a
+    trigger with any of those properties would sometimes let a landed commit
+    settle nothing. Riding the landing's own transaction means the `Integrated`
+    row and its signal commit or roll back together.
+    """
+
+    subject = target.subject
+    c.execute(
+        """
+        INSERT INTO ledger_events(
+            event_id, event_type, aggregate_type, aggregate_id,
+            payload_json, status, attempts, created_at
+        ) VALUES (?, ?, 'integration_request', ?, ?, 'PENDING', 0, ?)
+        """,
+        (
+            str(uuid.uuid4()),
+            INTEGRATION_LANDED_EVENT,
+            subject.request_id,
+            json.dumps(
+                {
+                    "request_id": subject.request_id,
+                    "intent_id": subject.intent_id,
+                    "milestone_key": subject.milestone_key,
+                    "pow_wow_id": subject.pow_wow_id,
+                    "target_project_id": subject.target_project_id,
+                    "approved_commit_sha": subject.commit_sha,
+                    "integration_commit_sha": target.integration_commit_sha,
+                    "integrated_at": target.integrated_at,
+                },
+                sort_keys=True,
+            ),
+            recorded_at,
+        ),
+    )
+
+
+def integrated_request_for_intent(intent_id: str) -> Integrated | None:
+    """The Integrated row naming this intent, or None while nothing landed.
+
+    The settle path's invariant check reads through here rather than trusting
+    the event payload, because `MILESTONE_COMPLETED_BEFORE_EXACT_MERGE` is a
+    statement about the row, not about a message derived from it. Read-only on
+    purpose: settlement never transitions integration state.
+    """
+
+    with connect() as c:
+        rows = c.execute(
+            "SELECT * FROM integration_requests WHERE intent_id = ? AND state = ? "
+            "ORDER BY enqueued_at DESC, request_id DESC",
+            (intent_id, IntegrationRequestState.INTEGRATED.value),
+        ).fetchall()
+    if not rows:
+        return None
+    request = integration_request_from_row(rowdict(rows[0]))
+    if not isinstance(request, Integrated):
+        raise RuntimeError(
+            f"integration request {request.subject.request_id} is stored as INTEGRATED "
+            "but decoded as another state; the row and its payload disagree"
+        )
+    return request
 
 
 def claim_requests_for_attempt(

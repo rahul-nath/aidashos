@@ -24,6 +24,7 @@ from typing import Final
 from ..capabilities import Capability
 from .events import ArtifactKind
 from .lifecycle import LifecyclePhase
+from .retry import ChargedFailureBudget, OperatorOnly, RetryPolicy
 
 
 class ExecutorKind(StrEnum):
@@ -55,15 +56,6 @@ class ApprovalRequirement(StrEnum):
 
 
 @dataclass(frozen=True)
-class RetryPolicy:
-    max_attempts: int
-    backoff_seconds: float
-
-    def to_payload(self) -> dict[str, float | int]:
-        return {"max_attempts": self.max_attempts, "backoff_seconds": self.backoff_seconds}
-
-
-@dataclass(frozen=True)
 class ExecutorDeclaration:
     """What one executor kind is allowed to do, and what it owes back."""
 
@@ -72,7 +64,7 @@ class ExecutorDeclaration:
     input_schema: str
     output_schema: str
     permitted_tools: tuple[Capability, ...]
-    retry: RetryPolicy
+    retry_policy: RetryPolicy
     timeout_seconds: int
     required_artifact_types: tuple[ArtifactKind, ...]
     approval: ApprovalRequirement
@@ -84,15 +76,34 @@ class ExecutorDeclaration:
             "input_schema": self.input_schema,
             "output_schema": self.output_schema,
             "permitted_tools": [item.value for item in self.permitted_tools],
-            "retry": self.retry.to_payload(),
+            "retry_policy": self.retry_policy.to_payload(),
             "timeout_seconds": self.timeout_seconds,
             "required_artifact_types": [item.value for item in self.required_artifact_types],
             "approval": self.approval.value,
         }
 
 
-_BOUNDED_RETRY: Final = RetryPolicy(max_attempts=3, backoff_seconds=2.0)
-_SINGLE_ATTEMPT: Final = RetryPolicy(max_attempts=1, backoff_seconds=0.0)
+# Five, raised from three by the operator on 2026-08-30, as an interim value
+# until attempts are calculated per milestone rather than declared once here.
+#
+# Three was chosen when a charged failure meant an agent had run and got the
+# work wrong. Practice disagreed: on work unit c88ff4167c66 two of the three
+# were spent on a key drift in this repository's own evidence reader and on a
+# provider window refusing a concurrent turn, and neither was a judgment of the
+# milestone's work. Until the classifier can tell those apart at the boundary -
+# which is what `docs/failure_taxonomy_and_propagation_design.md` exists to
+# build - the budget absorbs the difference, and absorbing it is cheaper than
+# an operator override on every environment failure.
+#
+# A code constant rather than a setting, and it has to stay one: the retry
+# policy is compiled into the plan, the plan is hashed, and an approval binds
+# to that hash. Reading this from the environment would make one document
+# compile to different hashes on different hosts, which is the property the
+# offline compiler exists to guarantee. Raising it changes the hash of plans
+# compiled from here on; plans already compiled keep the budget they were
+# compiled with, because the policy travels inside the plan.
+_BOUNDED_RETRY: Final = ChargedFailureBudget(max_charged_failures=5)
+_OPERATOR_ONLY: Final = OperatorOnly()
 
 
 _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
@@ -102,7 +113,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         input_schema="clarify_request.v1",
         output_schema="clarify_result.v1",
         permitted_tools=(Capability.READ_REPOSITORY, Capability.ASK_OPERATOR),
-        retry=_BOUNDED_RETRY,
+        retry_policy=_BOUNDED_RETRY,
         timeout_seconds=900,
         required_artifact_types=(ArtifactKind.CLARIFICATION_RECORD,),
         approval=ApprovalRequirement.OPTIONAL,
@@ -113,7 +124,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         input_schema="validate_request.v1",
         output_schema="validate_result.v1",
         permitted_tools=(Capability.READ_REPOSITORY, Capability.RUN_COMMAND),
-        retry=_BOUNDED_RETRY,
+        retry_policy=_BOUNDED_RETRY,
         timeout_seconds=900,
         required_artifact_types=(ArtifactKind.ENVIRONMENT_REPORT,),
         approval=ApprovalRequirement.NEVER,
@@ -124,7 +135,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         input_schema="plan_request.v1",
         output_schema="plan_result.v1",
         permitted_tools=(Capability.READ_REPOSITORY, Capability.INVOKE_MODEL),
-        retry=_BOUNDED_RETRY,
+        retry_policy=_BOUNDED_RETRY,
         timeout_seconds=1800,
         required_artifact_types=(ArtifactKind.IMPLEMENTATION_PLAN,),
         approval=ApprovalRequirement.OPTIONAL,
@@ -140,7 +151,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
             Capability.INVOKE_MODEL,
             Capability.RUN_COMMAND,
         ),
-        retry=_BOUNDED_RETRY,
+        retry_policy=_BOUNDED_RETRY,
         timeout_seconds=5400,
         required_artifact_types=(ArtifactKind.SOURCE_PATCH,),
         approval=ApprovalRequirement.OPTIONAL,
@@ -151,7 +162,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         input_schema="verify_request.v1",
         output_schema="verify_result.v1",
         permitted_tools=(Capability.READ_REPOSITORY, Capability.RUN_COMMAND),
-        retry=_BOUNDED_RETRY,
+        retry_policy=_BOUNDED_RETRY,
         timeout_seconds=3600,
         required_artifact_types=(ArtifactKind.TEST_RESULT,),
         approval=ApprovalRequirement.NEVER,
@@ -166,7 +177,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
             Capability.RUN_COMMAND,
             Capability.INVOKE_MODEL,
         ),
-        retry=_BOUNDED_RETRY,
+        retry_policy=_BOUNDED_RETRY,
         timeout_seconds=3600,
         required_artifact_types=(ArtifactKind.ACCEPTANCE_REPORT,),
         approval=ApprovalRequirement.NEVER,
@@ -177,7 +188,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         input_schema="review_request.v1",
         output_schema="review_result.v1",
         permitted_tools=(Capability.READ_REPOSITORY, Capability.INVOKE_MODEL),
-        retry=_BOUNDED_RETRY,
+        retry_policy=_BOUNDED_RETRY,
         timeout_seconds=1800,
         required_artifact_types=(ArtifactKind.REVIEW_DECISION,),
         approval=ApprovalRequirement.OPTIONAL,
@@ -188,7 +199,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         input_schema="review_request.v1",
         output_schema="review_result.v1",
         permitted_tools=(Capability.READ_REPOSITORY,),
-        retry=_SINGLE_ATTEMPT,
+        retry_policy=_OPERATOR_ONLY,
         timeout_seconds=86400,
         required_artifact_types=(ArtifactKind.OPERATOR_APPROVAL,),
         approval=ApprovalRequirement.ALWAYS,
@@ -199,7 +210,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         input_schema="deliver_request.v1",
         output_schema="deliver_result.v1",
         permitted_tools=(Capability.READ_REPOSITORY, Capability.WRITE_ARTIFACT),
-        retry=_BOUNDED_RETRY,
+        retry_policy=_BOUNDED_RETRY,
         timeout_seconds=1800,
         required_artifact_types=(ArtifactKind.DELIVERY_RECORD,),
         approval=ApprovalRequirement.OPTIONAL,
@@ -210,7 +221,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         input_schema="deliver_request.v1",
         output_schema="deliver_result.v1",
         permitted_tools=(Capability.READ_REPOSITORY, Capability.PUBLISH_DEPLOYMENT),
-        retry=_SINGLE_ATTEMPT,
+        retry_policy=_OPERATOR_ONLY,
         timeout_seconds=3600,
         required_artifact_types=(ArtifactKind.DEPLOYMENT_RECORD,),
         approval=ApprovalRequirement.ALWAYS,

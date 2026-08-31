@@ -28,7 +28,12 @@ A valid decomposition has:
 - only dependencies that reference other tasks in the same plan;
 - no dependency cycles;
 - a concrete tier for every judgment task;
-- an explicit `dispatch_kind` of `advisory` or `code`.
+- an explicit `dispatch_kind` from the canonical `coordination.contracts.DispatchKind`
+  enum: `advisory`, `code`, or `cast`.
+
+`advisory` produces read-only judgment work, `code` produces the governed
+implementation and review pipeline, and `cast` produces independent named
+stances followed by a synthesizer that depends on every stance.
 
 Invalid planner output raises before any executor runs.
 

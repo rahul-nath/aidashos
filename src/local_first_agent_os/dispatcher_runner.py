@@ -9,7 +9,7 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any
 
 from .constants import (
     AGENT_BRANCH_AUTO_MERGE,
@@ -29,6 +29,7 @@ from .coordination import (
     ListDispatchIntents,
     SubmitApprovalRequest,
 )
+from .coordination.contracts import DispatchKind, DispatchTerminalStatus
 from .coordination.outcomes import (
     DispatchPromotionState,
     DispatchResultOrigin,
@@ -49,6 +50,7 @@ from .lifecycle_failure_harness import (
     reach_lifecycle_transition,
 )
 from .merge_review import build_merge_review_packet
+from .pairing_assignment import assignment_for_intent, bench_for_assignment
 from .pow_wow import (
     CliPowWowExecutor,
     DelegateFn,
@@ -67,15 +69,14 @@ from .project_center import LinkedProject, load_project_center, project_status_r
 from .review_recovery import staff_review_approves_checkpoint
 from .runtime import AppRuntime
 from .spawn_authority import SpawnAuthority
-from .staffing import Bench, JudgmentRole, Staffing, Tier, load_staffing
-
-DispatchKind = Literal["advisory", "code", "cast"]
+from .staffing import Bench, JudgmentRole, Staffing, load_staffing
+from .vocabulary import DispatchTier
 
 
 @dataclass(frozen=True)
 class DispatchRunSummary:
     intent_id: str
-    tier: Tier
+    tier: DispatchTier
     kind: DispatchKind
     saga_id: str
     pow_wow_id: str
@@ -86,6 +87,8 @@ class DispatchRunSummary:
     run_result: PowWowRunResult
     result_origin: DispatchResultOrigin = DispatchResultOrigin.AUTOMATED
     merge_approval: dict[str, Any] | None = None
+    pairing_assignment: dict[str, Any] | None = None
+    interrupted_recovery: dict[str, Any] | None = None
 
     def to_payload(self) -> dict[str, Any]:
         result_state = (
@@ -105,7 +108,7 @@ class DispatchRunSummary:
             "promotion_state": promotion_state.value,
             "intent_id": self.intent_id,
             "tier": self.tier.value,
-            "kind": self.kind,
+            "kind": self.kind.value,
             "saga_id": self.saga_id,
             "pow_wow_id": self.pow_wow_id,
             "task_id": self.task_id,
@@ -114,17 +117,16 @@ class DispatchRunSummary:
             "decomposition": self.decomposition.to_payload(),
             "run_result": self.run_result.to_payload(),
             "merge_approval": self.merge_approval,
+            "pairing_assignment": self.pairing_assignment,
+            "interrupted_recovery": self.interrupted_recovery,
         }
 
     def to_intent_result(self) -> IntentResult:
-        terminal_status: Literal["DONE", "FAILED"] = (
-            "DONE" if self.run_result.status == "COMPLETED" else "FAILED"
-        )
         payload = json.dumps(self.to_payload(), sort_keys=True)
-        if terminal_status == "DONE":
-            return "DONE", payload, None
+        if self.run_result.status == "COMPLETED":
+            return DispatchTerminalStatus.DONE, payload, None
         error = "; ".join(self.run_result.risks) or self.run_result.output_summary
-        return "FAILED", payload, error
+        return DispatchTerminalStatus.FAILED, payload, error
 
 
 def intent_spawn_ceiling(intent: Mapping[str, Any]) -> SpawnAuthority:
@@ -256,6 +258,22 @@ class DispatcherIntentRunner:
         is the staleness this method exists to remove.
         """
 
+        assignment = assignment_for_intent(intent_id)
+        if assignment is not None:
+            configured = self.bench.bench if isinstance(self.bench, Staffing) else self.bench
+            emit_progress(
+                (
+                    f"dispatch uses pairing assignment {assignment.assignment_id}: "
+                    f"{assignment.pairing.label}"
+                ),
+                phase="dispatch_pairing_assigned",
+                intent_id=intent_id,
+                pairing_assignment_id=assignment.assignment_id,
+                pairing_score=assignment.pairing.score,
+                quality_chart_hash=assignment.chart_hash,
+            )
+            return bench_for_assignment(configured, assignment)
+
         spent = read_spent_quotas(
             settings=self.runtime.settings,
             checkout_timeout_seconds=DISPATCH_QUOTA_READ_TIMEOUT_SECONDS,
@@ -350,7 +368,7 @@ class DispatcherIntentRunner:
         if not usable:
             reduction["outcome"] = "no_usable_answers"
             return (
-                "FAILED",
+                DispatchTerminalStatus.FAILED,
                 json.dumps(reduction, sort_keys=True),
                 ("judge reduce failed: no child produced a usable answer"),
             )
@@ -370,7 +388,7 @@ class DispatcherIntentRunner:
         judge_intent = {
             **intent,
             "prompt": "\n".join(prompt_lines),
-            "kind": "advisory",
+            "kind": DispatchKind.ADVISORY.value,
             "intent_role": "single",
         }
         summary = self.run_intent(judge_intent)
@@ -382,8 +400,12 @@ class DispatcherIntentRunner:
         reduction["judge"] = summary.to_payload()
         payload = json.dumps(reduction, sort_keys=True)
         if summary.run_result.status == "COMPLETED" and reduced_answer:
-            return "DONE", payload, None
-        return "FAILED", payload, (f"judge reduce failed: run status {summary.run_result.status}")
+            return DispatchTerminalStatus.DONE, payload, None
+        return (
+            DispatchTerminalStatus.FAILED,
+            payload,
+            f"judge reduce failed: run status {summary.run_result.status}",
+        )
 
     def run_intent(self, intent: Mapping[str, Any]) -> DispatchRunSummary:
         tier = _intent_tier(intent)
@@ -398,7 +420,7 @@ class DispatcherIntentRunner:
         )
         project_center = load_project_center(self.runtime.settings)
         target_project_id = str(intent.get("target_project_id") or "").strip()
-        if kind == "code" and not target_project_id:
+        if kind is DispatchKind.CODE and not target_project_id:
             raise ValueError(f"code dispatch intent {intent_id} requires target_project_id")
         target_project = project_center.project_by_id(
             target_project_id or project_center.default_saga_project
@@ -410,7 +432,7 @@ class DispatcherIntentRunner:
             target_project_id=target_project.id,
             recovery=recovery_request is not None,
         )
-        if kind == "code" and target_project.read_only:
+        if kind is DispatchKind.CODE and target_project.read_only:
             raise ValueError(
                 f"dispatch intent {intent_id} targets read-only project {target_project.id}"
             )
@@ -443,7 +465,7 @@ class DispatcherIntentRunner:
                     "REVIEW"
                     if recovery_request is not None
                     else "IMPLEMENTATION"
-                    if kind == "code"
+                    if kind is DispatchKind.CODE
                     else "IDEA_INTAKE"
                 ),
                 goal=prompt,
@@ -503,6 +525,10 @@ class DispatcherIntentRunner:
             kind=kind,
         )
         context = replace(context, task_ids_by_name=task_records)
+        assignment = assignment_for_intent(intent_id)
+        from .interrupted_recovery import recovery_for_intent
+
+        interrupted = recovery_for_intent(intent_id)
         if recovery_request is not None:
             worktree_path = _prepare_recovery_review_worktree(
                 intent_id=intent_id,
@@ -557,7 +583,37 @@ class DispatcherIntentRunner:
             schema_version=decomposition.schema_version,
             content=decomposition.to_payload(),
         )
-        run_result = replace(run_result, artifacts=(plan_artifact, *run_result.artifacts))
+        assignment_artifacts = (
+            (
+                PowWowArtifact(
+                    artifact_type="pairing_assignment",
+                    schema_version="pairing_assignment.v1",
+                    content=assignment.to_payload(),
+                ),
+            )
+            if assignment is not None
+            else ()
+        )
+        recovery_artifacts = (
+            (
+                PowWowArtifact(
+                    artifact_type="interrupted_attempt_recovery",
+                    schema_version="interrupted_attempt_recovery.v1",
+                    content=interrupted.to_payload(),
+                ),
+            )
+            if interrupted is not None
+            else ()
+        )
+        run_result = replace(
+            run_result,
+            artifacts=(
+                plan_artifact,
+                *assignment_artifacts,
+                *recovery_artifacts,
+                *run_result.artifacts,
+            ),
+        )
         persist_pow_wow_run_result(
             pow_wow_id,
             task_records,
@@ -583,7 +639,7 @@ class DispatcherIntentRunner:
         merge_approval = None
         final_checkpoint = _last_checkpoint(run_result)
         if (
-            kind == "code"
+            kind is DispatchKind.CODE
             and run_result.status == "COMPLETED"
             and run_result.external_agents_started
             and run_result.changed_files
@@ -669,6 +725,8 @@ class DispatcherIntentRunner:
             run_result=run_result,
             result_origin=result_origin,
             merge_approval=merge_approval,
+            pairing_assignment=(assignment.to_payload() if assignment is not None else None),
+            interrupted_recovery=(interrupted.to_payload() if interrupted is not None else None),
         )
 
 
@@ -728,7 +786,7 @@ def _reduce_by_vote(
     if not tally:
         reduction["outcome"] = "no_usable_answers"
         return (
-            "FAILED",
+            DispatchTerminalStatus.FAILED,
             json.dumps(reduction, sort_keys=True),
             ("vote reduce failed: no child produced a usable answer"),
         )
@@ -737,21 +795,21 @@ def _reduce_by_vote(
     if len(winners) > 1:
         reduction["outcome"] = "tie"
         return (
-            "FAILED",
+            DispatchTerminalStatus.FAILED,
             json.dumps(reduction, sort_keys=True),
             (f"vote reduce failed: tie between {len(winners)} answers"),
         )
     if best_count * 2 <= fanout:
         reduction["outcome"] = "no_majority"
         return (
-            "FAILED",
+            DispatchTerminalStatus.FAILED,
             json.dumps(reduction, sort_keys=True),
             (f"vote reduce failed: top answer has {best_count} of {fanout} votes"),
         )
     reduction["outcome"] = "majority"
     reduction["reduced_answer"] = originals[winners[0]]
     reduction["votes"] = best_count
-    return "DONE", json.dumps(reduction, sort_keys=True), None
+    return DispatchTerminalStatus.DONE, json.dumps(reduction, sort_keys=True), None
 
 
 def _normalize_vote_answer(answer: str) -> str:
@@ -857,7 +915,7 @@ def _recovery_review_request(intent: Mapping[str, Any]) -> dict[str, Any] | None
             raise ValueError(f"recovery staff review has invalid {name}")
     if str(intent.get("target_project_id") or "") != payload["target_project_id"]:
         raise ValueError("recovery staff review target does not match intent target")
-    if str(intent.get("tier") or "") != Tier.STAFF.value:
+    if str(intent.get("tier") or "") != DispatchTier.STAFF.value:
         raise ValueError("recovery staff review intent must be assigned to staff")
     return payload
 
@@ -875,8 +933,8 @@ def _recovery_review_tasks() -> tuple[PowWowTaskSpec, ...]:
             ),
             success_criteria=("The exact retained commit is anchored without mutation.",),
             purpose=TaskPurpose.RECOVERY_REVISION,
-            judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-            dispatch_kind="code",
+            judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+            dispatch_kind=DispatchKind.CODE,
             worktree_group=group,
         ),
         PowWowTaskSpec(
@@ -892,8 +950,8 @@ def _recovery_review_tasks() -> tuple[PowWowTaskSpec, ...]:
                 "Blocking findings are concrete enough for a bounded senior revision.",
             ),
             purpose=TaskPurpose.REVIEW,
-            judgment=JudgmentRole(name="reviewer", tier=Tier.STAFF, stance="evaluator"),
-            dispatch_kind="code",
+            judgment=JudgmentRole(name="reviewer", tier=DispatchTier.STAFF, stance="evaluator"),
+            dispatch_kind=DispatchKind.CODE,
             blocked_by=(anchor,),
             worktree_group=group,
         ),
@@ -1010,18 +1068,19 @@ def _last_checkpoint(run_result: PowWowRunResult) -> Mapping[str, Any] | None:
     return checkpoints[-1] if checkpoints else None
 
 
-def _intent_tier(intent: Mapping[str, Any]) -> Tier:
+def _intent_tier(intent: Mapping[str, Any]) -> DispatchTier:
     try:
-        return Tier(str(intent["tier"]))
+        return DispatchTier(str(intent["tier"]))
     except (KeyError, ValueError) as exc:
         raise ValueError(f"dispatch intent has invalid tier: {intent.get('tier')!r}") from exc
 
 
 def _intent_kind(intent: Mapping[str, Any]) -> DispatchKind:
-    kind = str(intent.get("kind") or "advisory")
-    if kind not in {"advisory", "code"}:
-        raise ValueError(f"dispatch intent has invalid kind: {kind!r}")
-    return cast(DispatchKind, kind)
+    raw_kind = str(intent.get("kind") or DispatchKind.ADVISORY.value)
+    try:
+        return DispatchKind(raw_kind)
+    except ValueError as exc:
+        raise ValueError(f"dispatch intent has invalid kind: {raw_kind!r}") from exc
 
 
 def _intent_prompt(intent: Mapping[str, Any]) -> str:
@@ -1052,6 +1111,9 @@ def _context_for_intent(
             and parsed.get("schema_version") == "checkpoint_continuation.v1"
         ):
             checkpoint = parsed
+    from .interrupted_recovery import recovery_for_intent
+
+    interrupted = recovery_for_intent(str(intent.get("intent_id") or ""))
     return PowWowExecutionContext(
         saga_id=saga_id,
         goal=prompt,
@@ -1066,11 +1128,26 @@ def _context_for_intent(
         no_auto_merge=not AGENT_BRANCH_AUTO_MERGE,
         dispatch_kind=kind,
         execution_checkpoint_id=str(checkpoint.get("checkpoint_id") or "") or None,
-        checkpoint_worktree_path=(str(checkpoint.get("preserved_worktree_path") or "") or None),
-        checkpoint_base_head_sha=str(checkpoint.get("base_head_sha") or "") or None,
+        checkpoint_worktree_path=(
+            interrupted.worktree_path
+            if interrupted is not None
+            else (str(checkpoint.get("preserved_worktree_path") or "") or None)
+        ),
+        checkpoint_base_head_sha=(
+            interrupted.base_head_sha
+            if interrupted is not None
+            else (str(checkpoint.get("base_head_sha") or "") or None)
+        ),
         checkpoint_patch_artifact_id=(str(checkpoint.get("patch_artifact_id") or "") or None),
-        reuse_checkpoint_worktree=bool(checkpoint.get("reuse_preserved_worktree")),
+        reuse_checkpoint_worktree=(
+            interrupted is not None or bool(checkpoint.get("reuse_preserved_worktree"))
+        ),
         base_commit_sha=str(intent.get("base_commit_sha") or "") or None,
+        pairing_assignment_id=(
+            assignment.assignment_id
+            if (assignment := assignment_for_intent(str(intent.get("intent_id") or ""))) is not None
+            else None
+        ),
     )
 
 

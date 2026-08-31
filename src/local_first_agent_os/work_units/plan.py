@@ -33,10 +33,19 @@ from .lifecycle import (
     LifecyclePhase,
     phase_ordinal,
 )
+from .retry import (
+    RetryPolicy,
+    legacy_max_attempts,
+    retry_policy_from_legacy_max_attempts,
+    retry_policy_from_payload,
+)
 
-SCHEMA_VERSION_COMPILED_WORK_PLAN: Final = "compiled_work_plan.v4"
-COMPILER_VERSION: Final = "design_doc_compiler.v3"
+SCHEMA_VERSION_COMPILED_WORK_PLAN: Final = "compiled_work_plan.v5"
+COMPILER_VERSION: Final = "design_doc_compiler.v4"
 LEGACY_SCHEMA_VERSION_COMPILED_WORK_PLAN: Final = "compiled_work_plan.v3"
+_LEGACY_RETRY_POLICY_SCHEMA_VERSIONS: Final = frozenset(
+    {LEGACY_SCHEMA_VERSION_COMPILED_WORK_PLAN, "compiled_work_plan.v4"}
+)
 
 
 def canonical_json(payload: Any) -> str:
@@ -196,15 +205,19 @@ class FailurePolicy:
     """What a failure of this milestone means for the phase and the WorkUnit."""
 
     default_class: FailureClass
-    max_attempts: int
+    retry_policy: RetryPolicy
     blocks_phase: bool
 
-    def to_payload(self) -> dict[str, Any]:
-        return {
+    def to_payload(self, *, legacy_retry_policy: bool = False) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "default_class": self.default_class.value,
-            "max_attempts": self.max_attempts,
             "blocks_phase": self.blocks_phase,
         }
+        if legacy_retry_policy:
+            payload["max_attempts"] = legacy_max_attempts(self.retry_policy)
+        else:
+            payload["retry_policy"] = self.retry_policy.to_payload()
+        return payload
 
 
 @dataclass(frozen=True)
@@ -225,7 +238,7 @@ class CompiledMilestone:
     timeout_seconds: int
     phase_inferred: bool
 
-    def to_payload(self) -> dict[str, Any]:
+    def to_payload(self, *, legacy_retry_policy: bool = False) -> dict[str, Any]:
         return {
             "stable_key": self.stable_key,
             "title": self.title,
@@ -238,14 +251,19 @@ class CompiledMilestone:
             "executor_kind": self.executor_kind.value,
             "tool_policy": self.tool_policy.to_payload(),
             "approval_policy": self.approval_policy.to_payload(),
-            "failure_policy": self.failure_policy.to_payload(),
+            "failure_policy": self.failure_policy.to_payload(
+                legacy_retry_policy=legacy_retry_policy
+            ),
             "source_provenance": self.source_provenance.to_payload(),
             "timeout_seconds": self.timeout_seconds,
             "phase_inferred": self.phase_inferred,
         }
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> CompiledMilestone:
+    def from_payload(
+        cls, payload: dict[str, Any], *, legacy_retry_policy: bool = False
+    ) -> CompiledMilestone:
+        failure_policy = payload["failure_policy"]
         return cls(
             stable_key=str(payload["stable_key"]),
             title=str(payload["title"]),
@@ -264,9 +282,13 @@ class CompiledMilestone:
                 prompt=str(payload["approval_policy"]["prompt"]),
             ),
             failure_policy=FailurePolicy(
-                default_class=FailureClass(str(payload["failure_policy"]["default_class"])),
-                max_attempts=int(payload["failure_policy"]["max_attempts"]),
-                blocks_phase=bool(payload["failure_policy"]["blocks_phase"]),
+                default_class=FailureClass(str(failure_policy["default_class"])),
+                retry_policy=(
+                    retry_policy_from_legacy_max_attempts(int(failure_policy["max_attempts"]))
+                    if legacy_retry_policy
+                    else retry_policy_from_payload(failure_policy["retry_policy"])
+                ),
+                blocks_phase=bool(failure_policy["blocks_phase"]),
             ),
             source_provenance=SourceProvenance(
                 design_doc_id=str(payload["source_provenance"]["design_doc_id"]),
@@ -538,7 +560,12 @@ class CompiledWorkPlan:
             "target_project_id": self.target_project_id,
             "source": self.source.to_payload(),
             "lifecycle": self.lifecycle.to_payload(),
-            "milestones": [milestone.to_payload() for milestone in self.ordered_milestones()],
+            "milestones": [
+                milestone.to_payload(
+                    legacy_retry_policy=self.schema_version in _LEGACY_RETRY_POLICY_SCHEMA_VERSIONS
+                )
+                for milestone in self.ordered_milestones()
+            ],
             "dependency_edges": [edge.to_payload() for edge in self.ordered_dependency_edges()],
             "document_context": self.document_context.to_payload(),
             "authority_policy": self.authority_policy.to_payload(),
@@ -602,8 +629,9 @@ class CompiledWorkPlan:
         a payload a step loaded.
         """
 
+        schema_version = str(payload["schema_version"])
         plan = cls(
-            schema_version=str(payload["schema_version"]),
+            schema_version=schema_version,
             compiler_version=str(payload["compiler_version"]),
             work_unit_identity=str(payload["work_unit_identity"]),
             target_project_id=str(payload["target_project_id"]),
@@ -620,7 +648,11 @@ class CompiledWorkPlan:
                 ),
             ),
             milestones=tuple(
-                CompiledMilestone.from_payload(item) for item in payload["milestones"]
+                CompiledMilestone.from_payload(
+                    item,
+                    legacy_retry_policy=schema_version in _LEGACY_RETRY_POLICY_SCHEMA_VERSIONS,
+                )
+                for item in payload["milestones"]
             ),
             dependency_edges=tuple(
                 DependencyEdge(

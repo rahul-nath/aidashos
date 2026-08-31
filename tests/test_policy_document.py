@@ -40,7 +40,9 @@ from local_first_agent_os.policy_document import (
     policy_document_content_hash,
     policy_document_path,
 )
-from local_first_agent_os.staffing import Tier, load_bench
+from local_first_agent_os.settings import get_settings
+from local_first_agent_os.staffing import load_bench
+from local_first_agent_os.vocabulary import DispatchTier
 from local_first_agent_os.work_units.permissions import (
     PermissionAction,
     capabilities_for_actions,
@@ -284,8 +286,9 @@ def test_the_shipped_document_keeps_a_reviewer_read_only() -> None:
     """
 
     policy = load_policy_document()
-    reviewer = load_bench(_REPO_ROOT / "configs" / "staffing.toml")[Tier.STAFF].harness.value
-    principal = policy_principal(reviewer, Tier.STAFF.value, policy)
+    staffing_bench = load_bench(_REPO_ROOT / "configs" / "staffing.toml")
+    reviewer = staffing_bench[DispatchTier.STAFF].harness.value
+    principal = policy_principal(reviewer, DispatchTier.STAFF.value, policy)
 
     assert not policy.permits(principal, Capability.WRITE_REPOSITORY)
     assert not policy.permits(principal, Capability.RUN_COMMAND)
@@ -438,11 +441,11 @@ def test_the_written_policy_follows_the_bench_seating() -> None:
     """
 
     bench = load_bench(_REPO_ROOT / "configs" / "staffing.toml")
-    implementer = bench[Tier.SENIOR].harness.value
-    reviewer = bench[Tier.STAFF].harness.value
+    implementer = bench[DispatchTier.SENIOR].harness.value
+    reviewer = bench[DispatchTier.STAFF].harness.value
     policy = load_policy_document()
-    implements = policy_principal(implementer, Tier.SENIOR.value, policy)
-    reviews = policy_principal(reviewer, Tier.STAFF.value, policy)
+    implements = policy_principal(implementer, DispatchTier.SENIOR.value, policy)
+    reviews = policy_principal(reviewer, DispatchTier.STAFF.value, policy)
 
     assert policy.permits(implements, Capability.WRITE_REPOSITORY), (
         f"the implementer resolves to principal {implements!r} and POLICIES.md does "
@@ -470,12 +473,89 @@ def test_one_vendor_holding_both_seats_is_still_two_principals() -> None:
 
     policy = load_policy_document()
 
-    implements = policy_principal("claude", Tier.SENIOR.value, policy)
-    reviews = policy_principal("claude", Tier.STAFF.value, policy)
+    implements = policy_principal("claude", DispatchTier.SENIOR.value, policy)
+    reviews = policy_principal("claude", DispatchTier.STAFF.value, policy)
 
-    assert (implements, reviews) == (Tier.SENIOR.value, Tier.STAFF.value)
+    assert (implements, reviews) == (DispatchTier.SENIOR.value, DispatchTier.STAFF.value)
     assert policy.permits(implements, Capability.WRITE_REPOSITORY)
     assert not policy.permits(reviews, Capability.WRITE_REPOSITORY)
+
+
+def _pin_cross_vendor_seating(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The static file the gate reads, pinned to the cross-vendor pairing.
+
+    The 2026-08-29 premise: a fallback seating has claude implementing while
+    the file on disk still declares claude as the reviewer. Written here rather
+    than read from the repo config so the premise holds whatever pairing an
+    operator has seated today.
+    """
+
+    configs = tmp_path / "configs"
+    configs.mkdir(exist_ok=True)
+    (configs / "staffing.toml").write_text(
+        'seated_pairing = "cross-vendor"\n'
+        "\n"
+        "[pairings.cross-vendor.senior]\n"
+        'harness = "codex"\n'
+        'model = "gpt-test"\n'
+        "capacity = 2\n"
+        "\n"
+        "[pairings.cross-vendor.staff]\n"
+        'harness = "claude"\n'
+        'model = "claude-test"\n'
+        "capacity = 1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("LOCAL_AGENT_CONFIG_DIR", str(configs))
+    get_settings.cache_clear()
+
+
+def test_an_outage_seated_implementer_resolves_to_the_senior_section(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The 2026-08-29 denial, reproduced and then resolved by the declared seat.
+
+    A codex quota outage seated claude as the implementer while the static
+    staffing file still declared the cross-vendor pairing. The dispatch path
+    sent only the role, `implementer`, which names no section, so resolution
+    fell to the bench - and the bench answered with claude's static seat,
+    `staff`, denying `run_command` to a live implementation milestone (work
+    unit e5d41f8805f4f955d7b1e832cc7fd4ee). The compiled plan knew the seat all
+    along; the dispatch path now declares it, and the seat outranks the bench.
+    """
+
+    _pin_cross_vendor_seating(monkeypatch, tmp_path)
+    policy = load_policy_document()
+
+    seat_blind = policy_principal("claude", "implementer", policy)
+    seated = policy_principal("claude", "implementer", policy, seat=DispatchTier.SENIOR)
+
+    # The trap, still real for a caller that has no compiled plan in scope.
+    assert seat_blind == DispatchTier.STAFF.value
+    assert not policy.permits(seat_blind, Capability.RUN_COMMAND)
+    # The seat the plan bound to the task outranks the bench's guess.
+    assert seated == DispatchTier.SENIOR.value
+    assert policy.permits(seated, Capability.RUN_COMMAND)
+    assert policy.permits(seated, Capability.WRITE_REPOSITORY)
+
+
+def test_a_role_with_its_own_section_outranks_the_declared_seat() -> None:
+    """A cast stance keeps its section on whatever seat it is staffed.
+
+    `pow_wow/cast.py` promises that a member named `marketing` is governed by
+    `## Principal: marketing` when that section exists. The declared seat slots
+    in after that promise, so handing the gate a seat cannot re-file a stance
+    under the tier that happens to run it.
+    """
+
+    policy = _document(
+        "## Principal: marketing\nNever: run_command\n\n## Principal: senior\nMay: run_command\n"
+    )
+
+    principal = policy_principal("claude", "marketing", policy, seat=DispatchTier.SENIOR)
+
+    assert principal == "marketing"
+    assert not policy.permits(principal, Capability.RUN_COMMAND)
 
 
 def test_a_vendor_named_section_still_wins_when_an_operator_writes_one() -> None:

@@ -1,6 +1,6 @@
 # Acceptance design doc
 
-Target project: local_first_agent_os
+Target project: local-first-agent-os
 
 ## Requirements
 

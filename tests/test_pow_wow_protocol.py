@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.pow_wow.protocol import (
     ReviewDisposition,
     ReviewFindingSeverity,
@@ -112,7 +113,7 @@ def test_legacy_task_purpose_is_parsed_at_the_boundary() -> None:
             task_name="staff_review",
             role="agent",
             judgment_name=None,
-            dispatch_kind="advisory",
+            dispatch_kind=DispatchKind.ADVISORY,
         )
         is TaskPurpose.REVIEW
     )
@@ -121,7 +122,7 @@ def test_legacy_task_purpose_is_parsed_at_the_boundary() -> None:
             task_name="build",
             role="agent",
             judgment_name=None,
-            dispatch_kind="code",
+            dispatch_kind=DispatchKind.CODE,
         )
         is TaskPurpose.IMPLEMENTATION
     )

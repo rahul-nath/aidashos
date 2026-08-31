@@ -20,6 +20,7 @@ from work_unit_support import (
 )
 
 from local_first_agent_os.contracts import DispatchIntentStatus
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.coordination.dispatch import (
     claim_next_dispatch_intent,
     submit_dispatch_intent,
@@ -79,6 +80,20 @@ def test_the_view_carries_everything_the_cockpit_must_show(work_unit_ledger: Pat
     for artifact in view.artifacts:
         if artifact.milestone_execution_id is not None:
             assert artifact.milestone_execution_id in executions
+
+
+def test_the_view_reads_the_newest_bounded_event_slice(work_unit_ledger: Path) -> None:
+    install_simulated_engine()
+    work_unit_id = run_acceptance_work_unit()
+    complete_trace = repo.list_work_unit_events(work_unit_id, limit=1000)
+
+    recent = repo.list_recent_work_unit_events(work_unit_id, limit=3)
+    view = build_work_unit_view(work_unit_id, recent_event_limit=3)
+
+    assert recent == complete_trace[-3:]
+    assert [item.sequence_number for item in view.recent_events] == [
+        item.sequence_number for item in complete_trace[-3:]
+    ]
 
 
 def test_the_view_lists_milestones_in_lifecycle_order_not_alphabetical_order(
@@ -294,7 +309,7 @@ def test_the_view_distinguishes_a_parked_dispatch_from_a_claimed_one(
             attempt=1,
             dispatch_intent_id=submitted["intent_id"],
             tier="senior",
-            kind="code",
+            kind=DispatchKind.CODE,
         ),
     )
 

@@ -15,8 +15,8 @@ from ..constants import (
     FRONTIER_FALLBACK_RUN_ARTIFACT_TYPE,
     REPO_AUDIT_ARTIFACT_TYPE,
 )
-from ..coordination.contracts import AcknowledgementResult, SubmitArtifact
-from ..staffing import Tier
+from ..coordination.contracts import AcknowledgementResult, DispatchKind, SubmitArtifact
+from ..vocabulary import DispatchTier
 from .protocol import PlanningPhase, TaskPurpose
 from .repo_audit import (
     REPO_AUDIT_SCHEMA_VERSION,
@@ -41,11 +41,11 @@ class PlanningContractError(ValueError):
 
 _REQUIRED_PHASES = frozenset(PlanningPhase)
 _PHASE_TIER = {
-    PlanningPhase.SENIOR_INDEPENDENT_READING: Tier.SENIOR,
-    PlanningPhase.JUNIOR_VERIFICATION_PLAN: Tier.JUNIOR,
-    PlanningPhase.SENIOR_OWNED_PLAN: Tier.SENIOR,
-    PlanningPhase.STAFF_INDEPENDENT_READING: Tier.STAFF,
-    PlanningPhase.STAFF_FINAL_REVIEW: Tier.STAFF,
+    PlanningPhase.SENIOR_INDEPENDENT_READING: DispatchTier.SENIOR,
+    PlanningPhase.JUNIOR_VERIFICATION_PLAN: DispatchTier.JUNIOR,
+    PlanningPhase.SENIOR_OWNED_PLAN: DispatchTier.SENIOR,
+    PlanningPhase.STAFF_INDEPENDENT_READING: DispatchTier.STAFF,
+    PlanningPhase.STAFF_FINAL_REVIEW: DispatchTier.STAFF,
 }
 _ARTIFACT_TYPE = {
     PlanningPhase.SENIOR_INDEPENDENT_READING: "senior_independent_reading",
@@ -70,13 +70,13 @@ AUDIT_PRODUCER_PHASES = frozenset(
     }
 )
 _AUDIT_CONSUMER_TIER = {
-    PlanningPhase.SENIOR_INDEPENDENT_READING: Tier.SENIOR,
-    PlanningPhase.SENIOR_OWNED_PLAN: Tier.SENIOR,
-    PlanningPhase.STAFF_INDEPENDENT_READING: Tier.STAFF,
+    PlanningPhase.SENIOR_INDEPENDENT_READING: DispatchTier.SENIOR,
+    PlanningPhase.SENIOR_OWNED_PLAN: DispatchTier.SENIOR,
+    PlanningPhase.STAFF_INDEPENDENT_READING: DispatchTier.STAFF,
 }
 
 
-def audit_consumer_tier(phase: PlanningPhase | None) -> Tier | None:
+def audit_consumer_tier(phase: PlanningPhase | None) -> DispatchTier | None:
     """The producing tier whose latest audit this phase may receive, if any."""
 
     if phase is None:
@@ -133,13 +133,22 @@ def validate_planning_visibility_contract(
     if staff_read.blocked_by:
         raise PlanningContractError("staff independent reading cannot consume dependency output")
     for task in (senior_read, junior, staff_read):
-        if task.dispatch_kind != "advisory" or task.purpose is not TaskPurpose.ADVISORY:
+        if (
+            task.dispatch_kind is not DispatchKind.ADVISORY
+            or task.purpose is not TaskPurpose.ADVISORY
+        ):
             phase = task.planning_phase
             assert phase is not None
             raise PlanningContractError(f"{phase.value} must be an advisory task")
-    if senior_plan.dispatch_kind != "code" or senior_plan.purpose is not TaskPurpose.IMPLEMENTATION:
+    if (
+        senior_plan.dispatch_kind is not DispatchKind.CODE
+        or senior_plan.purpose is not TaskPurpose.IMPLEMENTATION
+    ):
         raise PlanningContractError("senior-owned plan must be the code implementation task")
-    if staff_review.dispatch_kind != "code" or staff_review.purpose is not TaskPurpose.REVIEW:
+    if (
+        staff_review.dispatch_kind is not DispatchKind.CODE
+        or staff_review.purpose is not TaskPurpose.REVIEW
+    ):
         raise PlanningContractError("staff final review must be a code review task")
     if not senior_plan.worktree_group or staff_review.worktree_group != senior_plan.worktree_group:
         raise PlanningContractError(
@@ -325,11 +334,19 @@ def _extract_planning_model_output(result: PowWowTaskResult) -> str:
         content: Mapping[str, object] = artifact.content
         if artifact.artifact_type == DELEGATED_TASK_RUN_ARTIFACT_TYPE:
             output = content.get("output")
-        elif artifact.artifact_type in {
-            CLI_AGENT_RUN_ARTIFACT_TYPE,
-            FRONTIER_FALLBACK_RUN_ARTIFACT_TYPE,
-        }:
+        elif artifact.artifact_type == CLI_AGENT_RUN_ARTIFACT_TYPE:
             output = content.get("verdict") or content.get("output")
+        elif artifact.artifact_type == FRONTIER_FALLBACK_RUN_ARTIFACT_TYPE:
+            # The fallback wrapper spells its text `fallback_output`, not
+            # `output`. Reading only the primary-run keys here meant a
+            # planning task rescued by cross-provider failover always raised
+            # `completed without model output to persist`, discarding the
+            # fallback's whole run (observed live: work unit c88ff4167c66,
+            # milestone 1, 2026-08-30 - codex hit USAGE_LIMIT, claude ran 16
+            # minutes, and this function returned an empty string).
+            output = (
+                content.get("verdict") or content.get("fallback_output") or content.get("output")
+            )
         else:
             continue
         if output is not None:

@@ -230,6 +230,15 @@ class MilestoneExecutionRow:
 
 
 @dataclass(frozen=True)
+class MilestoneFailureAttempt:
+    """One durable failed execution, separate from the milestone summary row."""
+
+    stable_key: str
+    execution_ordinal: int
+    failure_class: FailureClass | None
+
+
+@dataclass(frozen=True)
 class WorkUnitEventRow:
     event_id: str
     work_unit_id: str
@@ -1584,6 +1593,51 @@ def list_milestone_executions(work_unit_id: str) -> tuple[MilestoneExecutionRow,
     )
 
 
+def list_milestone_failure_attempts(work_unit_id: str) -> tuple[MilestoneFailureAttempt, ...]:
+    """Read the immutable failure facts used for retry-budget accounting."""
+
+    with tx() as c:
+        _load_work_unit(c, work_unit_id)
+        rows = c.execute(
+            """
+            SELECT e.*, c.stable_key
+            FROM work_unit_events e
+            JOIN milestone_executions m
+              ON m.milestone_execution_id = e.milestone_execution_id
+            JOIN compiled_milestones c
+              ON c.milestone_id = m.milestone_id
+            WHERE e.work_unit_id=? AND e.event_type IN (?, ?)
+            ORDER BY e.sequence_number
+            """,
+            (
+                work_unit_id,
+                WorkUnitEventType.MILESTONE_BLOCKED.value,
+                WorkUnitEventType.MILESTONE_FAILED.value,
+            ),
+        ).fetchall()
+    attempts: dict[tuple[str, int], MilestoneFailureAttempt] = {}
+    for row in rows:
+        data = rowdict(row)
+        payload = _json_object(data["payload_json"])
+        stable_key = str(data["stable_key"])
+        execution_ordinal = int(payload["attempt"])
+        raw_class = payload.get("failure_class")
+        attempt = MilestoneFailureAttempt(
+            stable_key=stable_key,
+            execution_ordinal=execution_ordinal,
+            failure_class=FailureClass(str(raw_class)) if raw_class else None,
+        )
+        key = (stable_key, execution_ordinal)
+        previous = attempts.get(key)
+        if previous is not None and previous.failure_class != attempt.failure_class:
+            raise WorkUnitError(
+                f"milestone {stable_key!r} execution {execution_ordinal} has conflicting "
+                "failure classes"
+            )
+        attempts[key] = attempt
+    return tuple(attempts.values())
+
+
 def list_work_unit_events(
     work_unit_id: str,
     *,
@@ -1606,6 +1660,29 @@ def list_work_unit_events(
             (work_unit_id, after_sequence, limit),
         ).fetchall()
     return tuple(_event(row) for row in rows)
+
+
+def list_recent_work_unit_events(
+    work_unit_id: str,
+    *,
+    limit: int = 25,
+) -> tuple[WorkUnitEventRow, ...]:
+    """The newest bounded slice of a WorkUnit trace, returned chronologically.
+
+    Reading an ascending prefix and then slicing its tail stops advancing once a
+    WorkUnit has more events than that prefix.  Select from the newest edge and
+    reverse in memory so the cockpit remains bounded without lying about what is
+    recent.
+    """
+
+    with tx() as c:
+        _load_work_unit(c, work_unit_id)
+        rows = c.execute(
+            "SELECT * FROM work_unit_events WHERE work_unit_id=? "
+            "ORDER BY sequence_number DESC LIMIT ?",
+            (work_unit_id, limit),
+        ).fetchall()
+    return tuple(_event(row) for row in reversed(rows))
 
 
 def list_work_unit_artifacts(work_unit_id: str) -> tuple[ArtifactRow, ...]:
@@ -1783,6 +1860,21 @@ def list_pending_enqueues(limit: int = 20) -> tuple[EnqueueOutboxRow, ...]:
     )
 
 
+def has_pending_enqueue(work_unit_id: str) -> bool:
+    """Whether a PENDING delivery already exists for this WorkUnit.
+
+    The auto-resume sweep asks this before considering a unit at all, so a
+    delivery the drainer has not reached yet is not re-reported on every pass.
+    """
+
+    with tx() as c:
+        row = c.execute(
+            "SELECT 1 FROM work_unit_enqueue_outbox WHERE work_unit_id=? AND status='PENDING'",
+            (work_unit_id,),
+        ).fetchone()
+    return row is not None
+
+
 def enqueue_resume(work_unit_id: str) -> bool:
     """Ensure a pending RESUME delivery exists for this WorkUnit.
 
@@ -1900,6 +1992,7 @@ __all__ = [
     "WorkUnitRow",
     "compiled_milestone_for",
     "enqueue_resume",
+    "has_pending_enqueue",
     "event_to_payload",
     "execution_epoch",
     "find_work_unit_by_legacy_saga",
@@ -1912,8 +2005,10 @@ __all__ = [
     "insert_design_doc_revision",
     "list_decision_requests",
     "list_milestone_executions",
+    "list_milestone_failure_attempts",
     "list_pending_enqueues",
     "list_work_unit_artifacts",
+    "list_recent_work_unit_events",
     "list_work_unit_events",
     "list_work_units",
     "mark_enqueue_delivered",

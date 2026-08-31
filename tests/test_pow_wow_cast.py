@@ -7,14 +7,15 @@ from __future__ import annotations
 
 import pytest
 
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.decomposition import DEFAULT_CAST, _cast_plan
 from local_first_agent_os.pow_wow.cast import CastMember, build_cast_tasks
 from local_first_agent_os.pow_wow.protocol import TaskPurpose
-from local_first_agent_os.staffing import Tier
+from local_first_agent_os.vocabulary import DispatchTier
 
 MEMBERS = (
-    CastMember(name="advocate", stance="Argue for it.", tier=Tier.JUNIOR),
-    CastMember(name="skeptic", stance="Argue against it.", tier=Tier.JUNIOR),
+    CastMember(name="advocate", stance="Argue for it.", tier=DispatchTier.JUNIOR),
+    CastMember(name="skeptic", stance="Argue against it.", tier=DispatchTier.JUNIOR),
 )
 
 
@@ -39,7 +40,7 @@ def test_the_synthesizer_blocks_on_every_member() -> None:
     assert synthesis.role == "synthesizer"
     assert set(synthesis.blocked_by) == {"t_advocate", "t_skeptic"}
     assert synthesis.judgment is not None
-    assert synthesis.judgment.tier is Tier.SENIOR
+    assert synthesis.judgment.tier is DispatchTier.SENIOR
 
 
 def test_the_member_role_is_the_name_a_policy_section_would_use() -> None:
@@ -63,7 +64,7 @@ def test_every_cast_task_is_advisory_and_carries_the_cast_dispatch_kind() -> Non
     tasks = build_cast_tasks(prefix="t", goal="Ship the thing?", members=MEMBERS)
 
     assert all(task.purpose is TaskPurpose.ADVISORY for task in tasks)
-    assert all(task.dispatch_kind == "cast" for task in tasks)
+    assert all(task.dispatch_kind is DispatchKind.CAST for task in tasks)
 
 
 def test_a_cast_of_one_is_refused() -> None:
@@ -93,19 +94,12 @@ def test_a_member_that_could_not_resolve_to_a_principal_is_refused(name: str, st
         CastMember(name=name, stance=stance)
 
 
-def test_the_default_cast_does_not_seat_every_stance_on_one_model() -> None:
-    """Same-model stances agree about their weights rather than about the question.
-
-    This is the objection that parked the homogeneous junior swarm on 2026-08-05,
-    and a default cast that ignored it would rebuild the thing that was rejected.
-    """
-
+def test_the_default_cast_has_distinct_named_stances() -> None:
     assert len(DEFAULT_CAST) >= 3
     assert len({member.name for member in DEFAULT_CAST}) == len(DEFAULT_CAST)
 
 
-def test_the_cast_plan_is_reachable_from_a_cast_dispatch() -> None:
-    """`_cast_plan` is what the `cast` branch of the planner selects."""
+def test_cast_plan_builds_the_synthesis_dependency_graph() -> None:
 
     tasks = _cast_plan("intent7", "Should we launch in March?")
 

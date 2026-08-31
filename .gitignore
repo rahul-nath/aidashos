@@ -67,3 +67,4 @@ tests/fixtures/**/*.tiff
 .coverage
 .coverage.*
 htmlcov/
+local_first_agent_os.sqlite

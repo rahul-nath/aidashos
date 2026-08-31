@@ -51,6 +51,7 @@ from pytest_bdd import given, parsers, scenarios, then, when
 from work_unit_support import compile_acceptance_doc
 
 from local_first_agent_os.contracts import DispatchIntentStatus
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units import service
 from local_first_agent_os.work_units.crash_recovery_loop import CrashReconciler
@@ -65,6 +66,7 @@ from local_first_agent_os.work_units.execution import (
     DispatchSettled,
 )
 from local_first_agent_os.work_units.execution_recovery import execution_workflow_id
+from local_first_agent_os.work_units.executors import _BOUNDED_RETRY
 from local_first_agent_os.work_units.lifecycle import (
     FailureClass,
     LifecyclePhase,
@@ -130,7 +132,12 @@ def _golden_path_config_dir(root: Path, target: Path) -> Path:
 
     config_dir = root / "configs"
     config_dir.mkdir(parents=True, exist_ok=True)
-    for name in ("pi_prompts.toml", "model_registry.toml", "workspace_policies.toml"):
+    for name in (
+        "pi_prompts.toml",
+        "model_quality.toml",
+        "model_registry.toml",
+        "workspace_policies.toml",
+    ):
         source = REPO_ROOT / "configs" / name
         if source.exists():
             shutil.copy(source, config_dir / name)
@@ -179,14 +186,14 @@ capacity = 4
     (config_dir / "linked_projects.toml").write_text(
         f"""
 [center]
-id = "local_first_agent_os"
+id = "local-first-agent-os"
 description = "golden path center"
-control_plane_project = "target"
-default_saga_project = "target"
-default_memory_project = "target"
+control_plane_project = "local-first-agent-os"
+default_saga_project = "local-first-agent-os"
+default_memory_project = "local-first-agent-os"
 
 [[projects]]
-id = "target"
+id = "local-first-agent-os"
 kind = "test_repo"
 path = {json.dumps(str(target))}
 status = "active"
@@ -195,7 +202,9 @@ description = "golden path target"
 primary_interfaces = ["pytest"]
 owns = ["tests"]
 avoid = []
-verification_commands = []
+# A writable project must certify code with at least one verification command;
+# the project center refuses the empty list on a writable target.
+verification_commands = ["python3 -c 'raise SystemExit(0)'"]
 """.strip()
         + "\n",
         encoding="utf-8",
@@ -345,6 +354,23 @@ def test_the_golden_path_runs_through_the_resident_loops(tmp_path: Path) -> None
 
     target = tmp_path / "target"
     target.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=target, check=True)
+    (target / "README.md").write_text("# golden path target\n", encoding="utf-8")
+    subprocess.run(("git", "add", "README.md"), cwd=target, check=True)
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=Golden Path",
+            "-c",
+            "user.email=golden-path@example.invalid",
+            "commit",
+            "-qm",
+            "initial target",
+        ),
+        cwd=target,
+        check=True,
+    )
     config_dir = _golden_path_config_dir(tmp_path, target)
 
     with _disposable_databases() as (coordination_url, dbos_url):
@@ -422,6 +448,7 @@ def test_the_golden_path_runs_through_the_resident_loops(tmp_path: Path) -> None
                 ),
                 timeout=180,
                 what="the plan milestone to name its dispatch intent",
+                diagnose=lambda: "\n\n".join(_drain(process) for process in processes),
             )
             # The link task 2 made durable: the summary column, not just the event.
             assert plan_milestone["dispatch_intent_id"]
@@ -639,7 +666,7 @@ def _milestone_with_lease(world: dict[str, Any], work_unit_ledger: Path) -> None
             attempt=1,
             dispatch_intent_id=intent_id,
             tier="junior",
-            kind="advisory",
+            kind=DispatchKind.ADVISORY,
         ),
     )
     lease = open_execution_lease(
@@ -729,7 +756,10 @@ def _blocked_last_attempt(world: dict[str, Any], work_unit_ledger: Path) -> None
     assert compiled.compiled_plan_revision_id is not None
     started = repo.start_work_unit(compiled.compiled_plan_revision_id, title="budget")
     work_unit_id = started.work_unit.work_unit_id
-    for attempt in (1, 2, 3):
+    # Derived from the declaration, because the scenario says "last
+    # permitted" rather than a number: a literal here silently stopped
+    # meaning "last permitted" the day the budget was raised.
+    for attempt in range(1, _BOUNDED_RETRY.max_charged_failures + 1):
         for status in (MilestoneExecutionStatus.READY, MilestoneExecutionStatus.RUNNING):
             repo.record_fact(
                 work_unit_id,
@@ -765,7 +795,7 @@ def _resumed(world: dict[str, Any]) -> None:
 def _not_ready(world: dict[str, Any]) -> None:
     milestone = _milestone(world["work_unit_id"])
     assert milestone.status is MilestoneExecutionStatus.BLOCKED
-    assert milestone.attempt == 3
+    assert milestone.attempt == _BOUNDED_RETRY.max_charged_failures
 
 
 @then("an operator override decision is waiting")
@@ -884,7 +914,7 @@ def test_a_cancelled_work_unit_reaches_the_lease_its_intent_started(
             attempt=1,
             dispatch_intent_id=intent_id,
             tier="junior",
-            kind="advisory",
+            kind=DispatchKind.ADVISORY,
         ),
     )
     open_execution_lease(

@@ -59,6 +59,7 @@ from .execution import (
     DispatchWaitResult,
     DispatchWaitTimeout,
     MilestoneAwaitingDispatch,
+    MilestoneAwaitingIntegration,
     MilestoneContext,
     MilestoneExecutorRuntime,
     MilestoneOutcome,
@@ -82,7 +83,12 @@ from .lifecycle import (
     WorkUnitStatus,
 )
 from .plan import CompiledWorkPlan, LegacyUnspecifiedDelivery
-from .retry import ATTEMPT_BUDGET_EXHAUSTED
+from .retry import (
+    ATTEMPT_BUDGET_EXHAUSTED,
+    RetryRefused,
+    count_charged_failures,
+    retry_policy_exhausted,
+)
 from .scheduling import (
     bounded_batch,
     compute_phase_work_set,
@@ -145,6 +151,33 @@ def milestone_workflow_id(root_workflow_id: str, milestone_key: str, attempt: in
     """
 
     return f"{root_workflow_id}{_WORKFLOW_ID_MILESTONE_SEGMENT}{milestone_key}:{attempt}"
+
+
+def integration_settlement_topic(dispatch_intent_id: str) -> str:
+    """The private DBOS topic for one reviewed patch's landing settlement."""
+
+    return f"integration-settlement:{dispatch_intent_id}"
+
+
+def notify_integration_settlement(child_workflow_id: str, dispatch_intent_id: str) -> bool:
+    """Wake the live milestone after its durable consumer records success."""
+
+    if not _dbos_active():
+        return False
+    assert DBOS is not None
+    try:
+        DBOS.send(
+            child_workflow_id,
+            {"intent_id": dispatch_intent_id},
+            topic=integration_settlement_topic(dispatch_intent_id),
+        )
+    except Exception as exc:  # pragma: no cover - the row remains authoritative
+        emit(
+            "notify_integration_settlement_failed",
+            {"intent_id": dispatch_intent_id, "error": f"{type(exc).__name__}: {exc}"},
+        )
+        return False
+    return True
 
 
 # This module had no logger at all, which is how a swallowed exception managed
@@ -292,6 +325,7 @@ def read_work_unit_state_step(work_unit_id: str) -> dict[str, Any]:
 
     unit = repo.get_work_unit(work_unit_id)
     executions = repo.list_milestone_executions(work_unit_id)
+    failure_attempts = repo.list_milestone_failure_attempts(work_unit_id)
     phases = repo.phase_statuses(work_unit_id)
     artifacts = repo.list_work_unit_artifacts(work_unit_id)
     return {
@@ -300,6 +334,14 @@ def read_work_unit_state_step(work_unit_id: str) -> dict[str, Any]:
         "current_phase": unit.current_phase,
         "milestone_statuses": {item.stable_key: item.status.value for item in executions},
         "milestone_attempts": {item.stable_key: item.attempt for item in executions},
+        "milestone_charged_failures": {
+            item.stable_key: count_charged_failures(
+                failure.failure_class
+                for failure in failure_attempts
+                if failure.stable_key == item.stable_key
+            )
+            for item in executions
+        },
         "phase_statuses": {phase.value: status.value for phase, status in phases.items()},
         "artifact_types": sorted({item.artifact_type.value for item in artifacts}),
     }
@@ -525,7 +567,13 @@ def _milestone_context(
     )
 
 
-def _outcome_payload(outcome: MilestoneOutcome) -> dict[str, Any]:
+def _outcome_payload(outcome: MilestoneOutcome | MilestoneAwaitingIntegration) -> dict[str, Any]:
+    if isinstance(outcome, MilestoneAwaitingIntegration):
+        return {
+            "state": "awaiting_integration",
+            "dispatch_intent_id": outcome.dispatch_intent_id,
+            "timeout_seconds": outcome.timeout_seconds,
+        }
     if isinstance(outcome, MilestoneSucceeded):
         return {
             "state": "settled",
@@ -644,6 +692,18 @@ def settle_milestone_executor_step(
         timeout_seconds=timeout_seconds,
     )
     return _outcome_payload(runtime.settle(context, awaiting))
+
+
+@dbos_step()
+def read_milestone_status_step(work_unit_id: str, milestone_key: str) -> str:
+    """Read the milestone projection after an integration-settlement wake."""
+
+    milestone = next(
+        item
+        for item in repo.list_milestone_executions(work_unit_id)
+        if item.stable_key == milestone_key
+    )
+    return milestone.status.value
 
 
 # --------------------------------------------------------------------------- #
@@ -935,6 +995,9 @@ class WorkUnitEngine:
                 for key, value in dict(state["milestone_statuses"]).items()
             }
             attempts = {key: int(value) for key, value in dict(state["milestone_attempts"]).items()}
+            charged_failures = {
+                key: int(value) for key, value in dict(state["milestone_charged_failures"]).items()
+            }
             work_set = compute_phase_work_set(plan, phase, statuses)
             for key in work_set.unreachable:
                 record_milestone_transition_step(
@@ -971,34 +1034,34 @@ class WorkUnitEngine:
                 )
                 for key in batch
             }
-            # A milestone whose next try would exceed the attempt budget its plan
-            # compiled is failed here rather than run. `max_attempts` was carried
-            # into the plan, hashed, and then consulted nowhere, so a milestone
-            # that failed repeatedly was retried until the loop's own signature
-            # check happened to stop changing - a bound by accident, unrelated to
-            # the one the document asked for.
-            # Count attempts already spent, not the one about to start: a fresh
-            # milestone has spent none and must run even where the budget is one.
-            # Only a milestone being retried after a failure has spent an attempt.
-            # A parked one has not: `review.operator` permits a single attempt, so
-            # counting its wait for a human as a spent try failed every approval
-            # gate the moment it asked for one.
+            # Execution ordinals identify runs; only durable charged failures
+            # consume the retry policy embedded in the compiled plan.
             exhausted = tuple(
                 key
                 for key in batch
                 if statuses.get(key) is MilestoneExecutionStatus.FAILED
-                and attempts.get(key, 0) >= plan.milestone(key).failure_policy.max_attempts
+                and retry_policy_exhausted(
+                    plan.milestone(key).failure_policy.retry_policy,
+                    charged_failures=charged_failures.get(key, 0),
+                )
             )
             for key in exhausted:
-                spent = plan.milestone(key).failure_policy.max_attempts
+                policy = plan.milestone(key).failure_policy.retry_policy
+                refusal = RetryRefused(
+                    milestone_key=key,
+                    phase=phase,
+                    execution_ordinal=attempts.get(key, 1),
+                    charged_failures=charged_failures.get(key, 0),
+                    retry_policy=policy,
+                )
                 record_milestone_transition_step(
                     work_unit_id,
                     phase.value,
                     key,
                     MilestoneExecutionStatus.FAILED.value,
-                    attempts.get(key, spent),
+                    attempts.get(key, 1),
                     failure_code=ATTEMPT_BUDGET_EXHAUSTED,
-                    failure_summary=(f"milestone {key} exhausted its {spent} permitted attempt(s)"),
+                    failure_summary=refusal.describe(),
                 )
             batch = tuple(key for key in batch if key not in exhausted)
             if not batch:
@@ -1156,6 +1219,33 @@ class WorkUnitEngine:
                 "notification nor a poll to wait with"
             )
         return runtime.poll_until_stopped(dispatch_intent_id, timeout_seconds)
+
+    def _await_integration_settlement(
+        self,
+        *,
+        work_unit_id: str,
+        milestone_key: str,
+        dispatch_intent_id: str,
+        timeout_seconds: float,
+    ) -> bool:
+        """Wait until the durable landing-event consumer completes the milestone."""
+
+        if (
+            read_milestone_status_step(work_unit_id, milestone_key)
+            == MilestoneExecutionStatus.SUCCEEDED.value
+        ):
+            return True
+        if not _dbos_active():
+            return False
+        assert DBOS is not None
+        DBOS.recv(
+            topic=integration_settlement_topic(dispatch_intent_id),
+            timeout_seconds=timeout_seconds,
+        )
+        return (
+            read_milestone_status_step(work_unit_id, milestone_key)
+            == MilestoneExecutionStatus.SUCCEEDED.value
+        )
 
     def _block_on_halted_dispatch(
         self,
@@ -1371,6 +1461,27 @@ class WorkUnitEngine:
                                 str(payload["dispatch_intent_id"]),
                                 float(payload["timeout_seconds"]),
                             )
+                            if payload["state"] == "awaiting_integration":
+                                integrated = self._await_integration_settlement(
+                                    work_unit_id=work_unit_id,
+                                    milestone_key=milestone_key,
+                                    dispatch_intent_id=str(payload["dispatch_intent_id"]),
+                                    timeout_seconds=float(payload["timeout_seconds"]),
+                                )
+                                if integrated:
+                                    return {"status": MilestoneExecutionStatus.SUCCEEDED.value}
+                                return self._block_on_halted_dispatch(
+                                    work_unit_id=work_unit_id,
+                                    phase=phase,
+                                    milestone_key=milestone_key,
+                                    attempt=attempt,
+                                    child_workflow_id=child_workflow_id,
+                                    failure_code="integration_wait_elapsed",
+                                    failure_summary=(
+                                        "the reviewed source patch is still MERGE_PENDING; "
+                                        "the matching Integrated row must settle it"
+                                    ),
+                                )
                         case DispatchParked():
                             return self._block_on_halted_dispatch(
                                 work_unit_id=work_unit_id,

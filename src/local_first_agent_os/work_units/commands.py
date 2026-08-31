@@ -28,6 +28,17 @@ from ..coordination.resident_loop import (
 from ..coordination.store import check_connection_budget, err, ok
 from ..harness_availability import check_harness_availability
 from ..harness_readiness import plan_tier_staffing, restaffings, staffing_refusals
+from ..operator_commands import (
+    CancelWorkUnit,
+    OperatorExecutionContext,
+    ResolveWorkUnitDecision,
+    ResumeWorkUnit,
+    WorkUnitCancelled,
+    WorkUnitDecisionExecuted,
+    WorkUnitResumed,
+    execute_operator_command,
+)
+from ..operator_identity import OperatorIdentityRefused, verify_operator_actor
 from ..settings import get_settings
 from ..staffing import load_staffing
 from . import repository as repo
@@ -234,8 +245,10 @@ def submit_work_unit_decision(
     decision: str,
     idempotency_key: str,
     decided_by: str = "operator",
+    payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     try:
+        actor = verify_operator_actor(decided_by)
         # A bare CLI or MCP process is also the sender of the durable wake.  The
         # API lifespan already launches DBOS, but this wrapper is the shared edge
         # for the short-lived surfaces and must establish the same capability
@@ -243,18 +256,25 @@ def submit_work_unit_decision(
         from ..dbos_app import launch_dbos
 
         launch_dbos()
-        return ok(
-            **service.submit_work_unit_decision(
-                work_unit_id,
-                request_id,
-                decision,
-                idempotency_key,
-                decided_by=decided_by,
+        executed = execute_operator_command(
+            ResolveWorkUnitDecision(
+                work_unit_id=work_unit_id,
+                request_id=request_id,
+                decision=decision,
+                idempotency_key=idempotency_key,
+                actor=actor,
+                payload=payload,
                 resume_refusal=_resume_gate,
-            )
+            ),
+            context=OperatorExecutionContext(settings=get_settings()),
         )
+        if not isinstance(executed, WorkUnitDecisionExecuted):
+            raise AssertionError(f"ResolveWorkUnitDecision returned {type(executed).__name__}")
+        return ok(**executed.payload)
     except repo.DecisionRequestMismatch as exc:
         return err("decision_request_mismatch", message=str(exc))
+    except OperatorIdentityRefused as exc:
+        return err(exc.code, message=str(exc), token_file=str(exc.token_file))
     except ValueError as exc:
         return err("invalid_decision", message=str(exc))
     except repo.WorkUnitError as exc:
@@ -263,7 +283,16 @@ def submit_work_unit_decision(
 
 def cancel_work_unit(work_unit_id: str, reason: str = "cancelled by operator") -> dict[str, Any]:
     try:
-        return ok(**service.cancel_work_unit(work_unit_id, reason=reason))
+        actor = verify_operator_actor("operator")
+        executed = execute_operator_command(
+            CancelWorkUnit(work_unit_id=work_unit_id, reason=reason, actor=actor),
+            context=OperatorExecutionContext(settings=get_settings()),
+        )
+        if not isinstance(executed, WorkUnitCancelled):
+            raise AssertionError(f"CancelWorkUnit returned {type(executed).__name__}")
+        return ok(**executed.payload)
+    except OperatorIdentityRefused as exc:
+        return err(exc.code, message=str(exc), token_file=str(exc.token_file))
     except repo.WorkUnitError as exc:
         return err("not_found", message=str(exc))
 
@@ -293,12 +322,20 @@ def resume_work_unit(work_unit_id: str, inline: bool = False) -> dict[str, Any]:
     if refusal is not None:
         return refusal
     try:
-        return ok(
-            **service.resume_work_unit(
-                work_unit_id,
-                delivery=EnqueueDelivery.INLINE if inline else EnqueueDelivery.DURABLE,
-            )
+        actor = verify_operator_actor("operator")
+        executed = execute_operator_command(
+            ResumeWorkUnit(
+                work_unit_id=work_unit_id,
+                delivery=(EnqueueDelivery.INLINE if inline else EnqueueDelivery.DURABLE),
+                actor=actor,
+            ),
+            context=OperatorExecutionContext(settings=get_settings()),
         )
+        if not isinstance(executed, WorkUnitResumed):
+            raise AssertionError(f"ResumeWorkUnit returned {type(executed).__name__}")
+        return ok(**executed.payload)
+    except OperatorIdentityRefused as exc:
+        return err(exc.code, message=str(exc), token_file=str(exc.token_file))
     except repo.WorkUnitError as exc:
         return err("resume_rejected", message=str(exc))
 
@@ -410,6 +447,7 @@ def run_enqueue_drainer(
     limit: int = 20,
     max_polls: int | None = None,
     inline: bool = False,
+    max_transient_resumes: int = 3,
 ) -> dict[str, Any]:
     """Run the outbox drainer until `max_polls` is reached, or forever.
 
@@ -437,6 +475,7 @@ def run_enqueue_drainer(
         drainer = EnqueueDrainer(
             limit=limit,
             delivery=EnqueueDelivery.INLINE if inline else EnqueueDelivery.DURABLE,
+            max_transient_resumes=max_transient_resumes,
         )
         delivered = drainer.run(interval_seconds=interval_seconds, max_polls=max_polls)
         return ok(delivered=delivered, polls=max_polls)
@@ -467,7 +506,10 @@ def run_crash_reconciler(
     from `execution_epoch`, which counts every halt however caused.
     """
 
+    from ..process_containment import assert_process_containment_available
     from .crash_recovery_loop import CrashReconciler
+
+    assert_process_containment_available()
 
     with hold_resident_loop(ResidentLoop.CRASH_RECONCILER) as lease:
         if isinstance(lease, ResidentLoopBusy):

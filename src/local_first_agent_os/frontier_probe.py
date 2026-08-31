@@ -1,39 +1,24 @@
 # SPDX-FileCopyrightText: 2026 Rahul Nath <https://github.com/rahul-nath>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Prove, at startup, that each staffed frontier tier can answer at all.
-
-The junior tier already answers a readiness proof before the runtime finishes
-starting, and the frontier tiers did not. That asymmetry is what let a spent
-subscription stay invisible until a milestone discovered it: `first-run-check.sh
---probe-frontier-models` existed but was opt-in and manual, and the dispatch-time
-check reads *history* - ledger rows for recent usage-limit failures - so a
-provider that died longer ago than its five-hour cooldown looks available.
-
-That is not hypothetical. On 2026-08-11 the codex CLI was exhausted for six days
-while its last failure row aged out of the window, and each milestone that
-reached for it spent one of its three attempts learning what one nonce
-completion would have said at startup.
-
-This does not decide staffing and does not write to the ledger. It asks each
-staffed frontier tier one question and reports the answer, which is the cheapest
-evidence there is that the next dispatch can run.
-"""
+"""Probe each staffed frontier model without deciding staffing or writing state."""
 
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from .settings import get_settings
 from .staffing import (
     Bench,
     FrontierHarness,
-    Tier,
     classify_harness,
     load_bench,
     spawnable_models,
 )
+from .vocabulary import DispatchTier
 
 _NONCE = "Reply with exactly: ok"
 _TIMEOUT_SECONDS = 180
@@ -43,7 +28,7 @@ _TIMEOUT_SECONDS = 180
 class TierProof:
     """What one staffed frontier tier answered, and what it was asked."""
 
-    tier: Tier
+    tier: DispatchTier
     label: str
     proved: bool
     detail: str | None = None
@@ -65,6 +50,45 @@ def nonce_command(kind: FrontierHarness, model: str | None) -> list[str]:
         command += ["--model", model]
     command.append(_NONCE)
     return command
+
+
+_NEUTRAL_PROBE_DIR = Path(tempfile.gettempdir()) / "local-agent-nonce-probe"
+
+
+def probe_model(harness: FrontierHarness, model: str | None) -> tuple[bool, str | None]:
+    """Ask one model whether it can accept work. Returns ``(alive, detail)``.
+
+    The `ProbeFn` the pairing lattice walks. It answers about one model rather
+    than a whole bench because a model appears in many pairings and the walk
+    must not ask it once per pairing.
+
+    Run from an empty directory rather than from the repository. `codex exec`
+    reads `AGENTS.md` out of its working directory, which accounted for 945 of
+    the 13,660 tokens a probe from the repo root spent when this was measured on
+    2026-08-30. The remaining ~12.7k is the CLI's own system prompt and tool
+    schemas, sent on every invocation whatever the message says, so that part is
+    a floor rather than something this function can economise on. It is still
+    far cheaper than the alternative it replaces, which was benching a working
+    provider for five hours.
+    """
+
+    _NEUTRAL_PROBE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        completed = subprocess.run(
+            nonce_command(harness, model),
+            capture_output=True,
+            text=True,
+            timeout=_TIMEOUT_SECONDS,
+            cwd=_NEUTRAL_PROBE_DIR,
+        )
+    except FileNotFoundError:
+        return False, f"the {harness.value} CLI is not installed"
+    except subprocess.TimeoutExpired:
+        return False, f"no answer within {_TIMEOUT_SECONDS}s"
+    if completed.returncode == 0:
+        return True, None
+    lines = (completed.stderr.strip() or completed.stdout.strip()).splitlines()
+    return False, lines[-1] if lines else f"exit {completed.returncode}"
 
 
 def probe_bench(bench: Bench) -> tuple[TierProof, ...]:
@@ -114,13 +138,7 @@ def probe_bench(bench: Bench) -> tuple[TierProof, ...]:
 
 
 def report(proofs: tuple[TierProof, ...]) -> str:
-    """What the operator reads, including what an unproved tier will cost.
-
-    The consequence is spelled out rather than left to be inferred. "codex
-    reported a usage limit" is a fact; "a dispatch to this tier fails and spends
-    one of its milestone's attempts" is the reason to act on it before starting
-    work rather than after.
-    """
+    """Tell the operator which configured frontier models cannot accept work."""
 
     lines = [
         f"Frontier tier answered readiness proof: {proof.label}."
@@ -134,8 +152,8 @@ def report(proofs: tuple[TierProof, ...]) -> str:
     )
     if unproved:
         lines.append(
-            "         A dispatch to an unproved tier fails and spends one of its "
-            "milestone's attempts."
+            "         A dispatch to an unproved tier records a charged failure "
+            "against the milestone's retry policy."
         )
         lines.append(
             "         Restaff the seat in configs/staffing.toml, or wait out the "

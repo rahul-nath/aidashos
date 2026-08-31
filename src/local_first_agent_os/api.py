@@ -34,6 +34,9 @@ from .contracts import (
     WorkUnitDecisionRequest,
 )
 from .dbos_app import (
+    DbosLaunchFailed,
+    DbosUnavailable,
+    dbos_runtime_active,
     launch_dbos,
     run_workflow_durably,
     shutdown_dbos,
@@ -48,6 +51,19 @@ from .ingress import (
     normalize_scheduled_event,
 )
 from .observability import instrument_fastapi_app
+from .operator_commands import (
+    CancelWorkUnit,
+    IntegrationTriggered,
+    OperatorExecutionContext,
+    ResolveWorkUnitDecision,
+    ResumeWorkUnit,
+    TriggerIntegration,
+    WorkUnitCancelled,
+    WorkUnitDecisionExecuted,
+    WorkUnitResumed,
+    execute_operator_command,
+)
+from .operator_identity import OperatorIdentityRefused, verify_operator_actor
 from .project_action import ProjectActionSnapshot, build_project_action_snapshot
 from .project_activity import (
     DEFAULT_ACTIVITY_LIMIT,
@@ -59,7 +75,6 @@ from .project_activity import (
 from .project_center import ProjectCenterView, load_project_center
 from .refinery.loop import run_refinery
 from .refinery.trigger import (
-    IntegrationAccepted,
     IntegrationTriggerResult,
     plan_integration_trigger,
 )
@@ -98,6 +113,7 @@ from .work_units.projection import (
     WorkUnitView,
 )
 from .work_units.repository import DecisionRequestMismatch, WorkUnitError
+from .work_units.root_workflow import EnqueueDelivery
 from .work_units.status_legend import STATUS_LEGEND, StatusLegendView
 from .workflow import run_workflow
 from .workflow.saga_support import resolve_project_repo_root
@@ -138,7 +154,16 @@ def create_app() -> FastAPI:
         # DBOS owns recovery of DBOS workflow executions. Recovery of legacy
         # application workflow rows is an explicit operator action through
         # `local-agent resume-workflows`; it must never delay HTTP readiness.
-        launch_dbos()
+        outcome = launch_dbos()
+        if isinstance(outcome, DbosUnavailable | DbosLaunchFailed):
+            # This process delivers, resumes, and recovers through the runtime
+            # it just failed to launch; serving anyway is a refusal presenting
+            # as a success.
+            raise RuntimeError(
+                "the durable runtime (DBOS) is configured on and did not launch: "
+                f"{outcome.reason}. Refusing to serve with delivery, resume, and "
+                "recovery unavailable."
+            )
         announce_posture(settings.access_posture)
         try:
             yield
@@ -189,6 +214,9 @@ def create_app() -> FastAPI:
             "ledger": {"reachable": ledger_error is None, "error": ledger_error},
             "app": settings.app_name,
             "use_dbos": settings.use_dbos,
+            # Distinct from `use_dbos`: that is configuration, this is whether a
+            # launched runtime is live in this process right now.
+            "dbos_launched": dbos_runtime_active(),
             "use_conductor": bool(settings.dbos_conductor_key),
             "mock_models": settings.mock_models,
             # The database this process is pointed at, never the URL that
@@ -252,13 +280,26 @@ def create_app() -> FastAPI:
         approval_id: str,
         background_tasks: BackgroundTasks,
     ) -> IntegrationTriggerResult:
-        result = plan_integration_trigger(approval_id)
-        if isinstance(result, IntegrationAccepted):
-            background_tasks.add_task(
-                _drain_accepted_integration,
-                result.target_project_id,
+        try:
+            executed = execute_operator_command(
+                TriggerIntegration(
+                    approval_id=approval_id,
+                    actor=verify_operator_actor("api_operator"),
+                ),
+                context=OperatorExecutionContext(
+                    settings=settings,
+                    submit_integration=lambda target_project_id: background_tasks.add_task(
+                        _drain_accepted_integration,
+                        target_project_id,
+                    ),
+                    plan_integration=plan_integration_trigger,
+                ),
             )
-        return result
+        except OperatorIdentityRefused as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        if not isinstance(executed, IntegrationTriggered):
+            raise AssertionError(f"TriggerIntegration returned {type(executed).__name__}")
+        return executed.result
 
     @app.get("/projects/{project_id}/activity", response_model=ProjectActivityPage)
     def project_activity(
@@ -499,35 +540,64 @@ def create_app() -> FastAPI:
         req: WorkUnitDecisionRequest,
     ) -> WorkUnitDecisionResult:
         try:
-            submitted = work_units.submit_work_unit_decision(
-                work_unit_id,
-                req.request_id,
-                req.decision.value,
-                req.idempotency_key,
-                decided_by=req.decided_by,
-                payload=req.payload,
+            executed = execute_operator_command(
+                ResolveWorkUnitDecision(
+                    work_unit_id=work_unit_id,
+                    request_id=req.request_id,
+                    decision=req.decision.value,
+                    idempotency_key=req.idempotency_key,
+                    actor=verify_operator_actor(req.decided_by),
+                    payload=req.payload,
+                ),
+                context=OperatorExecutionContext(settings=settings),
             )
+            if not isinstance(executed, WorkUnitDecisionExecuted):
+                raise AssertionError(f"ResolveWorkUnitDecision returned {type(executed).__name__}")
         except DecisionRequestMismatch as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except OperatorIdentityRefused as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except WorkUnitError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return WorkUnitDecisionResult.model_validate(submitted)
+        return WorkUnitDecisionResult.model_validate(executed.payload)
 
     @app.post("/work-units/{work_unit_id}/cancel", response_model=WorkUnitCancelResult)
     def work_unit_cancel(work_unit_id: str) -> WorkUnitCancelResult:
         try:
-            cancelled = work_units.cancel_work_unit(work_unit_id)
+            executed = execute_operator_command(
+                CancelWorkUnit(
+                    work_unit_id=work_unit_id,
+                    reason="cancelled by operator",
+                    actor=verify_operator_actor("api_operator"),
+                ),
+                context=OperatorExecutionContext(settings=settings),
+            )
+            if not isinstance(executed, WorkUnitCancelled):
+                raise AssertionError(f"CancelWorkUnit returned {type(executed).__name__}")
+        except OperatorIdentityRefused as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except WorkUnitError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        return WorkUnitCancelResult.model_validate(cancelled)
+        return WorkUnitCancelResult.model_validate(executed.payload)
 
     @app.post("/work-units/{work_unit_id}/resume", response_model=WorkUnitResumeResult)
     def work_unit_resume(work_unit_id: str) -> WorkUnitResumeResult:
         try:
-            resumed = work_units.resume_work_unit(work_unit_id)
+            executed = execute_operator_command(
+                ResumeWorkUnit(
+                    work_unit_id=work_unit_id,
+                    delivery=EnqueueDelivery.DURABLE,
+                    actor=verify_operator_actor("api_operator"),
+                ),
+                context=OperatorExecutionContext(settings=settings),
+            )
+            if not isinstance(executed, WorkUnitResumed):
+                raise AssertionError(f"ResumeWorkUnit returned {type(executed).__name__}")
+        except OperatorIdentityRefused as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except WorkUnitError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return WorkUnitResumeResult.model_validate(resumed)
+        return WorkUnitResumeResult.model_validate(executed.payload)
 
     @app.get("/workflows")
     def workflows(limit: int = 50) -> dict[str, Any]:

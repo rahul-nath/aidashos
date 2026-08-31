@@ -27,7 +27,7 @@ before its inputs land is reducing nothing.
 Members should not all sit on one model. Three stances sampled from one set of
 weights share a prior, and their agreement measures the prior rather than the
 question - the objection that killed the homogeneous junior panel on 2026-08-05.
-`Tier` is per member so a cast can be staffed across genuinely different
+`DispatchTier` is per member so a cast can be staffed across genuinely different
 architectures, and `docs/live_evaluation.md` records which local models are
 currently able to hold a seat.
 """
@@ -36,7 +36,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..staffing import JudgmentRole, Tier
+from ..coordination.contracts import DispatchKind
+from ..staffing import JudgmentRole
+from ..vocabulary import DispatchTier
 from .protocol import TaskPurpose
 from .types import PowWowTaskSpec
 
@@ -56,7 +58,7 @@ class CastMember:
 
     name: str
     stance: str
-    tier: Tier = Tier.JUNIOR
+    tier: DispatchTier = DispatchTier.JUNIOR
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -75,7 +77,7 @@ def build_cast_tasks(
     prefix: str,
     goal: str,
     members: tuple[CastMember, ...],
-    synthesis_tier: Tier = Tier.SENIOR,
+    synthesis_tier: DispatchTier = DispatchTier.SENIOR,
 ) -> tuple[PowWowTaskSpec, ...]:
     """One task per stance, plus the synthesizer that reduces them.
 
@@ -111,7 +113,7 @@ def build_cast_tasks(
             ),
             purpose=TaskPurpose.ADVISORY,
             judgment=JudgmentRole(name=member.name, tier=member.tier, stance=member.stance),
-            dispatch_kind="cast",
+            dispatch_kind=DispatchKind.CAST,
         )
         for member in members
     )
@@ -135,7 +137,7 @@ def build_cast_tasks(
         ),
         purpose=TaskPurpose.ADVISORY,
         judgment=JudgmentRole(name="synthesizer", tier=synthesis_tier, stance="reducer"),
-        dispatch_kind="cast",
+        dispatch_kind=DispatchKind.CAST,
         blocked_by=tuple(task.task_name for task in member_tasks),
     )
     return (*member_tasks, synthesis)

@@ -27,6 +27,7 @@ from pydantic import AliasChoices
 from staffing_support import repo_bench
 
 import local_first_agent_os
+from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.pow_wow import (
     CliPowWowExecutor,
     FakeProcessPowWowExecutor,
@@ -43,8 +44,9 @@ from local_first_agent_os.pow_wow.process import run_captured_shell_command
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject
 from local_first_agent_os.settings import Settings
-from local_first_agent_os.staffing import Harness, JudgmentRole, Tier
+from local_first_agent_os.staffing import Harness, JudgmentRole
 from local_first_agent_os.toolchains import project_environment
+from local_first_agent_os.vocabulary import DispatchTier
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -260,7 +262,7 @@ def test_the_run_record_names_every_stripped_variable_and_no_value(
     # reads, and the fake below is bound to a seat. Production wires the same
     # `load_bench` result in through `dispatcher_runner`.
     bench = repo_bench()
-    senior_vendor = bench[Tier.SENIOR].harness
+    senior_vendor = bench[DispatchTier.SENIOR].harness
 
     result = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
@@ -276,8 +278,8 @@ def test_the_run_record_names_every_stripped_variable_and_no_value(
             PowWowTaskSpec(
                 task_name="implement_under_dispatcher_env",
                 role="implementer",
-                judgment=JudgmentRole(name="implementer", tier=Tier.SENIOR),
-                dispatch_kind="code",
+                judgment=JudgmentRole(name="implementer", tier=DispatchTier.SENIOR),
+                dispatch_kind=DispatchKind.CODE,
                 description="Create fake_agent_output.txt.",
             ),
         ),

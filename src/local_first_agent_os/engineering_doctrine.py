@@ -206,9 +206,28 @@ ENGINEERING_DOCTRINE_V2 = "\n".join(
 )
 
 
+# v3 adds the documentation boundary without changing either historical
+# contract. Reviews stamped under v2 remain classifiable as deliberately stale
+# rather than becoming same-version text drift.
+ENGINEERING_DOCTRINE_V3 = "\n".join(
+    (
+        ENGINEERING_DOCTRINE_V2,
+        "",
+        "Documentation boundary:",
+        (
+            "- Comments and docstrings must reduce code knowledge. Keep only the present "
+            "contract, invariant, ownership reason, or non-obvious assumption needed to "
+            "prove the current code correct. Put implementation history in version control; "
+            "historical narration in live documentation expands the proof surface because "
+            "readers must determine whether old claims remain true."
+        ),
+    )
+)
+
+
 CURRENT_ENGINEERING_DOCTRINE = EngineeringDoctrine(
-    schema_version="engineering_doctrine.v2",
-    text=ENGINEERING_DOCTRINE_V2,
+    schema_version="engineering_doctrine.v3",
+    text=ENGINEERING_DOCTRINE_V3,
 )
 
 
@@ -216,6 +235,7 @@ __all__ = [
     "CURRENT_ENGINEERING_DOCTRINE",
     "ENGINEERING_DOCTRINE_V1",
     "ENGINEERING_DOCTRINE_V2",
+    "ENGINEERING_DOCTRINE_V3",
     "DoctrineProvenanceCheck",
     "DoctrineProvenanceStatus",
     "EngineeringDoctrine",

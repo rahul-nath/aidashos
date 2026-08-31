@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from ..coordination.outcomes import FailureCategory
-from ..staffing import Tier, resolve_bench
+from ..staffing import resolve_bench
+from ..vocabulary import DispatchTier
 from .signals import LedgerFactKind, MonitorSignal, Severity
 
 CATALOG_SCHEMA_VERSION = "feedback_rules.v1"
@@ -100,7 +101,7 @@ class FeedbackRule:
     rule_id: str
     selector: RuleSelector
     response: FeedbackResponse
-    tier: Tier
+    tier: DispatchTier
     cooldown_seconds: float
     daily_cap: int
     prompt_template: str
@@ -215,7 +216,7 @@ def _build_rule(raw: dict[str, Any]) -> FeedbackRule:
     _require(not unknown, f"rule '{rule_id}' has unknown keys {sorted(unknown)}")
 
     response = _enum_member(FeedbackResponse, raw.get("response"), "response", rule_id)
-    tier = _enum_member(Tier, raw.get("tier"), "tier", rule_id)
+    tier = _enum_member(DispatchTier, raw.get("tier"), "tier", rule_id)
     try:
         resolve_bench(tier)
     except Exception as exc:

@@ -756,12 +756,12 @@ def _followup_commands(payload: Mapping[str, Any]) -> NextCommandSet:
     """After a verb that moved a WorkUnit, say whether it actually took effect.
 
     Re-reading is not the whole move, which is what this used to assume. A
-    `resume_work_unit` with no DBOS runtime to receive it returns `ok: true`,
-    returns the milestones to READY, and delivers nothing: `delivered` is false
-    and no outbox row is written, so nothing will ever pick the continuation up.
-    That is the single most important fact in the payload and it was being
-    dropped, leaving "re-read the WorkUnit" as the advice for a WorkUnit that had
-    not moved.
+    `resume_work_unit` with no DBOS runtime to receive it returns `ok: true`
+    with `delivered` false. When `resume_enqueued` is also true, the intent
+    survived as a pending RESUME outbox row and the resident drainer delivers
+    it; the follow-up is to watch, or to drain by hand when no drainer is
+    resident. Only a false `delivered` with no enqueued row still means the
+    WorkUnit is parked with nothing coming for it.
     """
 
     work_unit_id = str(payload.get("work_unit_id") or "")
@@ -785,6 +785,24 @@ def _followup_commands(payload: Mapping[str, Any]) -> NextCommandSet:
     if undelivered is None:
         return NextCommandSet(
             headline=f"the WorkUnit was updated: {work_unit_id}",
+            commands=tuple(commands),
+        )
+    if payload.get("resume_enqueued"):
+        # Deliberately no `--inline` here: the RESUME row is already queued,
+        # and an inline drive racing the drainer would contend for the same
+        # continuation instead of adding anything.
+        commands.insert(
+            0,
+            NextCommand(
+                command=_cmd("drain_work_unit_enqueues", "--limit", "1"),
+                intent="deliver the queued resume now, from this process",
+                status=NextCommandStatus.READY,
+                precondition="only needed while no resident drainer is running",
+            ),
+        )
+        return NextCommandSet(
+            headline=f"the resume is queued durably: {work_unit_id}",
+            detail=(f"{undelivered}. The resident enqueue drainer delivers it on its next pass."),
             commands=tuple(commands),
         )
     commands.insert(

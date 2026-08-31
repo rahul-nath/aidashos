@@ -33,7 +33,7 @@ from .constants import (
 from .daemon_stdio import detach_inherited_stdin
 from .directives import DISPATCH_ALIAS
 from .progress_events import progress_event_sink
-from .runtime_source import runtime_revision
+from .runtime_source import runtime_checkout, runtime_revision
 from .settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -213,8 +213,11 @@ def run_pi_daemon() -> None:
         render_terminal_result,
         result_payload_resolver=directive_result_payload,
         health_payload={
+            "service_name": "pi-daemon",
             "coordination_backend": runtime.settings.coordination_backend,
+            "runtime_checkout": str(runtime_checkout()),
             "runtime_revision": runtime_revision(),
+            "pid": os.getpid(),
         },
         stream_heartbeat_seconds=runtime.settings.pi_stream_heartbeat_seconds,
     )

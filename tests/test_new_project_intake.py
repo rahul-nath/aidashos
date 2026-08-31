@@ -31,7 +31,7 @@ from local_first_agent_os.pow_wow import (
     PowWowRunStatus,
     PowWowTaskResult,
 )
-from local_first_agent_os.staffing import Tier
+from local_first_agent_os.vocabulary import DispatchTier
 from local_first_agent_os.work_units.compiler import CompiledPlanOutcome, compile_design_doc
 from local_first_agent_os.work_units.design_doc import (
     SectionKind,
@@ -157,9 +157,9 @@ Agents deploy or merge without approval.
     }
     assert expected_step_fields <= set(workflow_payload["steps"][0])
     assert [task.judgment.tier for task in tasks if task.judgment] == [
-        Tier.JUNIOR,
-        Tier.SENIOR,
-        Tier.STAFF,
+        DispatchTier.JUNIOR,
+        DispatchTier.SENIOR,
+        DispatchTier.STAFF,
     ]
     assert tasks[1].blocked_by == (tasks[0].task_name,)
     assert json.loads(json.dumps(finalized.to_payload()))["schema_version"]
@@ -974,7 +974,7 @@ def test_a_model_transcript_cannot_add_sections_or_milestones_to_the_spec() -> N
     from local_first_agent_os.work_units.design_doc import parse_design_doc
 
     spec = (
-        "# Doc\n\nTarget project: local_first_agent_os\n\n"
+        "# Doc\n\nTarget project: local-first-agent-os\n\n"
         "## Permission Envelope\n\nAutonomous: read_repo_context\n"
     )
     transcript = (
@@ -1479,21 +1479,21 @@ def test_a_finalized_document_compiles_against_the_id_the_draft_declared(tmp_pat
 
     path = _sparse_draft_with_target(
         tmp_path,
-        "Target project: local_first_agent_os",
+        "Target project: local-first-agent-os",
         "Pocket Tracker",
     )
     draft = parse_sparse_gawd_draft(path)
 
     assert draft.project == "Pocket Tracker"
-    assert draft.target_project_id == "local_first_agent_os"
+    assert draft.target_project_id == "local-first-agent-os"
 
     final_markdown = build_reviewable_gawd_draft(draft).final_markdown
 
-    assert "Target project: local_first_agent_os" in final_markdown
+    assert "Target project: local-first-agent-os" in final_markdown
     assert "**Project:** Pocket Tracker" in final_markdown
 
     parsed = parse_design_doc(final_markdown, design_doc_id="finalized-intake")
-    assert parsed.declared_target_project_id == "local_first_agent_os"
+    assert parsed.declared_target_project_id == "local-first-agent-os"
 
     outcome = compile_design_doc(parsed, design_doc_revision_id="ddr-finalized-intake")
     assert isinstance(outcome, CompiledPlanOutcome)

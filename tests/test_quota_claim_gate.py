@@ -32,6 +32,7 @@ import pytest
 
 from local_first_agent_os import harness_availability as availability
 from local_first_agent_os.harness_availability import (
+    USAGE_LIMIT_COOLDOWN,
     build_quota_claim_gate,
     parse_quota_reset,
     recently_usage_limited,
@@ -42,8 +43,8 @@ from local_first_agent_os.staffing import (
     BenchSlot,
     FrontierHarness,
     Harness,
-    Tier,
 )
+from local_first_agent_os.vocabulary import DispatchTier
 
 _NY = ZoneInfo("America/New_York")
 
@@ -55,9 +56,9 @@ def _bench() -> Bench:
     """The bench as staffed on 2026-08-12: both frontier seats on claude."""
 
     return {
-        Tier.SENIOR: BenchSlot(harness=Harness.CLAUDE, model="claude-opus-5", capacity=2),
-        Tier.STAFF: BenchSlot(harness=Harness.CLAUDE, model="claude-fable-5", capacity=1),
-        Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4),
+        DispatchTier.SENIOR: BenchSlot(harness=Harness.CLAUDE, model="claude-opus-5", capacity=2),
+        DispatchTier.STAFF: BenchSlot(harness=Harness.CLAUDE, model="claude-fable-5", capacity=1),
+        DispatchTier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4),
     }
 
 
@@ -121,9 +122,16 @@ def test_a_reset_that_was_not_stated_is_not_invented(text: str) -> None:
 def test_a_stated_reset_beats_the_flat_cooldown_in_both_directions() -> None:
     """The whole point: the provider's own answer outranks the constant.
 
-    A limit hit at 13:27 that the provider says clears at 16:19 must free the
-    harness at 16:19. The flat five hours would hold it until 18:27, benching a
-    live subscription for two hours it did not owe.
+    A limit hit at 13:27 that the provider says clears at 16:19 frees the
+    harness at 16:19, whatever the constant says.
+
+    Which direction that correction runs in changed on 2026-08-30. While the
+    flat fallback was five hours it held this harness until 18:27, benching a
+    live subscription for two hours it did not owe. Now the fallback is twenty
+    minutes and the stated reset is the longer of the two, so it keeps a
+    genuinely spent harness benched past a rate limiter that would have released
+    it at 13:47. The constant is a guess in both directions; the provider's own
+    sentence is not, and that is why it wins either way.
     """
 
     hit = datetime(2026, 8, 12, 13, 27, tzinfo=_NY)
@@ -135,8 +143,9 @@ def test_a_stated_reset_beats_the_flat_cooldown_in_both_directions() -> None:
     still_spent = frozenset({FrontierHarness.CLAUDE})
     assert spent_at(datetime(2026, 8, 12, 16, 18, tzinfo=_NY)) == still_spent
     assert spent_at(datetime(2026, 8, 12, 16, 20, tzinfo=_NY)) == frozenset()
-    # The flat cooldown would still have called this spent.
-    assert hit + timedelta(hours=5) > datetime(2026, 8, 12, 16, 20, tzinfo=_NY)
+    # The flat cooldown alone would have released it long before the provider
+    # said it was free, which is the correction running the other way.
+    assert hit + USAGE_LIMIT_COOLDOWN < datetime(2026, 8, 12, 16, 18, tzinfo=_NY)
 
 
 def test_a_lease_that_states_no_reset_keeps_the_flat_cooldown() -> None:
@@ -145,7 +154,7 @@ def test_a_lease_that_states_no_reset_keeps_the_flat_cooldown() -> None:
     hit = datetime(2026, 8, 12, 13, 27, tzinfo=_NY)
     lease = _usage_limited_lease(at=hit, text="usage limit reached")
 
-    assert recently_usage_limited([lease], now=hit + timedelta(hours=1)) == frozenset(
+    assert recently_usage_limited([lease], now=hit + USAGE_LIMIT_COOLDOWN / 2) == frozenset(
         {FrontierHarness.CLAUDE}
     )
     assert recently_usage_limited([lease], now=hit + timedelta(hours=6)) == frozenset()
@@ -247,14 +256,14 @@ def _two_vendor_bench() -> Bench:
     """The bench as staffed on 2026-08-13: codex implements, claude reviews."""
 
     return {
-        Tier.SENIOR: BenchSlot(
+        DispatchTier.SENIOR: BenchSlot(
             harness=Harness.CODEX,
             model="gpt-5.6-sol",
             capacity=2,
             backup_models=(BackupModel(harness=Harness.CLAUDE, model="claude-sonnet-5"),),
         ),
-        Tier.STAFF: BenchSlot(harness=Harness.CLAUDE, model="claude-opus-5", capacity=1),
-        Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4),
+        DispatchTier.STAFF: BenchSlot(harness=Harness.CLAUDE, model="claude-opus-5", capacity=1),
+        DispatchTier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4),
     }
 
 
@@ -271,10 +280,10 @@ def test_a_spent_senior_keeps_a_model_the_reviewer_is_not_using() -> None:
 
     effective = effective_bench(_spent_codex_plan(_two_vendor_bench()))
 
-    assert effective[Tier.SENIOR].harness is Harness.CLAUDE
-    assert effective[Tier.SENIOR].model == "claude-sonnet-5"
-    assert effective[Tier.STAFF].model == "claude-opus-5"
-    assert effective[Tier.SENIOR].model != effective[Tier.STAFF].model
+    assert effective[DispatchTier.SENIOR].harness is Harness.CLAUDE
+    assert effective[DispatchTier.SENIOR].model == "claude-sonnet-5"
+    assert effective[DispatchTier.STAFF].model == "claude-opus-5"
+    assert effective[DispatchTier.SENIOR].model != effective[DispatchTier.STAFF].model
 
 
 def test_a_bench_that_declares_no_backup_behaves_exactly_as_before() -> None:
@@ -283,10 +292,14 @@ def test_a_bench_that_declares_no_backup_behaves_exactly_as_before() -> None:
     from local_first_agent_os.harness_readiness import effective_bench
 
     bench = _two_vendor_bench()
-    bench[Tier.SENIOR] = replace(bench[Tier.SENIOR], backup_models=())
+    bench[DispatchTier.SENIOR] = replace(bench[DispatchTier.SENIOR], backup_models=())
     effective = effective_bench(_spent_codex_plan(bench))
 
-    assert effective[Tier.SENIOR].model == effective[Tier.STAFF].model == "claude-opus-5"
+    assert (
+        effective[DispatchTier.SENIOR].model
+        == effective[DispatchTier.STAFF].model
+        == "claude-opus-5"
+    )
 
 
 def test_a_backup_naming_the_reviewer_s_own_model_is_skipped() -> None:
@@ -295,8 +308,8 @@ def test_a_backup_naming_the_reviewer_s_own_model_is_skipped() -> None:
     from local_first_agent_os.harness_readiness import effective_bench
 
     bench = _two_vendor_bench()
-    bench[Tier.SENIOR] = replace(
-        bench[Tier.SENIOR],
+    bench[DispatchTier.SENIOR] = replace(
+        bench[DispatchTier.SENIOR],
         backup_models=(
             BackupModel(harness=Harness.CLAUDE, model="claude-opus-5"),
             BackupModel(harness=Harness.CLAUDE, model="claude-sonnet-5"),
@@ -304,7 +317,7 @@ def test_a_backup_naming_the_reviewer_s_own_model_is_skipped() -> None:
     )
     effective = effective_bench(_spent_codex_plan(bench))
 
-    assert effective[Tier.SENIOR].model == "claude-sonnet-5"
+    assert effective[DispatchTier.SENIOR].model == "claude-sonnet-5"
 
 
 def test_the_notice_tells_the_two_losses_apart() -> None:
@@ -323,7 +336,7 @@ def test_the_notice_tells_the_two_losses_apart() -> None:
     assert "claude-sonnet-5" in kept[0]
 
     bench = _two_vendor_bench()
-    bench[Tier.SENIOR] = replace(bench[Tier.SENIOR], backup_models=())
+    bench[DispatchTier.SENIOR] = replace(bench[DispatchTier.SENIOR], backup_models=())
     lost = collapsed_cross_checks(_spent_codex_plan(bench))
     assert len(lost) == 1
     assert "implementing and reviewing its own change" in lost[0]
@@ -348,7 +361,7 @@ def _escape_hatch_bench(*backups: BackupModel) -> Bench:
     """The 2026-08-12 seating again, with a way out declared on the senior seat."""
 
     bench = _bench()
-    bench[Tier.SENIOR] = replace(bench[Tier.SENIOR], backup_models=backups)
+    bench[DispatchTier.SENIOR] = replace(bench[DispatchTier.SENIOR], backup_models=backups)
     return bench
 
 
@@ -370,14 +383,14 @@ def test_a_backup_names_the_harness_a_bench_with_no_unspent_peer_moves_to() -> N
         )
     )
 
-    senior = next(item for item in plan if item.tier is Tier.SENIOR)
+    senior = next(item for item in plan if item.tier is DispatchTier.SENIOR)
     assert isinstance(senior, TierRestaffed)
     assert senior.slot.harness is Harness.CODEX
     assert senior.slot.model == "gpt-5.6-sol"
     assert senior.slot.reasoning_effort == "high"
     # How many of a tier may run at once is a statement about the tier, so it
     # survives a move that has no peer slot to borrow anything from.
-    assert senior.slot.capacity == _bench()[Tier.SENIOR].capacity
+    assert senior.slot.capacity == _bench()[DispatchTier.SENIOR].capacity
 
 
 def test_a_backup_on_the_spent_harness_is_not_a_way_out() -> None:
@@ -389,7 +402,7 @@ def test_a_backup_on_the_spent_harness_is_not_a_way_out() -> None:
         _escape_hatch_bench(BackupModel(harness=Harness.CLAUDE, model="claude-sonnet-5"))
     )
 
-    senior = next(item for item in plan if item.tier is Tier.SENIOR)
+    senior = next(item for item in plan if item.tier is DispatchTier.SENIOR)
     assert isinstance(senior, TierUnstaffable)
 
 
@@ -405,7 +418,7 @@ def test_a_backup_on_the_local_harness_is_not_a_way_out() -> None:
 
     plan = _spent_claude_plan(_escape_hatch_bench(BackupModel(harness=Harness.PI, model="gemma4")))
 
-    senior = next(item for item in plan if item.tier is Tier.SENIOR)
+    senior = next(item for item in plan if item.tier is DispatchTier.SENIOR)
     assert isinstance(senior, TierUnstaffable)
     assert "declares no backup on an unspent harness" in senior.detail
 
@@ -452,7 +465,7 @@ def _staffing(*, with_fallback: bool):
     return Staffing(
         pairings={seated.name: seated, codex.name: codex},
         seated=seated,
-        solo={Tier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4)},
+        solo={DispatchTier.JUNIOR: BenchSlot(harness=Harness.PI, model="gemma4", capacity=4)},
     )
 
 
