@@ -1,0 +1,292 @@
+# Model quality scores, and the one knob that trades quality against provider
+# diversity. This file is the input to the pairing lattice: every legal
+# (senior, staff) pair is scored from these rows, ordered, and walked until one
+# answers.
+#
+# ------------------------------------------------- what a row actually is
+#
+# A row is a model AT AN EFFORT LEVEL, not a model. Effort moves quality as much
+# as the model choice does, and it moves cost with it, so a chart keyed on the
+# model alone cannot express the thing this system has to decide. The operator's
+# 2026-08-30 reading of the Artificial Analysis leaderboard makes the point
+# sharply: `claude-opus-5` at low effort and `qwen3.8-27b-mtp` at xhigh both
+# score 52, and `gpt-5.6-sol` at low scores 51 - so a local 27B running hard
+# outranks two frontier models running lazily. "Opus" is not a quality level;
+# "Opus at xhigh" is.
+#
+# `vendor` rather than `harness` carries the diversity term. The harness is how
+# a model is spawned; the vendor is whose training run it came from, which is
+# what makes error modes independent. Gemma and Qwen are both `pi` locally and
+# are Google and Alibaba models, so an all-local pairing of the two is genuinely
+# cross-vendor and is scored as such.
+#
+# ---------------------------------------------------------------- provenance
+#
+# Re-derivation is MANUAL and deliberate. Nothing in the runtime fetches these:
+# a staffing decision that changed because a third party re-ranked a model
+# overnight would be an unreviewed change to which model writes this operator's
+# code. Update by hand from https://artificialanalysis.ai/leaderboards/models
+# and commit it like any other ruling.
+#
+# TWENTY of the twenty-three rows below are measured, read off the
+# leaderboard on 2026-08-30 and marked `anchor = true`.
+#
+# Exactly THREE are operator estimates: `claude-sonnet-5` at xhigh and at
+# medium, and `gemma4`, which is not on the leaderboard at all. None of the
+# three can decide the top of the lattice - the highest of them is 54, below
+# nine measured rows - so an estimate cannot choose which pairing runs. That
+# was not true earlier in the day, when the whole top band was guessed.
+#
+# `tests/test_pairing_lattice.py` asserts that every seating this operator has
+# ever declared stays legal under whatever numbers are here, so a re-derivation
+# that contradicts the history fails by name rather than landing quietly.
+#
+# The scale is the leaderboard's intelligence index. Only the order and the gaps
+# are used.
+
+[source]
+name = "Artificial Analysis intelligence index (20 of 23 rows measured); the 3 estimates all score below the decisive band"
+derived_at = "2026-08-30"
+rederive_from = "https://artificialanalysis.ai/leaderboards/models"
+
+[scoring]
+# Added when a pairing's two seats come from different vendors.
+#
+# Eight, and it does real work rather than decorate. Without it the lattice
+# ranks the best same-vendor Anthropic pair above the cross-vendor one and the
+# provider diversity this operator values is lost silently to arithmetic. At 8
+# the trade is visible: diversity wins when the quality gap it costs is small
+# and loses when the gap is large. Set it to 0 to rank on raw quality alone.
+diversity_bonus = 8
+
+# --------------------------------------------------------------------- models
+#
+# `effort` is the word this model's own harness accepts, passed through
+# verbatim: claude takes `--effort <x>`, codex takes
+# `-c model_reasoning_effort=<x>`. A local model takes none, and by the
+# operator's ruling always runs at its top setting - there is no per-token bill
+# to economise against, so anything less is quality left on the table.
+#
+# `anchor = true` means the number was read off the leaderboard. Everything else
+# is an operator estimate, and the estimates are now only for rows the operator
+# could not see: the leaderboard slice captured on 2026-08-30 was sorted
+# descending and topped out at 57, so anything scoring above that - Fable at
+# any effort, Opus above low, Sol above medium - is still a guess anchored to
+# the seating history rather than a measurement.
+
+# ---- Anthropic, via the claude harness
+#
+# Note what the top of this band says, because the staffing file used to assume
+# the opposite: Opus 5 at xhigh and at max both score 63, and Fable 5 scores 62.
+# Opus running hard is the better critic, not Fable. The 2026-08-18 seating that
+# put Fable in the critic seat over Opus at high (61) was right by one point and
+# for the wrong reason.
+[[models]]
+harness = "claude"
+vendor = "anthropic"
+model = "claude-opus-5"
+effort = "max"
+quality = 63
+anchor = true
+
+[[models]]
+harness = "claude"
+vendor = "anthropic"
+model = "claude-opus-5"
+effort = "xhigh"
+quality = 63
+anchor = true
+
+# The leaderboard lists exactly one Fable row, labelled "(with fallback)" rather
+# than by an effort level. It is recorded here against the effort this bench
+# actually spawns it at; if a future derivation separates Fable by effort, split
+# this row rather than reinterpreting it.
+[[models]]
+harness = "claude"
+vendor = "anthropic"
+model = "claude-fable-5"
+effort = "high"
+quality = 62
+anchor = true
+
+[[models]]
+harness = "claude"
+vendor = "anthropic"
+model = "claude-opus-5"
+effort = "high"
+quality = 61
+anchor = true
+
+[[models]]
+harness = "claude"
+vendor = "anthropic"
+model = "claude-opus-5"
+effort = "medium"
+quality = 59
+anchor = true
+
+[[models]]
+harness = "claude"
+vendor = "anthropic"
+model = "claude-opus-5"
+effort = "low"
+quality = 52
+anchor = true
+
+[[models]]
+harness = "claude"
+vendor = "anthropic"
+model = "claude-sonnet-5"
+effort = "max"
+quality = 55
+anchor = true
+
+[[models]]
+harness = "claude"
+vendor = "anthropic"
+model = "claude-sonnet-5"
+effort = "xhigh"
+quality = 54
+
+[[models]]
+harness = "claude"
+vendor = "anthropic"
+model = "claude-sonnet-5"
+effort = "medium"
+quality = 48
+
+# ---- OpenAI, via the codex harness. Ids enumerated from
+# ~/.codex/models_cache.json on 2026-08-30; `gpt-reserve` and
+# `codex-auto-review` are omitted deliberately, the first because it is opaque
+# and the second because it is a special-purpose approval model rather than a
+# seat candidate.
+#
+# Effort is not a monotonic dial across models: Sol at medium (56) outscores
+# Terra at xhigh (53), and Terra at max (57) ties Sol at high. That is the whole
+# argument for keying this chart on (model, effort).
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-sol"
+effort = "max"
+quality = 61
+anchor = true
+
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-sol"
+effort = "xhigh"
+quality = 59
+anchor = true
+
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-sol"
+effort = "high"
+quality = 57
+anchor = true
+
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-sol"
+effort = "medium"
+quality = 56
+anchor = true
+
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-sol"
+effort = "low"
+quality = 51
+anchor = true
+
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-terra"
+effort = "max"
+quality = 57
+anchor = true
+
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-terra"
+effort = "xhigh"
+quality = 53
+anchor = true
+
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-terra"
+effort = "medium"
+quality = 47
+anchor = true
+
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-luna"
+effort = "max"
+quality = 52
+anchor = true
+
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-5.6-luna"
+effort = "high"
+quality = 47
+anchor = true
+
+# ---- Local, via the pi harness and the llama server.
+#
+# These rows make an all-local pairing representable, which
+# docs/local_fallback_seating_gawd.md asks for and
+# tests/test_work_unit_golden_path.py already proves runs end to end with
+# `harness = "pi"` in every seat.
+#
+# The measured numbers reversed that document's proposed seating. It had gemma4
+# implementing and glimmer reviewing, because the registry calls glimmer the
+# "deliberator". Muse Glimmer at high scores 35 and Qwen3.8 27B at xhigh scores
+# 52, so glimmer is the weaker model and the seats are now the other way round.
+# The document records this as decision D6.
+[[models]]
+harness = "pi"
+vendor = "alibaba"
+model = "qwen3.8-27b-mtp"
+effort = "xhigh"
+quality = 52
+anchor = true
+
+[[models]]
+harness = "pi"
+vendor = "alibaba"
+model = "qwen3.8-27b-mtp"
+effort = "medium"
+quality = 44
+anchor = true
+
+# Meta's model, not a house one - the vendor matters because it is what makes an
+# all-local glimmer/qwen pairing count as cross-vendor.
+[[models]]
+harness = "pi"
+vendor = "meta"
+model = "glimmer"
+effort = "high"
+quality = 35
+anchor = true
+
+# The fast local path, and the weakest thing on this bench. Not on the
+# leaderboard at all, so this is a floor rather than a measurement.
+[[models]]
+harness = "pi"
+vendor = "google"
+model = "gemma4"
+effort = "high"
+quality = 30
