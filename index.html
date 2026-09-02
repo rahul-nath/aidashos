@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>aidashos - a local-first agent OS</title>
+    <meta
+      name="description"
+      content="aidashos turns a design document into governed agent work on your own machine: compiled plans, isolated worktrees, cross-vendor review, and an approval gate before anything merges. Local models via llama.cpp, frontier agents under your own subscriptions, every step in a local Postgres ledger."
+    />
+    <link rel="canonical" href="https://www.aidashos.com/" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#0b0e14" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://www.aidashos.com/" />
+    <meta property="og:title" content="aidashos - a local-first agent OS" />
+    <meta
+      property="og:description"
+      content="Durable orchestration of coding agents on your own machine. One clone command, one boot sequence, a governed pipeline with an audit trail."
+    />
+    <meta property="og:image" content="https://www.aidashos.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="aidashos - a local-first agent OS" />
+    <meta
+      name="twitter:description"
+      content="Durable orchestration of coding agents on your own machine. One clone command, one boot sequence, a governed pipeline with an audit trail."
+    />
+    <meta name="twitter:image" content="https://www.aidashos.com/og.png" />
+
+    <!--
+      Telemetry is deliberately absent by default. To count page views and the
+      custom events telemetry.ts emits (copy_clone, copy_prompt_*, click_github),
+      uncomment the Plausible snippet below after creating the site there, or set
+      VITE_TELEMETRY_ENDPOINT at build time to receive JSON beacons yourself.
+      The OS this page describes reports nothing, and the page should not
+      undercut that claim silently.
+
+      <script defer data-domain="aidashos.com" src="https://plausible.io/js/script.tagged-events.js"></script>
+    -->
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareApplication",
+        "name": "aidashos",
+        "applicationCategory": "DeveloperApplication",
+        "operatingSystem": "macOS, Linux",
+        "url": "https://www.aidashos.com/",
+        "sameAs": ["https://github.com/rahul-nath/aidashos"],
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+        "license": "https://www.gnu.org/licenses/agpl-3.0.html",
+        "description": "A local-first agent OS: durable orchestration of coding agents on your own machine, with compiled plans, isolated worktrees, cross-vendor review, approval gates, and a local Postgres ledger."
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Does it run in the cloud?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. It runs on your machine, on purpose. Postgres runs in local Docker, local models run through llama.cpp on your hardware, and the frontier agents run through their own CLIs under your existing subscriptions. There is no hosted service and nothing reports home."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What happens if I close the laptop mid-run?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Work state lives in Postgres rows, not in context windows. A crashed agent process loses only its own context window; the crash reconciler reaps its dead lease and the next dispatch resumes from what the ledger says."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can it merge or deploy on its own?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Merge, deploy, spend, and external communications all stop at ledger approval gates that only the operator resolves. Staff review approval ends at a pending CODE_MERGE request, never at a merge."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What do I need to run it?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "macOS or Linux, Git, Python 3.13 via uv, Node, Docker, and one local model you can serve. The default stack is gemma-4-E4B for the junior tier plus Qwen3.8-27B, with Claude Code and Codex under your own subscriptions for the senior and staff seats. Budget tens of GB of disk for the model weights. One local model with every tier staffed locally also works."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is there telemetry?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "The OS reports nothing to anyone. Its observability stack points at your own machine. This website counts only its own button clicks, and only when its owner enables analytics."
+            }
+          }
+        ]
+      }
+    </script>
+    <script type="module" crossorigin src="/assets/index-BhCcnoCF.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-C6jcypbi.css">
+  </head>
+  <body>
+    <div id="root"><header class="site-header"><span class="wordmark">aidash<span class="wordmark-accent">os</span></span><nav aria-label="Site"><a href="#install">Install</a><a href="#surfaces">Use it</a><a href="#how">How it works</a><a href="#faq">FAQ</a><a class="github-link" href="https://github.com/rahul-nath/aidashos" rel="noopener">GitHub</a></nav></header><main><section class="hero"><p class="kicker">A local-first agent OS</p><h1>Agents that keep working when nobody is watching the screen.</h1><p class="lede">aidashos turns a design document into governed agent work on your own machine: compiled plans, isolated worktrees, your project&#x27;s own test commands, cross-vendor review, and an approval gate before anything merges. Every step lands in a local Postgres ledger, so closing the laptop never loses the system&#x27;s state.</p><ul class="badges" aria-label="Properties"><li>Local-first</li><li>Durable</li><li>No cloud backend</li><li>Nothing reports home</li><li>AGPL-3.0</li></ul><div class="hero-actions"><a class="cta" href="https://github.com/rahul-nath/aidashos" rel="noopener">View source and install</a><a class="secondary-cta" href="#install">See the install lane</a></div><p class="release-note">Public developer preview. No signup and no hosted account. The repository is the product.</p></section><section id="install" class="install"><h2>Install: one lane, end to end</h2><figure class="terminal" aria-label="The two commands that install aidashos"><figcaption class="terminal-bar"><span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span><span class="terminal-title">the whole top of the funnel</span></figcaption><div class="terminal-body"><div class="terminal-line"><code><span class="prompt-char">$ </span>git clone https://github.com/rahul-nath/aidashos.git &amp;&amp; cd aidashos &amp;&amp; make</code><button type="button" class="copy">Copy</button></div><div class="terminal-line"><code><span class="prompt-char">$ </span>./scripts/boot/boot.sh</code><button type="button" class="copy">Copy</button></div><p class="terminal-note"><code>make</code> is the base install: uv, Python, Node, Docker, Postgres, schemas. The boot script does the rest: llama.cpp, model weights, both subscription sign-ins, stack config, and a final readiness check. Prefer an agent to do it? Use the prompts below.</p></div></figure><h3 class="prompts-heading">Or hand it to your agent</h3><p class="prompts-lede">Three prompts, in order, for any AI tool with shell access (Claude Code, Codex, or anything else). They drive the same scripts, stage by stage, and leave the sign-ins and big-download confirmations to you.</p><div class="prompt-sequence"><article class="prompt-card"><header class="prompt-head"><span class="prompt-index">1</span><div><h3>Boot the stack</h3><p class="prompt-summary">Runs the boot sequence: llama.cpp, model weights, both subscription sign-ins, stack config, verification.</p></div><button type="button" class="copy">Copy prompt</button></header><details><summary>Read the prompt</summary><pre class="prompt-text">You are working inside a fresh clone of aidashos, a local-first agent OS. Read scripts/boot/README.md and docs/onboarding/ONBOARDING.md before acting.
+
+Then complete the boot sequence:
+
+1. Run ./scripts/bootstrap.sh --check-only and report what is missing.
+2. If uv or the Python environment is not ready, run `make` and wait for it to finish.
+3. Run the boot stages one at a time from scripts/boot/, in numeric order (10-check-prereqs.sh, 20-install-llama-cpp.sh, 30-fetch-model-qwen3.sh, 31-fetch-model-gemma4.sh, 40-login-anthropic.sh, 41-login-chatgpt.sh, 50-set-default-stack.sh, 60-verify-boot.sh), rather than boot.sh, so each failure is visible and fixable.
+4. Stages 30 and 31 download model weights and are the only slow, large steps. Before each, run `./scripts/download-models.sh --list` to show me exactly which repository and file it will fetch, and wait for my confirmation.
+5. The two sign-ins are interactive browser flows. Hand control to me for them and never enter credentials yourself.
+6. If a stage fails, read its output: every blocked line prints the command that fixes it. Fix, then re-run the stage; all stages are idempotent.
+7. Finish by running ./scripts/boot/60-verify-boot.sh and show me its full output.</pre></details></article><article class="prompt-card"><header class="prompt-head"><span class="prompt-index">2</span><div><h3>Start the runtime and prove it</h3><p class="prompt-summary">Brings the resident services up, re-checks readiness, and compiles the example design document into a governed plan.</p></div><button type="button" class="copy">Copy prompt</button></header><details><summary>Read the prompt</summary><pre class="prompt-text">The aidashos boot sequence finished on this machine. Bring the system up and prove it works:
+
+1. Run ./scripts/start-agent-runtime.sh. It exits non-zero naming any service that failed to come up; report what started.
+2. Run ./scripts/first-run-check.sh and show me the report.
+3. Compile the example design document into a governed plan: uv run agent-ledger compile_design_doc docs/examples/work_unit_acceptance_design_doc.md. Show me the compiled milestones.
+4. Run uv run pi /ledger and summarize the current state.
+5. Stop there. Approving a plan and dispatching work are my decisions; tell me the exact commands (uv run pi /approve-most-recent, uv run pi /dispatch) and what each will do, then wait.</pre></details></article><article class="prompt-card"><header class="prompt-head"><span class="prompt-index">3</span><div><h3>Attach your own AI tool</h3><p class="prompt-summary">Connects Claude Code, Codex, or any MCP client to the coordination ledger, so your daily driver can operate the OS.</p></div><button type="button" class="copy">Copy prompt</button></header><details><summary>Read the prompt</summary><pre class="prompt-text">Connect my AI coding tool to the aidashos coordination ledger over MCP.
+
+1. Read skills/operate-agent-os/SKILL.md and docs/AGENT_MANUAL.md in this repo.
+2. If my tool is Claude Code: the repo ships .mcp.json, so open a session in the repo root and confirm the agent-os server&#x27;s tools are listed.
+3. If my tool is Codex: show me the [mcp_servers] block from the SKILL file, wait for my approval, then add it to ~/.codex/config.toml.
+4. For any other MCP client: the server command is `uv run agent-ledger --root &lt;repo&gt; serve`, stdio transport.
+5. Verify the connection by calling read_execution_ledger, describe_resident_loops, and list_dispatch_intents, and summarize what they say about this machine.
+6. From now on, prefer the ledger tools for reading system state, and drive workflows with the pi commands described in the SKILL file.</pre></details></article></div></section><section id="surfaces" class="surfaces"><p class="kicker">Three operator surfaces, one durable record</p><h2>Use it from the interface you already reach for</h2><div class="feature-grid"><article><p class="surface-status">Primary today</p><h3>Terminal</h3><p>Use pi for the interactive workflow and agent-ledger for compile, start, resume, decisions, and durable state inspection.</p></article><article><p class="surface-status">Available over MCP</p><h3>Your desktop agent</h3><p>Attach Claude Code, Codex, or another stdio MCP client to the same ledger. The agent can request and project work; privileged decisions stay with you.</p></article><article><p class="surface-status">Projection and gates today</p><h3>Cockpit</h3><p>Inspect WorkUnits, artifacts, approvals, and integration requests in the browser. Compile, start, drain, cancel, and resume buttons are designed but not shipped yet.</p></article></div></section><section id="how" class="lane"><h2>The lane you just copied</h2><ol class="lane-steps"><li><span class="lane-step-number">1</span><h3>Reach</h3><p>This page, one clone command, one repo. Nothing to sign up for.</p></li><li><span class="lane-step-number">2</span><h3>Base install</h3><p>make runs bootstrap: uv, Python 3.13, Node, Docker, Postgres, schemas.</p></li><li><span class="lane-step-number">3</span><h3>Boot</h3><p>scripts/boot fetches llama.cpp and the models, signs your subscriptions in, sets the default stack.</p></li><li><span class="lane-step-number">4</span><h3>Run</h3><p>start-agent-runtime brings up Postgres, the llama router, whisper, and the resident pi daemon, supervised.</p></li><li><span class="lane-step-number">5</span><h3>Drive</h3><p>pi commands from the terminal, or your own AI tool attached over MCP.</p></li></ol><p class="lane-note">The whole path is a checked-in DAG:<!-- --> <a href="https://github.com/rahul-nath/aidashos/blob/HEAD/docs/diagrams/aidashos-onboarding-dag.png" rel="noopener">docs/diagrams/aidashos-onboarding-dag.png</a>, with the boot stages numbered in topological order.</p></section><section class="features"><h2>What you get</h2><div class="feature-grid"><article><h3>A document, not a prompt</h3><p>Work starts from a design document with milestones, dependencies, and acceptance. It compiles into an immutable, hashed plan before any agent moves.</p></article><article><h3>A tiered bench</h3><p>A local junior model makes the cheap judgment calls, a frontier senior writes code in an isolated worktree, and a different vendor&#x27;s staff model reviews the diff.</p></article><article><h3>Durable by construction</h3><p>Every step writes a row to a local Postgres ledger as it happens. Close the laptop mid-run; the next dispatch resumes from what the ledger says.</p></article><article><h3>Gates it cannot cross</h3><p>Merge, deploy, spend, and external comms stop at approval requests only you resolve. Staff approval ends at a pending CODE_MERGE, never at a merge.</p></article><article><h3>Local models, your GPU</h3><p>llama.cpp serves gemma-4, Qwen3.8-27B, and optionally Muse-Glimmer-30B from your own disk. The control plane runs with the network unplugged.</p></article><article><h3>Your AI tool drives it</h3><p>The coordination ledger is an MCP server. Claude Code picks it up from the repo&#x27;s .mcp.json; Codex and any stdio client attach with one config block.</p></article></div></section><section class="stack"><h2>The default stack</h2><p>Opinionated defaults, swappable in one TOML line each. A seat names a role, not a model; <code>configs/staffing.toml</code> decides who sits where.</p><table><thead><tr><th scope="col">Seat</th><th scope="col">Default</th><th scope="col">Why</th></tr></thead><tbody><tr><th scope="row">junior</th><td>gemma-4-E4B-it, local via llama.cpp</td><td>the model the system will not run without</td></tr><tr><th scope="row">heavy local</th><td>Qwen3.8-27B UD-Q5_K_XL + MTP draft</td><td>default deliberation-class local model</td></tr><tr><th scope="row">optional</th><td>Muse-Glimmer-30B + DFlash draft</td><td>second heavyweight, fetched only on request</td></tr><tr><th scope="row">senior</th><td>Codex CLI under your ChatGPT subscription</td><td>implements, in an isolated worktree</td></tr><tr><th scope="row">staff</th><td>Claude Code under your Claude subscription</td><td>reviews, from a different vendor than senior</td></tr></tbody></table></section><section id="faq" class="faq"><h2>Questions with real answers</h2><details><summary>Does it run in the cloud?</summary><p>No. It runs on your machine, on purpose. Postgres runs in local Docker, local models run through llama.cpp on your hardware, and the frontier agents run through their own CLIs under your existing subscriptions. There is no hosted service and nothing reports home.</p></details><details><summary>What happens if I close the laptop mid-run?</summary><p>Work state lives in Postgres rows, not in context windows. A crashed agent process loses only its own context window; the crash reconciler reaps its dead lease and the next dispatch resumes from what the ledger says.</p></details><details><summary>Can it merge or deploy on its own?</summary><p>No. Merge, deploy, spend, and external communications all stop at ledger approval gates that only the operator resolves.</p></details><details><summary>What do I need to run it?</summary><p>macOS or Linux, Git, Python 3.13 via uv, Node, Docker, and one local model you can serve. Budget tens of GB of disk for the model weights; the boot check measures the exact figure from the pinned files. One local model with every tier staffed locally also works; the frontier seats are your own subscriptions.</p></details><details><summary>Is there telemetry?</summary><p>The OS reports nothing to anyone; its observability stack points at your own machine. This website counts only its own button clicks, and only when analytics are enabled.</p></details><details><summary>Is aidashos finished?</summary><p>No. This is a public developer preview. The terminal and MCP paths are primary today; the Cockpit&#x27;s complete control path and the one-command Goal front door are still being built.</p></details></section><section class="closing"><h2>Start now</h2><p>The repo is the product. Clone it, run <code>make</code>, and boot.</p><a class="cta" href="https://github.com/rahul-nath/aidashos" rel="noopener">View on GitHub</a></section></main><footer class="site-footer"><p><a href="https://github.com/rahul-nath/aidashos" rel="noopener">github.com/rahul-nath/aidashos</a> <!-- -->- AGPL-3.0 - built and operated by one engineer, in the open.</p><p class="footer-honesty">This page counts its own button clicks and nothing else. The OS it describes reports nothing, ever.</p></footer></div>
+  </body>
+</html>

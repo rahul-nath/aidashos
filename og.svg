@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="aidashos: A local-first agent OS.">
+  <defs>
+    <radialGradient id="glow" cx="0.82" cy="0.12" r="0.62">
+      <stop offset="0%" stop-color="#ff7a1a" stop-opacity="0.20" />
+      <stop offset="55%" stop-color="#ff7a1a" stop-opacity="0.05" />
+      <stop offset="100%" stop-color="#ff7a1a" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <rect width="1200" height="630" fill="#0b0e14" />
+  <rect width="1200" height="630" fill="url(#glow)" />
+
+  <text x="80" y="112" font-family="Menlo, 'SF Mono', SFMono-Regular, Consolas, monospace" font-size="42" font-weight="700" fill="#e7eaf0" letter-spacing="-0.5"
+    >aidash<tspan fill="#ff7a1a">os</tspan></text>
+
+  <text x="80" y="286" font-family="'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif" font-size="76" font-weight="700" fill="#e7eaf0" letter-spacing="-2"
+    >A local-first agent OS.</text>
+
+  <text x="80" y="346" font-family="'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif" font-size="30" fill="#9aa4b3"
+    >Governed coding agents, a durable Postgres ledger, your machine.</text>
+
+  <rect x="80" y="444" width="1040" height="110" rx="14"
+    fill="#0d1119" stroke="#202939" stroke-width="1.5" />
+  <text x="108" y="506.56" font-family="Menlo, 'SF Mono', SFMono-Regular, Consolas, monospace" font-size="21" fill="#46d17c">$</text>
+  <text x="133.2" y="506.56" font-family="Menlo, 'SF Mono', SFMono-Regular, Consolas, monospace" font-size="21" fill="#e7eaf0"
+    >git clone https://github.com/rahul-nath/aidashos.git &amp;&amp; cd aidashos &amp;&amp; make</text>
+</svg>
