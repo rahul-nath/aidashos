@@ -58,6 +58,24 @@ const FEATURES = [
   },
 ];
 
+const SURFACES = [
+  {
+    title: "Terminal",
+    status: "Primary today",
+    body: "Use pi for the interactive workflow and agent-ledger for compile, start, resume, decisions, and durable state inspection.",
+  },
+  {
+    title: "Your desktop agent",
+    status: "Available over MCP",
+    body: "Attach Claude Code, Codex, or another stdio MCP client to the same ledger. The agent can request and project work; privileged decisions stay with you.",
+  },
+  {
+    title: "Cockpit",
+    status: "Projection and gates today",
+    body: "Inspect WorkUnits, artifacts, approvals, and integration requests in the browser. Compile, start, drain, cancel, and resume buttons are designed but not shipped yet.",
+  },
+];
+
 const STACK = [
   ["junior", "gemma-4-E4B-it, local via llama.cpp", "the model the system will not run without"],
   ["heavy local", "Qwen3.8-27B UD-Q5_K_XL + MTP draft", "default deliberation-class local model"],
@@ -87,6 +105,10 @@ const FAQS = [
     q: "Is there telemetry?",
     a: "The OS reports nothing to anyone; its observability stack points at your own machine. This website counts only its own button clicks, and only when analytics are enabled.",
   },
+  {
+    q: "Is aidashos finished?",
+    a: "No. This is a public developer preview. The terminal and MCP paths are primary today; the Cockpit's complete control path and the one-command Goal front door are still being built.",
+  },
 ];
 
 export function App() {
@@ -98,6 +120,7 @@ export function App() {
         </span>
         <nav aria-label="Site">
           <a href="#install">Install</a>
+          <a href="#surfaces">Use it</a>
           <a href="#how">How it works</a>
           <a href="#faq">FAQ</a>
           <a
@@ -128,6 +151,23 @@ export function App() {
             <li>Nothing reports home</li>
             <li>AGPL-3.0</li>
           </ul>
+          <div className="hero-actions">
+            <a
+              className="cta"
+              href={GITHUB_URL}
+              rel="noopener"
+              onClick={() => track("click_github", { where: "hero" })}
+            >
+              View source and install
+            </a>
+            <a className="secondary-cta" href="#install">
+              See the install lane
+            </a>
+          </div>
+          <p className="release-note">
+            Public developer preview. No signup and no hosted account. The repository is the
+            product.
+          </p>
         </section>
 
         <section id="install" className="install">
@@ -140,6 +180,20 @@ export function App() {
             and big-download confirmations to you.
           </p>
           <PromptSequence />
+        </section>
+
+        <section id="surfaces" className="surfaces">
+          <p className="kicker">Three operator surfaces, one durable record</p>
+          <h2>Use it from the interface you already reach for</h2>
+          <div className="feature-grid">
+            {SURFACES.map((surface) => (
+              <article key={surface.title}>
+                <p className="surface-status">{surface.status}</p>
+                <h3>{surface.title}</h3>
+                <p>{surface.body}</p>
+              </article>
+            ))}
+          </div>
         </section>
 
         <section id="how" className="lane">

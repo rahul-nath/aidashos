@@ -23,10 +23,12 @@ The build prerenders the full page into `dist/index.html` (see `scripts/prerende
 
 ## Deploying to aidashos.com
 
-Any static host works; Cloudflare Pages and Netlify are the obvious ones.
+The production site is served by GitHub Pages from the derived `gh-pages` branch.
 
-- Build command: `npm run build`, output directory: `dist`, root directory: `landing_page_website`.
-- Point `aidashos.com` and `www.aidashos.com` at the host and set the canonical to `https://www.aidashos.com/` (already in `index.html`).
+- Run `npm run build` from this directory.
+- Publish the contents of `dist/` at the branch root without editing the derived files by hand.
+- Keep the Pages custom domain at `www.aidashos.com` and the canonical at `https://www.aidashos.com/`.
+- Point `www` to `rahul-nath.github.io` and the apex to GitHub Pages so both names reach the same release.
 
 ## Telemetry
 
