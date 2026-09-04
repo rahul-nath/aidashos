@@ -8,7 +8,7 @@ export function Terminal() {
         <span className="dot red" />
         <span className="dot yellow" />
         <span className="dot green" />
-        <span className="terminal-title">the whole top of the funnel</span>
+        <span className="terminal-title">install aidashos</span>
       </figcaption>
       <div className="terminal-body">
         <div className="terminal-line">
@@ -26,10 +26,9 @@ export function Terminal() {
           <CopyButton text={BOOT_COMMAND} event="copy_boot" />
         </div>
         <p className="terminal-note">
-          <code>make</code> is the base install: uv, Python, Node, Docker, Postgres, schemas.
-          The boot script does the rest: llama.cpp, model weights, both subscription sign-ins,
-          stack config, and a final readiness check. Prefer an agent to do it? Use the prompts
-          below.
+          <code>make</code> prepares the toolchain and local ledger.
+          The boot lane then walks through llama.cpp, model weights, interactive subscription
+          sign-ins, configuration, and a final readiness check.
         </p>
       </div>
     </figure>

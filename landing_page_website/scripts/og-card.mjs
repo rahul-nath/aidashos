@@ -39,8 +39,8 @@ const GREEN = "#46d17c";
 const MONO = "Menlo, 'SF Mono', SFMono-Regular, Consolas, monospace";
 const SANS = "'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif";
 
-const HEADLINE = "A local-first agent OS.";
-const SUBLINE = "Governed coding agents, a durable Postgres ledger, your machine.";
+const HEADLINE = "Plans, not prompts.";
+const SUBLINE = "Durable agent work. Local evidence. Your approval.";
 
 const WIDTH = 1200;
 const HEIGHT = 630;

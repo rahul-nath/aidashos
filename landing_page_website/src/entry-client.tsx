@@ -1,24 +1,21 @@
 import { StrictMode } from "react";
 import { createRoot, hydrateRoot } from "react-dom/client";
 
-import { App } from "./App";
+import { App, metadataForPath } from "./App";
 import "./styles.css";
 
 const root = document.getElementById("root")!;
+const pathname = window.location.pathname;
+document.title = metadataForPath(pathname).title;
 
-// Production HTML is prerendered by scripts/prerender.mjs, so the client
-// hydrates. The dev server serves the empty shell, where hydrate would warn.
+const app = (
+  <StrictMode>
+    <App pathname={pathname} />
+  </StrictMode>
+);
+
 if (root.hasChildNodes()) {
-  hydrateRoot(
-    root,
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  );
+  hydrateRoot(root, app);
 } else {
-  createRoot(root).render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  );
+  createRoot(root).render(app);
 }
