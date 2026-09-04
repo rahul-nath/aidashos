@@ -8,8 +8,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Final
+from enum import StrEnum
+from typing import Any, Final, assert_never
 
+from ..staffing import FrontierHarness
 from .store import connect, iso, ok, rowdict
 
 WEIGHT_POLICY: Final = "openai_api_relative.v1"
@@ -22,12 +24,26 @@ _USAGE_NAMESPACE = uuid.UUID("f40060ca-8a41-43b7-9fb1-23bb8c2a8d63")
 
 @dataclass(frozen=True)
 class FrontierTurnUsage:
-    """One valid provider-reported turn, separated by billing-relevant kind."""
+    """One measured invocation normalized to the existing usage schema."""
 
     input_tokens: int
     cached_input_tokens: int
     cache_write_tokens: int
     output_tokens: int
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.input_tokens,
+            self.cached_input_tokens,
+            self.cache_write_tokens,
+            self.output_tokens,
+        )
+        if any(
+            isinstance(count, bool) or not isinstance(count, int) or count < 0 for count in counts
+        ):
+            raise ValueError("frontier usage token counts must be non-negative integers")
+        if self.cached_input_tokens > self.input_tokens:
+            raise ValueError("cached_input_tokens cannot exceed input_tokens")
 
     @property
     def uncached_input_tokens(self) -> int:
@@ -35,7 +51,7 @@ class FrontierTurnUsage:
 
     @property
     def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
+        return self.input_tokens + self.cache_write_tokens + self.output_tokens
 
     @property
     def effective_units_milli(self) -> int:
@@ -47,31 +63,248 @@ class FrontierTurnUsage:
         )
 
 
-def _token_count(usage: Mapping[str, object], field: str, *, default: int | None = None) -> int:
-    value = usage.get(field, default)
+@dataclass(frozen=True)
+class CodexUsage:
+    """Measured cumulative usage from one Codex ``turn.completed`` event."""
+
+    tokens: FrontierTurnUsage
+
+
+@dataclass(frozen=True)
+class ClaudeUsage:
+    """Measured cumulative usage from one Claude ``result`` event."""
+
+    tokens: FrontierTurnUsage
+    reported_model: str | None
+
+
+class UsageUnverifiableReason(StrEnum):
+    """Why a provider event cannot truthfully become a measured usage row."""
+
+    MISSING_USAGE = "missing_usage"
+    MISSING_REQUIRED_FIELDS = "missing_required_fields"
+    UNSUPPORTED_EVENT = "unsupported_event"
+    UNSUPPORTED_HARNESS = "unsupported_harness"
+
+
+@dataclass(frozen=True)
+class UsageUnverifiable:
+    """Provider evidence exists, but it does not prove numeric token usage."""
+
+    harness: str
+    kind: str
+    reason: UsageUnverifiableReason
+    missing_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        fields = self.missing_fields
+        if (
+            not isinstance(fields, tuple)
+            or any(not isinstance(field, str) or not field.strip() for field in fields)
+            or len(set(fields)) != len(fields)
+        ):
+            raise ValueError("missing_fields must contain unique, non-empty field names")
+        requires_fields = self.reason is UsageUnverifiableReason.MISSING_REQUIRED_FIELDS
+        if requires_fields != bool(fields):
+            raise ValueError(
+                "missing_required_fields requires field names and other reasons forbid them"
+            )
+
+
+type FrontierUsageEvidence = CodexUsage | ClaudeUsage | UsageUnverifiable
+
+
+def _token_count(usage: Mapping[str, object], field: str, *, provider: str) -> int:
+    value = usage.get(field)
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"frontier usage requires non-negative integer {field!r}")
+        raise ValueError(f"{provider} usage requires non-negative integer {field!r}")
     return value
 
 
-def parse_frontier_turn_usage(payload: Mapping[str, object]) -> FrontierTurnUsage | None:
-    """Parse a normalized ``turn.completed`` payload without guessing missing usage."""
+def _unverifiable(
+    *,
+    harness: str,
+    kind: str,
+    reason: UsageUnverifiableReason,
+    missing_fields: tuple[str, ...] = (),
+) -> UsageUnverifiable:
+    return UsageUnverifiable(
+        harness=harness,
+        kind=kind,
+        reason=reason,
+        missing_fields=missing_fields,
+    )
 
+
+def _usage_mapping(
+    payload: Mapping[str, object],
+    *,
+    harness: str,
+    kind: str,
+) -> Mapping[str, object] | UsageUnverifiable:
     raw_usage = payload.get("usage")
     if raw_usage is None:
-        return None
+        return _unverifiable(
+            harness=harness,
+            kind=kind,
+            reason=UsageUnverifiableReason.MISSING_USAGE,
+        )
     if not isinstance(raw_usage, Mapping):
-        raise ValueError("turn.completed usage must be an object")
-    input_tokens = _token_count(raw_usage, "input_tokens")
-    cached_input_tokens = _token_count(raw_usage, "cached_input_tokens", default=0)
+        raise ValueError(f"{harness} {kind} usage must be an object")
+    return raw_usage
+
+
+def _missing_required_fields(
+    usage: Mapping[str, object],
+    fields: tuple[str, ...],
+) -> tuple[str, ...]:
+    return tuple(field for field in fields if usage.get(field) is None)
+
+
+def _parse_codex_usage(
+    payload: Mapping[str, object],
+    *,
+    kind: str,
+) -> CodexUsage | UsageUnverifiable:
+    if kind != "turn.completed":
+        return _unverifiable(
+            harness=FrontierHarness.CODEX.value,
+            kind=kind,
+            reason=UsageUnverifiableReason.UNSUPPORTED_EVENT,
+        )
+    raw_usage = _usage_mapping(payload, harness=FrontierHarness.CODEX.value, kind=kind)
+    if isinstance(raw_usage, UsageUnverifiable):
+        return raw_usage
+    required = ("input_tokens", "cached_input_tokens", "output_tokens")
+    missing = _missing_required_fields(raw_usage, required)
+    if missing:
+        return _unverifiable(
+            harness=FrontierHarness.CODEX.value,
+            kind=kind,
+            reason=UsageUnverifiableReason.MISSING_REQUIRED_FIELDS,
+            missing_fields=missing,
+        )
+    input_tokens = _token_count(raw_usage, "input_tokens", provider="codex")
+    cached_input_tokens = _token_count(raw_usage, "cached_input_tokens", provider="codex")
     if cached_input_tokens > input_tokens:
         raise ValueError("cached_input_tokens cannot exceed input_tokens")
-    return FrontierTurnUsage(
-        input_tokens=input_tokens,
-        cached_input_tokens=cached_input_tokens,
-        cache_write_tokens=_token_count(raw_usage, "cache_write_tokens", default=0),
-        output_tokens=_token_count(raw_usage, "output_tokens"),
+    cache_write_tokens = raw_usage.get("cache_write_tokens", 0)
+    if cache_write_tokens is None:
+        return _unverifiable(
+            harness=FrontierHarness.CODEX.value,
+            kind=kind,
+            reason=UsageUnverifiableReason.MISSING_REQUIRED_FIELDS,
+            missing_fields=("cache_write_tokens",),
+        )
+    return CodexUsage(
+        tokens=FrontierTurnUsage(
+            input_tokens=input_tokens,
+            cached_input_tokens=cached_input_tokens,
+            cache_write_tokens=(
+                0
+                if "cache_write_tokens" not in raw_usage
+                else _token_count(raw_usage, "cache_write_tokens", provider="codex")
+            ),
+            output_tokens=_token_count(raw_usage, "output_tokens", provider="codex"),
+        )
     )
+
+
+def _parse_claude_usage(
+    payload: Mapping[str, object],
+    *,
+    kind: str,
+) -> ClaudeUsage | UsageUnverifiable:
+    if kind != "result":
+        return _unverifiable(
+            harness=FrontierHarness.CLAUDE.value,
+            kind=kind,
+            reason=UsageUnverifiableReason.UNSUPPORTED_EVENT,
+        )
+    raw_usage = _usage_mapping(payload, harness=FrontierHarness.CLAUDE.value, kind=kind)
+    if isinstance(raw_usage, UsageUnverifiable):
+        return raw_usage
+    required = (
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "output_tokens",
+    )
+    missing = _missing_required_fields(raw_usage, required)
+    if missing:
+        return _unverifiable(
+            harness=FrontierHarness.CLAUDE.value,
+            kind=kind,
+            reason=UsageUnverifiableReason.MISSING_REQUIRED_FIELDS,
+            missing_fields=missing,
+        )
+    return ClaudeUsage(
+        tokens=FrontierTurnUsage(
+            input_tokens=(
+                _token_count(raw_usage, "input_tokens", provider="claude")
+                + _token_count(raw_usage, "cache_read_input_tokens", provider="claude")
+            ),
+            cached_input_tokens=_token_count(
+                raw_usage, "cache_read_input_tokens", provider="claude"
+            ),
+            cache_write_tokens=_token_count(
+                raw_usage, "cache_creation_input_tokens", provider="claude"
+            ),
+            output_tokens=_token_count(raw_usage, "output_tokens", provider="claude"),
+        ),
+        reported_model=_single_reported_claude_model(payload),
+    )
+
+
+def _single_reported_claude_model(payload: Mapping[str, object]) -> str | None:
+    raw_model_usage = payload.get("modelUsage")
+    if not isinstance(raw_model_usage, Mapping) or len(raw_model_usage) != 1:
+        return None
+    model, usage = next(iter(raw_model_usage.items()))
+    if not isinstance(model, str) or not model.strip() or not isinstance(usage, Mapping):
+        return None
+    return model
+
+
+def parse_frontier_usage(
+    *,
+    harness: str,
+    kind: str,
+    payload: Mapping[str, object],
+) -> FrontierUsageEvidence:
+    """Normalize one provider event without estimating absent usage."""
+
+    try:
+        provider = FrontierHarness(harness)
+    except ValueError:
+        return _unverifiable(
+            harness=harness,
+            kind=kind,
+            reason=UsageUnverifiableReason.UNSUPPORTED_HARNESS,
+        )
+    match provider:
+        case FrontierHarness.CODEX:
+            return _parse_codex_usage(payload, kind=kind)
+        case FrontierHarness.CLAUDE:
+            return _parse_claude_usage(payload, kind=kind)
+    assert_never(provider)
+
+
+def parse_frontier_turn_usage(payload: Mapping[str, object]) -> FrontierTurnUsage | None:
+    """Preserve the Codex parser contract while using the typed evidence model."""
+
+    evidence = parse_frontier_usage(
+        harness=FrontierHarness.CODEX.value,
+        kind="turn.completed",
+        payload=payload,
+    )
+    match evidence:
+        case CodexUsage(tokens=tokens):
+            return tokens
+        case UsageUnverifiable():
+            return None
+        case ClaudeUsage():
+            raise AssertionError("Codex parsing produced Claude usage")
 
 
 def _continuation_to_dict(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -99,7 +332,7 @@ def project_frontier_event(
     """Project one newly appended provider event in the event transaction."""
 
     harness = str(lease.get("agent_name") or "")
-    if harness != "codex":
+    if harness not in {member.value for member in FrontierHarness}:
         return
     task_id = lease.get("task_id")
     task_row = (
@@ -113,7 +346,7 @@ def project_frontier_event(
     pow_wow_id = task_row["pow_wow_id"] if task_row else None
     saga_id = task_row["saga_id"] if task_row else None
 
-    if kind == "thread.started":
+    if harness == FrontierHarness.CODEX.value and kind == "thread.started":
         raw_thread_id = payload.get("thread_id")
         if not isinstance(raw_thread_id, str) or not raw_thread_id.strip():
             raise ValueError("thread.started requires a non-empty thread_id")
@@ -164,11 +397,27 @@ def project_frontier_event(
         )
         return
 
-    if kind != "turn.completed":
-        return
-    usage = parse_frontier_turn_usage(payload)
-    if usage is None:
-        return
+    evidence = parse_frontier_usage(harness=harness, kind=kind, payload=payload)
+    match evidence:
+        case UsageUnverifiable(
+            reason=(
+                UsageUnverifiableReason.MISSING_USAGE
+                | UsageUnverifiableReason.MISSING_REQUIRED_FIELDS
+            ) as reason,
+            missing_fields=missing_fields,
+        ):
+            detail = f"{harness} {kind} usage is unverifiable: {reason.value}"
+            if missing_fields:
+                detail += f" ({', '.join(missing_fields)})"
+            raise ValueError(detail)
+        case UsageUnverifiable():
+            return
+        case CodexUsage(tokens=usage):
+            usage_model = lease.get("model")
+        case ClaudeUsage(tokens=usage, reported_model=usage_model):
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     continuation = c.execute(
         "SELECT thread_id FROM agent_continuations WHERE latest_lease_id=?",
         (lease["lease_id"],),
@@ -198,7 +447,7 @@ def project_frontier_event(
             lease.get("task_role"),
             lease.get("agent_tier"),
             harness,
-            lease.get("model"),
+            usage_model,
             usage.input_tokens,
             usage.cached_input_tokens,
             usage.uncached_input_tokens,
@@ -281,10 +530,16 @@ def list_frontier_usage_records(lease_id: str) -> dict[str, Any]:
 
 
 __all__ = [
+    "ClaudeUsage",
+    "CodexUsage",
+    "FrontierUsageEvidence",
     "FrontierTurnUsage",
+    "UsageUnverifiable",
+    "UsageUnverifiableReason",
     "WEIGHT_POLICY",
     "find_compatible_agent_continuation",
     "list_frontier_usage_records",
+    "parse_frontier_usage",
     "parse_frontier_turn_usage",
     "project_frontier_event",
 ]
