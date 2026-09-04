@@ -34,6 +34,7 @@ it is still free to fix.
 from __future__ import annotations
 
 import re
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -48,6 +49,29 @@ _MANIFEST = _REPOSITORY_ROOT / "public_import.toml"
 _FENCE = re.compile(r"^```.*?^```", re.MULTILINE | re.DOTALL)
 _INLINE_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+)(?:\s+\"[^\"]*\")?\)")
 _REFERENCE_LINK = re.compile(r"^\[[^\]]+\]:\s*(\S+)", re.MULTILINE)
+
+
+def _exclude_gitignored(paths: list[Path]) -> list[Path]:
+    """Match the importer: ignored working-tree files are not published."""
+
+    if not paths:
+        return []
+    relative = [str(path.relative_to(_REPOSITORY_ROOT)) for path in paths]
+    completed = subprocess.run(
+        ["git", "check-ignore", "--stdin", "-z"],
+        cwd=_REPOSITORY_ROOT,
+        input=("\0".join(relative) + "\0").encode(),
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode not in {0, 1}:
+        raise RuntimeError(
+            "git check-ignore failed while selecting published Markdown: "
+            + completed.stderr.decode(errors="replace")
+        )
+    ignored = set(completed.stdout.decode().rstrip("\0").split("\0"))
+    ignored.discard("")
+    return [path for path, name in zip(paths, relative, strict=True) if name not in ignored]
 
 
 def _traveling_markdown() -> list[Path]:
@@ -68,7 +92,7 @@ def _traveling_markdown() -> list[Path]:
             continue
         target = _REPOSITORY_ROOT / raw
         if target.is_dir():
-            found.extend(sorted(target.rglob("*.md")))
+            found.extend(_exclude_gitignored(sorted(target.rglob("*.md"))))
         elif target.is_file() and target.suffix == ".md":
             found.append(target)
     return sorted(set(found))
