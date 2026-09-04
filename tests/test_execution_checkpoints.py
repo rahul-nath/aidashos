@@ -57,10 +57,30 @@ def test_events_are_append_only_and_idempotent(tmp_path: Path, monkeypatch) -> N
         {"text": "different"},
         hashlib.sha256(b'{"text":"different"}').hexdigest(),
     )
+    kind_conflict = append_execution_event(
+        lease_id,
+        1,
+        1.0,
+        "stdout",
+        "result",
+        payload,
+        digest,
+    )
+    source_conflict = append_execution_event(
+        lease_id,
+        1,
+        1.0,
+        "lifecycle",
+        "item.completed",
+        payload,
+        digest,
+    )
 
     assert first["created"] is True
     assert replay["created"] is False
     assert conflict["error"] == "sequence_conflict"
+    assert kind_conflict["error"] == "sequence_conflict"
+    assert source_conflict["error"] == "sequence_conflict"
     assert [event["sequence"] for event in list_execution_events(lease_id)["events"]] == [1]
 
 

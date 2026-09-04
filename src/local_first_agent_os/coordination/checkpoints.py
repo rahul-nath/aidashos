@@ -107,12 +107,18 @@ def append_execution_event(
             (lease_id, sequence),
         ).fetchone()
         if existing:
-            if existing["payload_sha256"] != payload_sha256:
+            if (
+                existing["payload_sha256"] != payload_sha256
+                or existing["source"] != source
+                or existing["kind"] != kind
+            ):
                 return err(
                     "sequence_conflict",
                     lease_id=lease_id,
                     sequence=sequence,
                     existing_payload_sha256=existing["payload_sha256"],
+                    existing_source=existing["source"],
+                    existing_kind=existing["kind"],
                 )
             event = existing
             created = False
@@ -193,6 +199,7 @@ def append_execution_event(
                     (str(payload.get("error") or "assessment failed"), occurred_at, lease_id),
                 )
     projection_error: str | None = None
+    projection_payload = decode_json_object(event["payload_json"])
     try:
         # The raw event is the evidence and has already committed. Projections
         # are idempotent derived state on a separate transaction so malformed
@@ -202,9 +209,9 @@ def append_execution_event(
                 c,
                 lease=lease,
                 sequence=sequence,
-                kind=kind,
-                payload=payload,
-                created_at=t,
+                kind=str(event["kind"]),
+                payload=projection_payload,
+                created_at=float(event["created_at"]),
             )
     except Exception as exc:  # noqa: BLE001 - evidence must survive a derived-view defect
         projection_error = f"{type(exc).__name__}: {exc}"
@@ -225,7 +232,7 @@ def append_execution_event(
             "event_id": event_id,
             "lease_id": lease_id,
             "sequence": sequence,
-            "kind": kind,
+            "kind": event["kind"],
             "projection_error": projection_error,
         },
     )
