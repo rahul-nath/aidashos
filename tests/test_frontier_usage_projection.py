@@ -286,6 +286,12 @@ def test_frontier_usage_evidence_is_provider_typed_and_never_estimated() -> None
             kind="result",
             reason=UsageUnverifiableReason.MISSING_REQUIRED_FIELDS,
         )
+    with pytest.raises(ValueError, match="UsageUnverifiableReason"):
+        UsageUnverifiable(
+            harness="claude",
+            kind="result",
+            reason="not-a-reason",  # type: ignore[arg-type]
+        )
 
 
 def test_unverifiable_claude_usage_is_reported_without_counting_zero() -> None:

@@ -97,6 +97,8 @@ class UsageUnverifiable:
     missing_fields: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if not isinstance(self.reason, UsageUnverifiableReason):
+            raise ValueError("reason must be a UsageUnverifiableReason")
         fields = self.missing_fields
         if (
             not isinstance(fields, tuple)
