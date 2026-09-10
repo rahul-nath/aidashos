@@ -50,6 +50,7 @@ from .events import (
     parse_artifact_type,
 )
 from .execution import (
+    DISPATCH_WAIT_FAILURE_CODE,
     DeferrableMilestoneRuntime,
     DispatchLedgerPoller,
     DispatchParked,
@@ -253,6 +254,14 @@ class ExecutionSnapshot:
         )
 
 
+@dataclass(frozen=True)
+class MilestoneFailureCause:
+    """The causal milestone fields a WorkUnit summary must preserve."""
+
+    code: str
+    summary: str
+
+
 # --------------------------------------------------------------------------- #
 # Durable steps: every side effect the lifecycle has
 # --------------------------------------------------------------------------- #
@@ -334,6 +343,14 @@ def read_work_unit_state_step(work_unit_id: str) -> dict[str, Any]:
         "current_phase": unit.current_phase,
         "milestone_statuses": {item.stable_key: item.status.value for item in executions},
         "milestone_attempts": {item.stable_key: item.attempt for item in executions},
+        "milestone_failure_causes": {
+            item.stable_key: {
+                "code": item.failure_code,
+                "summary": item.failure_summary or item.failure_code,
+            }
+            for item in executions
+            if item.failure_code is not None
+        },
         "milestone_charged_failures": {
             item.stable_key: count_charged_failures(
                 failure.failure_class
@@ -396,6 +413,21 @@ def record_phase_transition_step(
     return {"applied": outcome.applied, "sequence_number": outcome.event.sequence_number}
 
 
+def _artifacts_from_json(artifacts_json: str) -> tuple[ArtifactRecord, ...]:
+    return tuple(
+        ArtifactRecord(
+            artifact_type=parse_artifact_type(str(item["artifact_type"])),
+            uri=str(item["uri"]),
+            content_hash=str(item["content_hash"]),
+            media_type=item.get("media_type"),
+            size_bytes=item.get("size_bytes"),
+            producer_step_name=item.get("producer_step_name"),
+            metadata=dict(item.get("metadata") or {}),
+        )
+        for item in json.loads(artifacts_json)
+    )
+
+
 @dbos_step()
 def record_milestone_transition_step(
     work_unit_id: str,
@@ -411,18 +443,7 @@ def record_milestone_transition_step(
     failure_class: str | None = None,
     artifacts_json: str = "[]",
 ) -> dict[str, Any]:
-    artifacts = tuple(
-        ArtifactRecord(
-            artifact_type=parse_artifact_type(str(item["artifact_type"])),
-            uri=str(item["uri"]),
-            content_hash=str(item["content_hash"]),
-            media_type=item.get("media_type"),
-            size_bytes=item.get("size_bytes"),
-            producer_step_name=item.get("producer_step_name"),
-            metadata=dict(item.get("metadata") or {}),
-        )
-        for item in json.loads(artifacts_json)
-    )
+    artifacts = _artifacts_from_json(artifacts_json)
     try:
         outcome = repo.record_fact(
             work_unit_id,
@@ -470,12 +491,37 @@ def record_milestone_transition_step(
 
 
 @dbos_step()
+def record_dispatch_wait_halt_step(
+    work_unit_id: str,
+    phase: str,
+    milestone_key: str,
+    attempt: int,
+    child_workflow_id: str,
+    failure_code: str,
+    failure_summary: str,
+) -> dict[str, Any]:
+    milestone = repo.record_dispatch_wait_halt(
+        work_unit_id,
+        phase=LifecyclePhase(phase),
+        milestone_key=milestone_key,
+        attempt=attempt,
+        child_workflow_id=child_workflow_id,
+        failure_code=failure_code,
+        failure_summary=failure_summary,
+    )
+    return {"status": milestone.status.value}
+
+
+@dbos_step()
 def request_operator_decision_step(
     work_unit_id: str,
     phase: str,
     milestone_key: str,
     attempt: int,
     prompt: str,
+    failure_code: str | None = None,
+    failure_summary: str | None = None,
+    artifacts_json: str = "[]",
 ) -> dict[str, Any]:
     """Persist the approval request, then park the milestone and the WorkUnit.
 
@@ -484,11 +530,19 @@ def request_operator_decision_step(
     failure honors the decision already made instead of asking again. A denial is
     equally durable: it fails the milestone every time it is read.
 
+    Failure recovery instead binds the decision to its failed attempt and retains
+    that attempt's evidence. A previous milestone approval cannot recover a new
+    infrastructure incident.
+
     An already-resolved request short-circuits, so a resumed milestone does not
     park itself for an instant on a decision that has already been made.
     """
 
-    request_id = f"wud_{sha256_text(f'{work_unit_id}:{milestone_key}')[:24]}"
+    # A milestone approval cannot authorize recovery from a later failed attempt.
+    identity = f"{work_unit_id}:{milestone_key}"
+    if failure_code is not None:
+        identity += f":failure:{attempt}:{failure_code}"
+    request_id = f"wud_{sha256_text(identity)[:24]}"
     existing = repo.get_decision_request(request_id)
     if existing is not None and existing.status is not DecisionRequestStatus.PENDING:
         return {"request_id": request_id, "status": existing.status.value}
@@ -509,6 +563,10 @@ def request_operator_decision_step(
             milestone_key=milestone_key,
             status=MilestoneExecutionStatus.WAITING_FOR_OPERATOR,
             attempt=attempt,
+            failure_code=failure_code,
+            failure_summary=failure_summary,
+            failure_class=FailureClass.REQUIRES_OPERATOR if failure_code else None,
+            artifacts=_artifacts_from_json(artifacts_json),
             payload={"request_id": request_id},
         ),
     )
@@ -849,14 +907,19 @@ class WorkUnitEngine:
             status is MilestoneExecutionStatus.WAITING_FOR_OPERATOR
             for status in milestone_statuses.values()
         )
+        cause = self._phase_failure_cause(snapshot, phase, phase_status, state)
         epoch = int(state["epoch"])
         if phase_status is PhaseStatus.FAILED:
             record_work_unit_transition_step(
                 snapshot.work_unit_id,
                 WorkUnitStatus.FAILED.value,
                 phase.value,
-                failure_code=f"{phase.value.lower()}_phase_failed",
-                failure_summary=f"phase {phase.value} failed and its policy blocks the lifecycle",
+                failure_code=(cause.code if cause else f"{phase.value.lower()}_phase_failed"),
+                failure_summary=(
+                    cause.summary
+                    if cause
+                    else f"phase {phase.value} failed and its policy blocks the lifecycle"
+                ),
                 epoch=epoch,
             )
         elif phase_status is PhaseStatus.CANCELLED:
@@ -880,11 +943,55 @@ class WorkUnitEngine:
                 snapshot.work_unit_id,
                 WorkUnitStatus.BLOCKED.value,
                 phase.value,
-                failure_code=f"{phase.value.lower()}_phase_blocked",
-                failure_summary=f"phase {phase.value} cannot proceed without intervention",
+                failure_code=(cause.code if cause else f"{phase.value.lower()}_phase_blocked"),
+                failure_summary=(
+                    cause.summary
+                    if cause
+                    else f"phase {phase.value} cannot proceed without intervention"
+                ),
                 epoch=epoch,
             )
         return self._result(snapshot, read_work_unit_state_step(snapshot.work_unit_id))
+
+    @staticmethod
+    def _phase_failure_cause(
+        snapshot: ExecutionSnapshot,
+        phase: LifecyclePhase,
+        phase_status: PhaseStatus,
+        state: dict[str, Any],
+    ) -> MilestoneFailureCause | None:
+        """Select a cause, never a downstream consequence or phase summary.
+
+        A phase can contain concurrent failures but the WorkUnit schema has one
+        failure slot. Plan order is the durable tie-breaker, and filtering by the
+        phase result prevents a skipped dependent from replacing the milestone
+        that actually stopped the phase.
+        """
+
+        if phase_status is PhaseStatus.FAILED:
+            causal_status = MilestoneExecutionStatus.FAILED
+        elif phase_status is PhaseStatus.BLOCKED:
+            causal_status = MilestoneExecutionStatus.BLOCKED
+        else:
+            return None
+        statuses = {
+            key: MilestoneExecutionStatus(value)
+            for key, value in dict(state["milestone_statuses"]).items()
+        }
+        causes = dict(state["milestone_failure_causes"])
+        for milestone in snapshot.plan.milestones_in_phase(phase):
+            if statuses.get(milestone.stable_key) is not causal_status:
+                continue
+            raw = causes.get(milestone.stable_key)
+            if not isinstance(raw, dict):
+                continue
+            code = str(raw.get("code") or "").strip()
+            if code:
+                return MilestoneFailureCause(
+                    code=code,
+                    summary=str(raw.get("summary") or code),
+                )
+        return None
 
     def _complete(self, snapshot: ExecutionSnapshot) -> dict[str, Any]:
         state = read_work_unit_state_step(snapshot.work_unit_id)
@@ -1263,21 +1370,19 @@ class WorkUnitEngine:
         ``BLOCKED`` either way, because both endings are resumable and neither is
         a decision that the work failed. The failure code is what differs, and it
         is the whole point: `dispatch_paused` names a checkpoint an operator can
-        go and look at, `dispatch_wait_elapsed` names a clock that ran out. One
+        go and look at, while `DEADLINE_EXCEEDED` names a clock that ran out. One
         code for both said the second when the ledger knew the first.
         """
 
-        record_milestone_transition_step(
+        return record_dispatch_wait_halt_step(
             work_unit_id,
             phase.value,
             milestone_key,
-            MilestoneExecutionStatus.BLOCKED.value,
             attempt,
             child_workflow_id=child_workflow_id,
             failure_code=failure_code,
             failure_summary=failure_summary,
         )
-        return {"status": MilestoneExecutionStatus.BLOCKED.value}
 
     def _milestone_workflow_id(
         self,
@@ -1499,7 +1604,7 @@ class WorkUnitEngine:
                                 milestone_key=milestone_key,
                                 attempt=attempt,
                                 child_workflow_id=child_workflow_id,
-                                failure_code="dispatch_wait_elapsed",
+                                failure_code=DISPATCH_WAIT_FAILURE_CODE,
                                 failure_summary=waited.describe(),
                             )
             except DispatchParkedError as exc:
@@ -1519,7 +1624,7 @@ class WorkUnitEngine:
                     milestone_key=milestone_key,
                     attempt=attempt,
                     child_workflow_id=child_workflow_id,
-                    failure_code="dispatch_wait_elapsed",
+                    failure_code=DISPATCH_WAIT_FAILURE_CODE,
                     failure_summary=str(exc),
                 )
 
@@ -1548,6 +1653,9 @@ class WorkUnitEngine:
                     f"Milestone {milestone_key} needs an operator decision: "
                     f"{payload['failure_summary']}"
                 ),
+                failure_code=str(payload["failure_code"]),
+                failure_summary=str(payload["failure_summary"]),
+                artifacts_json=json.dumps(payload.get("artifacts") or [], sort_keys=True),
             )
             return {
                 "status": MilestoneExecutionStatus.WAITING_FOR_OPERATOR.value,
@@ -1579,7 +1687,12 @@ class WorkUnitEngine:
         """
 
         match failure_class:
-            case FailureClass.TRANSIENT | FailureClass.CORRECTABLE | FailureClass.REQUIRES_REPLAN:
+            case (
+                FailureClass.TRANSIENT
+                | FailureClass.SCHEDULING
+                | FailureClass.CORRECTABLE
+                | FailureClass.REQUIRES_REPLAN
+            ):
                 return MilestoneExecutionStatus.BLOCKED
             case FailureClass.REQUIRES_OPERATOR:
                 return MilestoneExecutionStatus.WAITING_FOR_OPERATOR

@@ -295,6 +295,310 @@
       ],
       "title": "Promotion Failures",
       "type": "logs"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 41
+      },
+      "id": 10,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (harness, source) (local_agent_execution_events_pending)",
+          "legendFormat": "{{job}} {{instance}} {{harness}} {{source}} {{operation}} {{outcome}} {{phase}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Execution events pending",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 41
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (harness, source) (local_agent_execution_stream_buffer_bytes)",
+          "legendFormat": "{{job}} {{instance}} {{harness}} {{source}} {{operation}} {{outcome}} {{phase}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Unread agent stream buffers",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 48
+      },
+      "id": 12,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation, outcome) (rate(local_agent_execution_event_commit_seconds_bucket[5m])))",
+          "legendFormat": "{{job}} {{instance}} {{harness}} {{source}} {{operation}} {{outcome}} {{phase}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Event commit acknowledgement p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 48
+      },
+      "id": 13,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, operation, outcome) (rate(local_agent_execution_event_transaction_seconds_bucket[5m])))",
+          "legendFormat": "{{job}} {{instance}} {{harness}} {{source}} {{operation}} {{outcome}} {{phase}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Event transaction p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "id": 14,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, harness, phase) (rate(local_agent_execution_cancellation_seconds_bucket[5m])))",
+          "legendFormat": "{{job}} {{instance}} {{harness}} {{source}} {{operation}} {{outcome}} {{phase}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Cancellation phase p95",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "id": 15,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (job, instance) (rate(local_agent_process_cpu_seconds_total[5m]))",
+          "legendFormat": "{{job}} {{instance}} {{harness}} {{source}} {{operation}} {{outcome}} {{phase}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Runtime process CPU cores",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 62
+      },
+      "id": 16,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "local_agent_process_resident_memory_bytes",
+          "legendFormat": "{{job}} {{instance}} {{harness}} {{source}} {{operation}} {{outcome}} {{phase}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Runtime process resident memory",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 62
+      },
+      "id": 17,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "local_agent_process_memory_sample_available",
+          "legendFormat": "{{job}} {{instance}} {{harness}} {{source}} {{operation}} {{outcome}} {{phase}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Current RSS sample available",
+      "type": "timeseries"
     }
   ],
   "refresh": "10s",

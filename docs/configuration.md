@@ -111,6 +111,7 @@ Endpoints, paths, credentials, and tuning values. Not flags: changing one moves 
 | `config_dir` | `LOCAL_AGENT_CONFIG_DIR` | _derived_ | - |
 | `cors_origins` | `LOCAL_AGENT_CORS_ORIGINS` | _derived_ | - |
 | `database_url` | `LOCAL_AGENT_DATABASE_URL` | `postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent` | - |
+| `dispatcher_metrics_port` | `LOCAL_AGENT_DISPATCHER_METRICS_PORT` | `8767` | - |
 | `env` | `LOCAL_AGENT_ENV` | `local` | - |
 | `git_operation_timeout_seconds` | `LOCAL_AGENT_GIT_OPERATION_TIMEOUT_SECONDS` | `30` | - |
 | `log_level` | `LOCAL_AGENT_LOG_LEVEL` | `INFO` | - |

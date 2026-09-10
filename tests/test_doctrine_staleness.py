@@ -80,9 +80,11 @@ def _checkpoint() -> dict[str, Any]:
     }
 
 
-def _merge_pending_result(doctrine: object) -> dict[str, Any]:
+def _merge_pending_result(doctrine: object, *, intent_id: str | None = None) -> dict[str, Any]:
     return {
         "schema_version": "dispatch_runner_result.v1",
+        "intent_id": intent_id,
+        "target_project_id": "target",
         "result_origin": "AUTOMATED",
         "result_state": "COMPLETED",
         "promotion_state": "MERGE_PENDING",
@@ -214,7 +216,10 @@ def _settle(prompt: str, doctrine: object) -> str:
     submitted = submit_dispatch_intent("senior", prompt, kind="code", target_project_id="target")
     intent_id = str(submitted["intent_id"])
     claim_next_dispatch_intent("test-worker", "senior")
-    complete_dispatch_intent(intent_id, "DONE", result=json.dumps(_merge_pending_result(doctrine)))
+    completed = complete_dispatch_intent(
+        intent_id, "DONE", result=json.dumps(_merge_pending_result(doctrine, intent_id=intent_id))
+    )
+    assert completed["ok"], completed
     return intent_id
 
 
@@ -254,7 +259,11 @@ def test_scan_finds_the_checkpoint_a_recovery_review_intent_owns(tmp_path: Path)
     set_root(str(tmp_path))
     saga = create_saga("recovery review staleness", 1_000, 300)
     submitted = submit_dispatch_intent(
-        "senior", "parked implementation", kind="code", target_project_id="target"
+        "senior",
+        "parked implementation",
+        kind="code",
+        target_project_id="target",
+        permitted_capabilities=("read_repository", "invoke_model"),
     )
     parked_intent = str(submitted["intent_id"])
     claim_next_dispatch_intent("test-worker", "senior")
@@ -279,11 +288,14 @@ def test_scan_finds_the_checkpoint_a_recovery_review_intent_owns(tmp_path: Path)
     )
     review_intent = str(requested["intent"]["intent_id"])
     claim_next_dispatch_intent("review-worker", "staff")
-    complete_dispatch_intent(
+    completed = complete_dispatch_intent(
         review_intent,
         "DONE",
-        result=json.dumps(_merge_pending_result(PRIOR_DOCTRINE.provenance_payload())),
+        result=json.dumps(
+            _merge_pending_result(PRIOR_DOCTRINE.provenance_payload(), intent_id=review_intent)
+        ),
     )
+    assert completed["ok"], completed
 
     scan = list_doctrine_stale_reviews()
 

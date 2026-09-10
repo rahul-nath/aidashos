@@ -19,7 +19,13 @@ from typing import Any
 
 import pytest
 
-from local_first_agent_os.agent_adapters import AgentResult, AgentTask
+from local_first_agent_os.agent_adapters import (
+    AgentResult,
+    AgentRuntimeKind,
+    AgentTask,
+    CliRunProvenance,
+    runtime_kind_for_harness,
+)
 from local_first_agent_os.agent_query import (
     AGENT_QUERY_RECORD_SCHEMA,
     TranscriptResolution,
@@ -28,6 +34,7 @@ from local_first_agent_os.agent_query import (
     agent_query_request,
     build_agent_query_record,
     claude_project_slug,
+    configured_agent_query_model,
 )
 from local_first_agent_os.contracts import AgentHarness, SourceType, WorkflowStatus, WorkspaceId
 from local_first_agent_os.directives import DirectiveParser
@@ -61,13 +68,51 @@ def test_aliases_route_to_their_harness(
     assert spec.query == "explain the ledger"
 
 
-def test_harness_value_is_the_adapter_name() -> None:
-    """The enum value is the routing key, so a drift here is a silent misroute."""
+def test_harness_maps_exhaustively_to_a_runtime_kind() -> None:
+    assert runtime_kind_for_harness(AgentHarness.CLAUDE_CODE) is AgentRuntimeKind.CLAUDE_CODE
+    assert runtime_kind_for_harness(AgentHarness.CODEX_CLI) is AgentRuntimeKind.CODEX_CLI
 
-    from local_first_agent_os.agent_adapters import ClaudeCodeAdapter, CodexCLIAdapter
 
-    assert AgentHarness.CLAUDE_CODE.value == ClaudeCodeAdapter.name
-    assert AgentHarness.CODEX_CLI.value == CodexCLIAdapter.name
+def test_direct_query_model_comes_from_the_unique_seated_vendor_slot(tmp_path: Path) -> None:
+    (tmp_path / "staffing.toml").write_text(
+        'seated_pairing = "normal"\n'
+        "[pairings.normal]\n"
+        "[pairings.normal.senior]\n"
+        'harness = "codex"\nmodel = "codex-pinned"\ncapacity = 1\n'
+        "[pairings.normal.staff]\n"
+        'harness = "claude"\nmodel = "claude-pinned"\ncapacity = 1\n',
+        encoding="utf-8",
+    )
+
+    assert (
+        configured_agent_query_model(AgentHarness.CODEX_CLI, config_dir=tmp_path) == "codex-pinned"
+    )
+    assert (
+        configured_agent_query_model(AgentHarness.CLAUDE_CODE, config_dir=tmp_path)
+        == "claude-pinned"
+    )
+
+
+def test_direct_query_model_refuses_two_different_models_on_one_vendor(tmp_path: Path) -> None:
+    (tmp_path / "staffing.toml").write_text(
+        'seated_pairing = "claude-only"\n'
+        "[pairings.claude-only]\n"
+        "[pairings.claude-only.senior]\n"
+        'harness = "claude"\nmodel = "claude-one"\ncapacity = 1\n'
+        "[pairings.claude-only.staff]\n"
+        'harness = "claude"\nmodel = "claude-two"\ncapacity = 1\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="exactly one explicit model"):
+        configured_agent_query_model(AgentHarness.CLAUDE_CODE, config_dir=tmp_path)
+
+
+def test_astra_sol_pair_keeps_an_explicit_direct_query_model() -> None:
+    config_dir = Path(__file__).resolve().parents[1] / "configs"
+    assert (
+        configured_agent_query_model(AgentHarness.CODEX_CLI, config_dir=config_dir) == "gpt-5.6-sol"
+    )
 
 
 @pytest.mark.parametrize("directive", ["/claude", "/cc", "/codex", "/claude    "])
@@ -221,9 +266,10 @@ def test_claude_adapter_carries_the_session_id_out(monkeypatch: pytest.MonkeyPat
     ).encode()
     _stub_subprocess(monkeypatch, stdout=payload, returncode=0)
 
-    result = _run_adapter(ClaudeCodeAdapter(cwd="/tmp"))
+    result = _run_adapter(ClaudeCodeAdapter(cwd="/tmp", model="claude-test"))
 
-    assert result.metadata["session_id"] == "sess-42"
+    assert isinstance(result.provenance, CliRunProvenance)
+    assert result.provenance.session_id == "sess-42"
     assert result.output == "the answer"
     assert result.tokens_used == 7
 
@@ -235,10 +281,37 @@ def test_claude_adapter_survives_output_that_is_not_json(
 
     _stub_subprocess(monkeypatch, stdout=b"plain text answer", returncode=0)
 
-    result = _run_adapter(ClaudeCodeAdapter(cwd="/tmp"))
+    result = _run_adapter(ClaudeCodeAdapter(cwd="/tmp", model="claude-test"))
 
     assert result.output == "plain text answer"
-    assert result.metadata == {}
+    assert isinstance(result.provenance, CliRunProvenance)
+    assert result.provenance.session_id is None
+
+
+def test_codex_adapter_uses_exec_json_and_captures_the_thread_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from local_first_agent_os.agent_adapters import CodexCLIAdapter
+
+    payload = b"\n".join(
+        (
+            b'{"type":"thread.started","thread_id":"thread-42"}',
+            b'{"type":"item.completed","item":{"type":"agent_message","text":"answer"}}',
+            b'{"type":"turn.completed","usage":{"output_tokens":9}}',
+        )
+    )
+    _stub_subprocess(monkeypatch, stdout=payload, returncode=0)
+    adapter = CodexCLIAdapter(cwd="/tmp", model="codex-test")
+
+    result = _run_adapter(adapter)
+
+    assert adapter.command_for(AgentTask("t", "question"))[:2] == ("codex", "exec")
+    assert "--json" in adapter.command_for(AgentTask("t", "question"))
+    assert "--quiet" not in adapter.command_for(AgentTask("t", "question"))
+    assert result.output == "answer"
+    assert result.tokens_used == 9
+    assert isinstance(result.provenance, CliRunProvenance)
+    assert result.provenance.session_id == "thread-42"
 
 
 # ---------------------------------------------------------------------------
@@ -250,17 +323,29 @@ def test_record_holds_the_question_and_the_pointer_but_not_the_answer() -> None:
     request = agent_query_request(
         workflow_id="wf-1",
         harness=AgentHarness.CLAUDE_CODE,
+        model="claude-test",
         alias="/claude",
         query="explain the ledger",
         cwd="/repo",
     )
-    run = {"succeeded": True, "output": "a long answer body", "error": None, "tokens_used": 12}
+    run = {
+        "succeeded": True,
+        "output": "a long answer body",
+        "error": None,
+        "tokens_used": 12,
+        "provenance": {
+            "runtime": "claude_code",
+            "model": "claude-test",
+            "session_id": "s",
+        },
+    }
     transcript = {"resolution": "exact_session_id", "path": "/t.jsonl", "session_id": "s"}
 
     record = build_agent_query_record({**request, **run, "transcript": transcript})
 
     assert record["schema_version"] == AGENT_QUERY_RECORD_SCHEMA
     assert record["harness"] == "claude_code"
+    assert record["model"] == "claude-test"
     assert record["alias"] == "/claude"
     assert record["query"] == "explain the ledger"
     assert record["succeeded"] is True
@@ -295,8 +380,6 @@ def _stub_claude_adapter(
     seen: dict[str, Any] = {}
 
     class StubAdapter:
-        name = "claude_code"
-
         def __init__(self, **kwargs: Any) -> None:
             seen["adapter_kwargs"] = kwargs
 
@@ -308,10 +391,18 @@ def _stub_claude_adapter(
                 output="an answer that must not be persisted",
                 tokens_used=5,
                 error=error,
-                metadata={"session_id": session_id} if session_id else {},
+                provenance=CliRunProvenance(
+                    AgentRuntimeKind.CLAUDE_CODE,
+                    str(seen["adapter_kwargs"]["model"]),
+                    session_id,
+                ),
             )
 
     monkeypatch.setattr("local_first_agent_os.agent_adapters.ClaudeCodeAdapter", StubAdapter)
+    monkeypatch.setattr(
+        "local_first_agent_os.workflow.models.configured_agent_query_model",
+        lambda *_args, **_kwargs: "claude-test",
+    )
     return seen
 
 
@@ -329,8 +420,6 @@ def _stub_codex_adapter(
     seen: dict[str, Any] = {}
 
     class StubAdapter:
-        name = "codex_cli"
-
         def __init__(self, **kwargs: Any) -> None:
             seen["adapter_kwargs"] = kwargs
 
@@ -344,9 +433,17 @@ def _stub_codex_adapter(
                 success=True,
                 output="an answer that must not be persisted",
                 tokens_used=3,
+                provenance=CliRunProvenance(
+                    AgentRuntimeKind.CODEX_CLI,
+                    str(seen["adapter_kwargs"]["model"]),
+                ),
             )
 
     monkeypatch.setattr("local_first_agent_os.agent_adapters.CodexCLIAdapter", StubAdapter)
+    monkeypatch.setattr(
+        "local_first_agent_os.workflow.models.configured_agent_query_model",
+        lambda *_args, **_kwargs: "codex-test",
+    )
     return seen
 
 
@@ -356,13 +453,15 @@ def test_build_adapter_routes_each_harness_to_its_own_cli() -> None:
     from local_first_agent_os.agent_adapters import ClaudeCodeAdapter, CodexCLIAdapter
     from local_first_agent_os.agent_query import _build_adapter
 
-    claude = _build_adapter(AgentHarness.CLAUDE_CODE, cwd="/repo")
-    codex = _build_adapter(AgentHarness.CODEX_CLI, cwd="/repo")
+    claude = _build_adapter(AgentHarness.CLAUDE_CODE, cwd="/repo", model="claude-test")
+    codex = _build_adapter(AgentHarness.CODEX_CLI, cwd="/repo", model="codex-test")
 
     assert isinstance(claude, ClaudeCodeAdapter)
     assert isinstance(codex, CodexCLIAdapter)
-    assert claude.cwd == "/repo"
-    assert codex.cwd == "/repo"
+    assert claude.cwd == Path("/repo")
+    assert codex.cwd == Path("/repo")
+    assert claude.model == "claude-test"
+    assert codex.model == "codex-test"
 
 
 def test_codex_query_records_a_guessed_pointer_as_a_guess(
@@ -527,9 +626,6 @@ def _run_adapter(adapter: Any) -> AgentResult:
 
     task = AgentTask(
         task_id="t-1",
-        pow_wow_id="",
-        saga_id="",
-        role="operator_query",
         prompt="explain the ledger",
         timeout_seconds=30,
     )

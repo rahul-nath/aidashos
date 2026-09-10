@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from local_first_agent_os.project_center import load_project_center
 from local_first_agent_os.project_scaffold import (
     TargetProjectScaffold,
@@ -81,6 +83,13 @@ def test_scaffold_uses_uv_init_pins_toolchains_and_registers(
     )
 
     first = scaffold_target_project(spec, settings=settings, finalized_gawd_path=finalized)
+    registry.write_text(
+        registry.read_text().replace(spec.path, "projects/public_repo_creator"),
+        encoding="utf-8",
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
     second = scaffold_target_project(spec, settings=settings, finalized_gawd_path=finalized)
 
     target = projects_root / "public_repo_creator"
@@ -103,3 +112,9 @@ def test_scaffold_uses_uv_init_pins_toolchains_and_registers(
         "uv run ruff check",
         "uv run pyright",
     ]
+    registry.write_text(
+        registry.read_text().replace("projects/public_repo_creator", "elsewhere"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="already points elsewhere"):
+        scaffold_target_project(spec, settings=settings, finalized_gawd_path=finalized)

@@ -35,7 +35,7 @@ Ledger operations are grouped by the durable state they own:
 - `coordination/dispatch.py` owns dispatch intent transitions.
 - `coordination/execution.py` owns execution leases, durable events, and retention.
 - `coordination/durable.py` owns DBOS serialization boundaries.
-- `coordination/saga_coordinator.py` owns the high-level staged saga runner.
+- `coordination/saga_coordinator.py` projects two legacy saga-inspection results into typed workflow contracts; it does not dispatch work.
 - `coordination/cli.py` owns argparse and MCP serialization only.
 
 ## Pow-wow execution

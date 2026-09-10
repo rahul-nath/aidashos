@@ -17,6 +17,7 @@ from ..contracts import (
     DispatchProgress,
     classify_dispatch_progress,
 )
+from ..coordination.checkpoints import recovery_staff_review_source
 from ..coordination.outcomes import (
     DispatchPromotionState,
     DispatchResultOrigin,
@@ -36,6 +37,7 @@ from .execution import (
     MilestoneSucceeded,
     _agent_evidence,
     evidence_artifact,
+    is_dispatch_wait_failure_code,
 )
 from .lifecycle import MilestoneExecutionStatus
 
@@ -76,6 +78,19 @@ class IntegratedMilestoneAdoption:
     applied: bool
 
 
+@dataclass(frozen=True)
+class _ParserRecoveryApproval:
+    approval: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _StaffRecoveryApproval:
+    approval: Mapping[str, Any]
+
+
+type _RecoveryApproval = _ParserRecoveryApproval | _StaffRecoveryApproval
+
+
 def _mapping(value: object) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -110,11 +125,15 @@ def adopt_recovered_dispatch(
             "dispatch_not_owned_by_work_unit",
             "dispatch source does not name a WorkUnit milestone",
         )
-    approval = _approved_recovery(intent_id)
+    recovery = _approved_recovery(intent_id)
+    approval = recovery.approval
     payload = _mapping(approval.get("payload"))
     dispatch_result = _mapping(payload.get("dispatch_result"))
     if (
-        dispatch_result.get("recovered_from_intent_id") != intent_id
+        (
+            isinstance(recovery, _ParserRecoveryApproval)
+            and dispatch_result.get("recovered_from_intent_id") != intent_id
+        )
         or dispatch_result.get("result_origin") != DispatchResultOrigin.AUTOMATED_RECOVERY.value
         or dispatch_result.get("result_state") != DispatchResultState.COMPLETED.value
         or dispatch_result.get("promotion_state") != DispatchPromotionState.MERGE_PENDING.value
@@ -312,11 +331,13 @@ def adopt_integrated_milestone(
 ) -> IntegratedMilestoneAdoption:
     """Attest that an integrated ancestor commit already satisfies blocked work.
 
-    This is deliberately narrower than a general status setter. It is available
-    only after a provider usage limit blocked an implementation milestone, only
-    for a non-empty source-patch requirement, and only when the named commit is
-    already an ancestor of the target project's integrated branch. The operator
-    supplies the acceptance argument, while git supplies the immutable subject.
+    This is deliberately narrower than a general status setter. It accepts a
+    provider-blocked implementation or a settled, staff-approved no-op whose
+    only missing evidence is the source patch already present at its base. The
+    milestone must require exactly one source patch, and the named commit must
+    already be an ancestor of the target project's integrated branch. The
+    operator supplies the acceptance argument, while the ledger and git supply
+    the immutable subject.
     """
 
     actor = accepted_by.strip()
@@ -369,12 +390,6 @@ def adopt_integrated_milestone(
             "work_unit_milestone_not_blocked",
             f"milestone {milestone_key} is {milestone.status.value}, not BLOCKED",
         )
-    if milestone.failure_code != "USAGE_LIMIT":
-        raise DispatchAdoptionRefused(
-            "integrated_adoption_not_provider_blocked",
-            "only a milestone blocked by USAGE_LIMIT may adopt pre-existing integrated work",
-        )
-
     plan_revision = repo.get_compiled_plan_revision(unit.compiled_plan_revision_id)
     compiled_milestone = plan_revision.plan.milestone(milestone_key)
     if tuple(compiled_milestone.required_artifacts) != (ArtifactKind.SOURCE_PATCH.value,):
@@ -397,6 +412,11 @@ def adopt_integrated_milestone(
             "integrated_commit_has_no_patch",
             f"commit {commit_sha} changes no files",
         )
+    adoption_basis = _integrated_adoption_basis(
+        failure_code=milestone.failure_code,
+        intent_id=milestone.dispatch_intent_id,
+        commit_sha=commit_sha,
+    )
 
     attempt = milestone.attempt + 1
     child_workflow_id = f"integrated-adoption:{commit_sha}"
@@ -423,6 +443,7 @@ def adopt_integrated_milestone(
         step_name=f"integrated-adoption:{commit_sha}",
         metadata={
             "adoption_kind": "integrated_ancestor.v1",
+            "adoption_basis": adoption_basis,
             "accepted_by": actor,
             "acceptance_evidence": evidence,
             "integrated_commit_sha": commit_sha,
@@ -432,16 +453,21 @@ def adopt_integrated_milestone(
     )
     shared_payload = {
         "adoption_kind": "integrated_ancestor.v1",
+        "adoption_basis": adoption_basis,
         "accepted_by": actor,
         "acceptance_evidence": evidence,
         "integrated_commit_sha": commit_sha,
-        "provider_blocked_dispatch_intent_id": milestone.dispatch_intent_id,
+        "source_dispatch_intent_id": milestone.dispatch_intent_id,
+        **(
+            {"provider_blocked_dispatch_intent_id": milestone.dispatch_intent_id}
+            if adoption_basis == "provider_blocked.v1"
+            else {}
+        ),
     }
     outcome = record_integrated_completion(
         work_unit_id,
         phase=milestone.phase,
         milestone_key=milestone_key,
-        attempt=attempt,
         child_workflow_id=child_workflow_id,
         dispatch_intent_id=milestone.dispatch_intent_id,
         artifact=artifact,
@@ -451,11 +477,78 @@ def adopt_integrated_milestone(
     return IntegratedMilestoneAdoption(
         work_unit_id=work_unit_id,
         milestone_key=milestone_key,
-        attempt=attempt,
+        attempt=int(outcome.event.payload["attempt"]),
         commit_sha=commit_sha,
         accepted_by=actor,
         applied=outcome.applied,
     )
+
+
+def _integrated_adoption_basis(
+    *, failure_code: str | None, intent_id: str | None, commit_sha: str
+) -> str:
+    """Return the one machine-checked reason an integrated patch may be credited."""
+
+    if failure_code == "USAGE_LIMIT":
+        return "provider_blocked.v1"
+    if failure_code != "missing_required_artifacts":
+        raise DispatchAdoptionRefused(
+            "integrated_adoption_failure_not_recoverable",
+            "integrated adoption requires USAGE_LIMIT or a staff-approved no-op "
+            "missing only its source_patch artifact",
+        )
+    if not intent_id:
+        raise DispatchAdoptionRefused(
+            "integrated_adoption_intent_unknown",
+            "the missing-artifact milestone records no dispatch intent",
+        )
+
+    intent = _dispatch_intent(intent_id)
+    if intent.get("status") != DispatchIntentStatus.DONE.value:
+        raise DispatchAdoptionRefused(
+            "integrated_adoption_dispatch_not_done",
+            f"dispatch intent {intent_id} is {intent.get('status')}, not DONE",
+        )
+    dispatch_result = decode_json_object(intent.get("result"))
+    run_result = _mapping(dispatch_result.get("run_result"))
+    checkpoints = _typed_artifacts(run_result, "worktree_commit_checkpoint")
+    reviews = _typed_artifacts(run_result, "review_result")
+    if run_result.get("status") != "COMPLETED" or not checkpoints or not reviews:
+        raise DispatchAdoptionRefused(
+            "integrated_adoption_noop_evidence_incomplete",
+            "the settled dispatch lacks a completed run, checkpoint, or typed review",
+        )
+
+    checkpoint = _mapping(checkpoints[-1].get("content"))
+    worktree = _mapping(checkpoint.get("worktree"))
+    review = _mapping(reviews[-1].get("content"))
+    checkpoint_proves_noop = (
+        checkpoint.get("base_head_sha") == commit_sha
+        and checkpoint.get("changed_from_base") is False
+        and checkpoint.get("commit_created") is False
+        and checkpoint.get("commit_sha") is None
+        and not _sequence(checkpoint.get("checkpointed_files"))
+        and worktree.get("head_sha") == commit_sha
+        and not _sequence(run_result.get("changed_files"))
+    )
+    review_proves_acceptance = (
+        review.get("schema_version") == "review_result.v1"
+        and review.get("completion_status") == "COMPLETED"
+        and review.get("verdict") == "approve"
+        and review.get("finding_severity") == "NON_BLOCKING"
+        and review.get("review_origin") == "AUTOMATED_STAFF"
+        and review.get("provenance_stamped_by") == "pow_wow_executor"
+        and review.get("reviewer_tier") == "STAFF"
+        and review.get("base_sha") == commit_sha
+        and review.get("reviewed_commit_sha") == commit_sha
+    )
+    if not checkpoint_proves_noop or not review_proves_acceptance:
+        raise DispatchAdoptionRefused(
+            "integrated_adoption_noop_evidence_invalid",
+            "the settled dispatch does not prove a clean no-op and exact staff approval "
+            f"for {commit_sha}",
+        )
+    return "staff_approved_noop.v1"
 
 
 def record_integrated_completion(
@@ -463,81 +556,22 @@ def record_integrated_completion(
     *,
     phase: Any,
     milestone_key: str,
-    attempt: int,
     child_workflow_id: str,
     dispatch_intent_id: str | None,
     artifact: Any,
     shared_payload: dict[str, Any],
     result_summary: str,
 ) -> Any:
-    """Complete one milestone from an integrated commit, as facts.
-
-    The shared core of the two paths that credit a milestone with a commit the
-    refinery already holds: the operator's `adopt_integrated_milestone` and the
-    automatic `integration_settlement` consumer. One function so the READY,
-    RUNNING, SUCCEEDED triple and its payload conventions cannot drift between
-    them. `record_fact`'s own idempotency makes a replay of the same attempt a
-    no-op rather than a second write.
-    """
-
-    milestone = next(
-        item
-        for item in repo.list_milestone_executions(work_unit_id)
-        if item.stable_key == milestone_key
-    )
-    if milestone.status is MilestoneExecutionStatus.RUNNING:
-        return repo.record_fact(
-            work_unit_id,
-            MilestoneTransition(
-                phase=phase,
-                milestone_key=milestone_key,
-                status=MilestoneExecutionStatus.SUCCEEDED,
-                attempt=attempt,
-                child_workflow_id=child_workflow_id,
-                dispatch_intent_id=dispatch_intent_id,
-                result_summary=result_summary,
-                artifacts=(artifact,),
-                payload=shared_payload,
-            ),
-            child_workflow_id=child_workflow_id,
-        )
-    repo.record_fact(
+    """Send verified landing evidence to the aggregate's atomic completion owner."""
+    return repo.record_integrated_milestone_completion(
         work_unit_id,
-        MilestoneTransition(
-            phase=phase,
-            milestone_key=milestone_key,
-            status=MilestoneExecutionStatus.READY,
-            attempt=attempt,
-            payload=shared_payload,
-        ),
-    )
-    repo.record_fact(
-        work_unit_id,
-        MilestoneTransition(
-            phase=phase,
-            milestone_key=milestone_key,
-            status=MilestoneExecutionStatus.RUNNING,
-            attempt=attempt,
-            child_workflow_id=child_workflow_id,
-            dispatch_intent_id=dispatch_intent_id,
-            payload=shared_payload,
-        ),
-        child_workflow_id=child_workflow_id,
-    )
-    return repo.record_fact(
-        work_unit_id,
-        MilestoneTransition(
-            phase=phase,
-            milestone_key=milestone_key,
-            status=MilestoneExecutionStatus.SUCCEEDED,
-            attempt=attempt,
-            child_workflow_id=child_workflow_id,
-            dispatch_intent_id=dispatch_intent_id,
-            result_summary=result_summary,
-            artifacts=(artifact,),
-            payload=shared_payload,
-        ),
-        child_workflow_id=child_workflow_id,
+        phase=phase,
+        milestone_key=milestone_key,
+        recovery_child_workflow_id=child_workflow_id,
+        dispatch_intent_id=dispatch_intent_id,
+        artifact=artifact,
+        shared_payload=shared_payload,
+        result_summary=result_summary,
     )
 
 
@@ -567,15 +601,16 @@ class SettledDispatchAdoption:
 def adopt_settled_dispatch(work_unit_id: str, milestone_key: str) -> SettledDispatchAdoption:
     """Credit a wait-elapsed milestone with its own dispatch, once that settled DONE.
 
-    `dispatch_wait_elapsed` names a clock that ran out, not work that failed: the
-    milestone stops waiting while the dispatch keeps running. When that dispatch
-    later settles DONE, the ledger holds a complete, checkable result that no
-    lifecycle state can reach - a resume mints a fresh attempt and a rival
-    intent, so a milestone whose work reliably outlives its compiled bound
-    re-spends the work forever and never credits it.
+    `DEADLINE_EXCEEDED` names a clock that ran out, not work that failed: the
+    milestone stops waiting while the dispatch keeps running. Historical
+    `dispatch_wait_elapsed` rows mean the same thing and remain adoptable. When
+    that dispatch later settles DONE, the ledger holds a complete, checkable
+    result that no lifecycle state can reach - a resume mints a fresh attempt
+    and a rival intent, so a milestone whose work reliably outlives its compiled
+    bound re-spends the work forever and never credits it.
 
     This is the narrow repair. It accepts only a milestone blocked by
-    `dispatch_wait_elapsed`, reads only that milestone's own intent, and only
+    an exhausted dispatch wait, reads only that milestone's own intent, and only
     when the ledger says DONE. The evidence goes through the same translation
     the milestone workflow itself would have applied - a result without the
     runner payload, or without every required artifact, is refused with that
@@ -616,10 +651,10 @@ def adopt_settled_dispatch(work_unit_id: str, milestone_key: str) -> SettledDisp
             "work_unit_milestone_not_blocked",
             f"milestone {milestone_key} is {milestone.status.value}, not BLOCKED",
         )
-    if milestone.failure_code != "dispatch_wait_elapsed":
+    if not is_dispatch_wait_failure_code(milestone.failure_code):
         raise DispatchAdoptionRefused(
             "settled_adoption_not_wait_elapsed",
-            "only a milestone blocked by dispatch_wait_elapsed may adopt its settled dispatch",
+            "only a milestone blocked by an exhausted dispatch wait may adopt its settled dispatch",
         )
     intent_id = milestone.dispatch_intent_id
     if not intent_id:
@@ -818,25 +853,70 @@ def _dispatch_intent(intent_id: str) -> Mapping[str, Any]:
     return rowdict(row)
 
 
-def _approved_recovery(intent_id: str) -> Mapping[str, Any]:
+def _approved_recovery(intent_id: str) -> _RecoveryApproval:
     with connect() as connection:
         rows = connection.execute(
             "SELECT * FROM approval_requests WHERE request_type = 'CODE_MERGE' AND status = ?",
             (ApprovalStatus.APPROVED.value,),
         ).fetchall()
-    matches = []
+    matches: list[_RecoveryApproval] = []
     for row in rows:
         item = rowdict(row)
         item["payload"] = decode_json_object(item.pop("payload_json", None))
         recovery = _mapping(_mapping(item["payload"]).get("review_recovery"))
         if recovery.get("source_intent_id") == intent_id:
-            matches.append(item)
+            matches.append(_ParserRecoveryApproval(item))
+        elif _staff_recovery_names_source(item, intent_id):
+            matches.append(_StaffRecoveryApproval(item))
     if len(matches) != 1:
         raise DispatchAdoptionRefused(
             "approved_recovery_missing" if not matches else "approved_recovery_ambiguous",
-            f"expected one approved parser recovery for {intent_id}, found {len(matches)}",
+            f"expected one approved recovery for {intent_id}, found {len(matches)}",
         )
     return matches[0]
+
+
+def _staff_recovery_names_source(approval: Mapping[str, Any], intent_id: str) -> bool:
+    """Resolve a fresh review through its checkpoint, never an invented completion.
+
+    Parser recovery names its predecessor in the result. A fresh staff review
+    instead has a distinct DONE intent whose immutable checkpoint and parent
+    both name that predecessor. Approval, exact-review and integration checks
+    remain shared above; no old dispatch or failed attempt is rewritten.
+    """
+    payload = _mapping(approval.get("payload"))
+    checkpoint_id = payload.get("checkpoint_id")
+    reviewer_intent = payload.get("intent_id")
+    if not isinstance(checkpoint_id, str) or not isinstance(reviewer_intent, str):
+        return False
+    with connect() as connection:
+        row = connection.execute(
+            "SELECT d.status, d.source, d.parent_intent_id, d.target_project_id, "
+            "d.prompt, d.result, c.intent_id AS source_intent_id, c.saga_id "
+            "FROM dispatch_intents d JOIN agent_execution_checkpoints c "
+            "ON c.checkpoint_id=d.checkpoint_id "
+            "WHERE d.intent_id=? AND c.checkpoint_id=?",
+            (reviewer_intent, checkpoint_id),
+        ).fetchone()
+    if row is None:
+        return False
+    request = decode_json_object(row["prompt"])
+    recorded = decode_json_object(row["result"])
+    approved = _mapping(payload.get("dispatch_result"))
+    return (
+        row["status"] == DispatchIntentStatus.DONE.value
+        and row["parent_intent_id"] == row["source_intent_id"] == intent_id
+        and row["source"] == recovery_staff_review_source(checkpoint_id, request.get("retry_of"))
+        and row["target_project_id"] == payload.get("target_project_id")
+        and row["saga_id"] == approval.get("saga_id")
+        and request.get("schema_version") == "recovery_staff_review_request.v1"
+        and request.get("checkpoint_id") == checkpoint_id
+        and request.get("base_sha") == payload.get("base_sha")
+        and request.get("target_project_id") == payload.get("target_project_id")
+        and recorded.get("result_origin") == DispatchResultOrigin.AUTOMATED_RECOVERY.value
+        and recorded.get("result_state") == DispatchResultState.COMPLETED.value
+        and recorded.get("run_result") == approved.get("run_result")
+    )
 
 
 def _integrated_branch_contains(project: LinkedProject, commit_sha: str) -> bool:

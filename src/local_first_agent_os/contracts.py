@@ -199,11 +199,7 @@ class ArtifactRole(StrEnum):
 
 
 class AgentHarness(StrEnum):
-    """A frontier CLI reachable as a direct query target.
-
-    The value is the adapter's own `name`, so a harness routes to its adapter
-    without a second lookup table to keep in sync.
-    """
+    """A frontier CLI reachable as a direct query target."""
 
     CLAUDE_CODE = "claude_code"
     CODEX_CLI = "codex_cli"

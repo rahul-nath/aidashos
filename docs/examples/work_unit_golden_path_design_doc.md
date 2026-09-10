@@ -1,6 +1,6 @@
 # Golden path design doc
 
-Target project: local-first-agent-os
+Target project: local_first_agent_os
 
 A DesignDoc whose milestones a real dispatch can actually finish.
 

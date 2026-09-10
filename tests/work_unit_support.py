@@ -11,10 +11,13 @@ uses this one so a change in compiler behavior shows up in one place.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+from local_first_agent_os.settings import get_settings
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units import service
+from local_first_agent_os.work_units.design_doc import parse_design_doc
 from local_first_agent_os.work_units.execution import SimulatedExecutorRuntime
 from local_first_agent_os.work_units.lifecycle import (
     TERMINAL_WORK_UNIT_STATUSES,
@@ -34,6 +37,59 @@ ACCEPTANCE_DESIGN_DOC_PATH = (
 # documentation. A second copy in either place would be a second source of truth
 # for what the compiler accepts.
 ACCEPTANCE_DESIGN_DOC = ACCEPTANCE_DESIGN_DOC_PATH.read_text(encoding="utf-8")
+
+
+def acceptance_target_project_id() -> str:
+    """The example's declared identity, used to provision its isolated test registry."""
+
+    target = parse_design_doc(
+        ACCEPTANCE_DESIGN_DOC, design_doc_id="acceptance_fixture"
+    ).declared_target_project_id
+    assert target is not None
+    return target
+
+
+def register_document_target(markdown: str, target: Path) -> str:
+    """Give a document its declared project in the isolated test registry."""
+
+    project_id = parse_design_doc(
+        markdown, design_doc_id="registered_fixture"
+    ).declared_target_project_id
+    assert project_id is not None
+    target.mkdir(parents=True, exist_ok=True)
+    write_test_project_registry(get_settings().config_dir, project_id, target)
+    return project_id
+
+
+def write_test_project_registry(config_dir: Path, project_id: str, target: Path) -> Path:
+    """Register the actual test target before compilation can attempt adoption."""
+
+    config_dir.mkdir(parents=True, exist_ok=True)
+    registry = config_dir / "linked_projects.toml"
+    identity = json.dumps(project_id)
+    registry.write_text(
+        f"""[center]
+id = {identity}
+description = "Isolated test center"
+control_plane_project = {identity}
+default_saga_project = {identity}
+default_memory_project = {identity}
+
+[[projects]]
+id = {identity}
+kind = "test_repo"
+path = {json.dumps(str(target))}
+status = "active"
+read_only = false
+description = "Isolated test target"
+primary_interfaces = ["pytest"]
+owns = ["tests"]
+avoid = []
+verification_commands = ["uv run pytest"]
+""",
+        encoding="utf-8",
+    )
+    return registry
 
 
 def compile_acceptance_doc(

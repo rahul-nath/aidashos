@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
@@ -208,72 +209,139 @@ class BenchSlot:
 Bench = dict[DispatchTier, BenchSlot]
 
 
-class SharedSeatRefused(ValueError):
-    """A pairing named one model for both frontier seats.
+@dataclass(frozen=True)
+class AutoRanked:
+    """Choose an eligible pair using the operator's quality chart."""
 
-    Unconditional. There used to be a `same_model_review_accepted` escape flag,
-    justified by a machine with only one model installed - and its first use in
-    anger was an agent reaching for it in a bench that had a second model
-    sitting in `configs/model_registry.toml` the whole time, which is exactly
-    how an acknowledgement decays into a loophole. The operator's ruling
-    (2026-08-23) is that the one-model machine is not a configuration this
-    system serves: claude and codex each carry multiple model tiers, and the
-    local registry carries three, so a second model always exists. A shared
-    seat is therefore unrepresentable, not acknowledgeable.
-    """
+    def to_payload(self) -> dict[str, str]:
+        return {"mode": "auto"}
+
+
+@dataclass(frozen=True)
+class StrictPair:
+    """Use exactly this named pair; availability cannot authorize substitution."""
+
+    pairing: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pairing, str) or not self.pairing.strip():
+            raise ValueError("fixed pairing requires a nonempty pairing name")
+
+    def to_payload(self) -> dict[str, str]:
+        # Preserve the wire spelling used by immutable v1 assignments.
+        return {"mode": "fixed", "pairing": self.pairing}
+
+
+@dataclass(frozen=True)
+class RankedAny:
+    """Allow the quality chart's complete ranked candidate space."""
+
+    def to_payload(self) -> dict[str, str]:
+        return {"mode": "ranked"}
+
+
+@dataclass(frozen=True)
+class SameProviderOnly:
+    """Preserve each preferred seat's harness and vendor while ranking models."""
+
+    def to_payload(self) -> dict[str, str]:
+        return {"mode": "same_provider"}
+
+
+@dataclass(frozen=True)
+class ExplicitPairs:
+    """Allow only these named pairs, in operator-declared order."""
+
+    pairings: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.pairings, tuple)
+            or not self.pairings
+            or any(not isinstance(name, str) or not name.strip() for name in self.pairings)
+            or len(set(self.pairings)) != len(self.pairings)
+        ):
+            raise ValueError("fallback pairings must be a nonempty tuple of unique names")
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"mode": "explicit", "pairings": list(self.pairings)}
+
+
+type FallbackPolicy = RankedAny | SameProviderOnly | ExplicitPairs
+
+
+def _fallback_from_payload(value: object) -> FallbackPolicy:
+    if isinstance(value, Mapping):
+        if set(value) == {"mode"}:
+            if value["mode"] == "ranked":
+                return RankedAny()
+            if value["mode"] == "same_provider":
+                return SameProviderOnly()
+        if (
+            value.get("mode") == "explicit"
+            and set(value) == {"mode", "pairings"}
+            and isinstance(value["pairings"], list)
+        ):
+            return ExplicitPairs(tuple(value["pairings"]))
+    raise ValueError("pairing fallback must be ranked, same_provider, or explicit pairings")
+
+
+@dataclass(frozen=True)
+class PreferredPair:
+    """Try exact preferred pins before entering the declared fallback space."""
+
+    pairing: str
+    fallback: FallbackPolicy
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.pairing, str) or not self.pairing.strip():
+            raise ValueError("preferred pairing requires a nonempty pairing name")
+        if not isinstance(self.fallback, (RankedAny, SameProviderOnly, ExplicitPairs)):
+            raise ValueError("preferred pairing requires a typed fallback policy")
+        if isinstance(self.fallback, ExplicitPairs) and self.pairing in self.fallback.pairings:
+            raise ValueError("a preferred pairing cannot fall back to itself")
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "mode": "preferred",
+            "pairing": self.pairing,
+            "fallback": self.fallback.to_payload(),
+        }
+
+
+type PairingSelection = AutoRanked | StrictPair | PreferredPair
+
+
+def pairing_selection_from_payload(value: object) -> PairingSelection:
+    """Decode only the fields belonging to the selected policy variant."""
+
+    if isinstance(value, Mapping):
+        if value.get("mode") == "auto" and set(value) == {"mode"}:
+            return AutoRanked()
+        if value.get("mode") == "fixed" and set(value) == {"mode", "pairing"}:
+            return StrictPair(value["pairing"])
+        if value.get("mode") == "preferred" and set(value) == {"mode", "pairing", "fallback"}:
+            return PreferredPair(value["pairing"], _fallback_from_payload(value["fallback"]))
+    raise ValueError(
+        "pairing selection must be auto, fixed, or preferred with explicit fallback policy"
+    )
 
 
 @dataclass(frozen=True)
 class FrontierPairing:
-    """The two frontier seats as one declaration: who implements, who reviews.
+    """The implementer and reviewer declared and moved as one pair.
 
-    Senior and staff were two independent tables, and picking each was two
-    decisions. It is one. "Who reviews Opus" has an answer that depends on what
-    is implementing, and splitting the declaration meant an operator could
-    change half of it - which is not a hypothetical here. Every swap of this
-    seating has cost something: the 2026-08-09 swap left four prose claims
-    behind, and `POLICIES.md` twice denied the implementer a write its own plan
-    had granted, because two files disagreed about who was seated.
-
-    So a pairing is chosen by name and both seats arrive together. Editing the
-    implementer without answering "then who reviews it" is no longer a thing the
-    file can express, and the property that review is worth running - that the
-    reviewer can disagree for reasons the implementer did not already have - is
-    enforced once, here, at the moment the seating is declared. One model in
-    both seats raises `SharedSeatRefused`, with no override; see that type for
-    why the override it briefly had is gone.
-
-    The predicate is `(harness, model)`. Two models from one vendor pass: that
-    is the sanctioned outage fallback. One seat pinning a model while the other
-    takes the CLI default also passes, because whether they coincide depends on
-    a default this cannot see. Two unpinned seats on one harness do not: the
-    same CLI default is the same model.
-
-    `fallback` names other pairings, in order. It is how the escape hatch stays
-    a pair: restaffing moves BOTH seats to the first fallback pairing that
-    avoids every unavailable harness, so the moved bench is itself a declared,
-    checked pairing rather than whatever two per-seat escapes happened to
-    compose. A per-seat escape was the previous shape and it was half a way
-    out - implementation could move to a live vendor while review kept
-    dispatching into the spent one, and the seat that did move landed beside a
-    reviewer nobody had checked it against.
+    Model or provider diversity is a selection preference, not proof of review
+    independence. The executor owns separate sessions, planning visibility,
+    read-only review, and host-stamped evidence even when both seats name the
+    same model. Named fallback chains apply to unassigned dispatches; a fixed
+    WorkUnit selection admits only its exact pair.
     """
 
     name: str
     senior: BenchSlot
     staff: BenchSlot
     fallback: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        if self.senior.harness is not self.staff.harness or self.senior.model != self.staff.model:
-            return
-        named = self.senior.model or f"the {self.senior.harness.value} CLI default"
-        raise SharedSeatRefused(
-            f"pairing {self.name!r} seats {named} as both implementer and reviewer, so "
-            "review would be the model that wrote the change re-reading itself. Name a "
-            "different model for one seat; every harness this system staffs offers "
-            "more than one"
-        )
 
     def seats(self) -> dict[DispatchTier, BenchSlot]:
         """The two slots, keyed by the tier each one holds."""
@@ -312,8 +380,14 @@ class Staffing:
     pairings: dict[str, FrontierPairing]
     seated: FrontierPairing
     solo: Bench
+    work_unit_pairing: PairingSelection = field(default_factory=AutoRanked)
+    work_unit_pairing_overrides: Mapping[str, PairingSelection] = field(default_factory=dict)
+    direct_query_models: Mapping[Harness, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        for harness, model in self.direct_query_models.items():
+            if harness not in {Harness.CODEX, Harness.CLAUDE} or not model.strip():
+                raise ValueError("direct queries require a frontier harness and nonempty model")
         if self.pairings.get(self.seated.name) is not self.seated:
             raise ValueError(f"seated pairing {self.seated.name!r} is not among the declared ones")
         for pairing in self.pairings.values():
@@ -327,6 +401,30 @@ class Staffing:
                         f"pairing {pairing.name!r} falls back to {target!r}, which is not "
                         f"declared; the file has {sorted(self.pairings)}"
                     )
+        for selection in (self.work_unit_pairing, *self.work_unit_pairing_overrides.values()):
+            if not isinstance(selection, (AutoRanked, StrictPair, PreferredPair)):
+                raise ValueError("unsupported pairing selection")
+            if isinstance(selection, (StrictPair, PreferredPair)):
+                names = (selection.pairing,)
+                if isinstance(selection, PreferredPair) and isinstance(
+                    selection.fallback, ExplicitPairs
+                ):
+                    names += selection.fallback.pairings
+                for name in names:
+                    if name not in self.pairings:
+                        raise ValueError(f"fixed or preferred pairing {name!r} is not declared")
+                    pair = self.pairings[name]
+                    if any(
+                        not slot.model or not slot.model.strip() for slot in pair.seats().values()
+                    ):
+                        raise ValueError(
+                            "a fixed or preferred pairing must explicitly name both models"
+                        )
+
+    def selection_for(self, work_unit_id: str) -> PairingSelection:
+        """A scoped override wins only for a new attempt of that WorkUnit."""
+
+        return self.work_unit_pairing_overrides.get(work_unit_id, self.work_unit_pairing)
 
     @property
     def bench(self) -> Bench:
@@ -479,9 +577,7 @@ DEFAULT_PAIRING = FrontierPairing(
 
 DEFAULT_JUNIOR = BenchSlot(
     harness=Harness.PI,
-    model="gemma4",
     capacity=4,
-    backup_models=(BackupModel(harness=Harness.PI, model="qwen3.8-27b-mtp"),),
 )
 
 DEFAULT_STAFFING = Staffing(
@@ -567,7 +663,8 @@ class SpawnableModel:
         seat = self.tier.value
         if self.workload is not JudgmentWorkload.STANDARD:
             seat = f"{seat}[{self.workload.value}]"
-        return f"{seat} ({self.harness.value} {self.model or 'CLI default'})"
+        default = "active general" if self.harness is Harness.PI else "CLI default"
+        return f"{seat} ({self.harness.value} {self.model or default})"
 
 
 def spawnable_models(bench: Bench | None = None) -> tuple[SpawnableModel, ...]:
@@ -696,13 +793,9 @@ def _read_pairings(data: dict[str, Any]) -> dict[str, FrontierPairing]:
     pairings: dict[str, FrontierPairing] = {}
     for name, table in data.get("pairings", {}).items():
         if "same_model_review_accepted" in table:
-            # A stale key from the flag's ten-day life is refused by name rather
-            # than ignored, because ignoring it would tell an operator their
-            # acknowledgement was on record when nothing reads it.
             raise ValueError(
                 f"pairing {name!r} sets same_model_review_accepted, which no longer "
-                "exists: a shared seat is unrepresentable now. Name a different "
-                "model for one seat"
+                "exists: remove the flag; separate review sessions may use the same model"
             )
         for seat in ("senior", "staff"):
             if seat not in table:
@@ -792,10 +885,25 @@ def load_staffing(config_path: Path) -> Staffing:
             f"{config_path} declares no [pairings.<name>] table, so it seats no "
             "frontier pair; declare one, or remove the file to run on the defaults"
         )
+    overrides = data.get("work_unit_pairing_overrides", {})
+    if not isinstance(overrides, dict) or any(not key.strip() for key in overrides):
+        raise ValueError("work_unit_pairing_overrides must map nonempty WorkUnit IDs to policies")
+    query_models = data.get("direct_query_models", {})
+    if not isinstance(query_models, dict) or any(
+        not isinstance(model, str) for model in query_models.values()
+    ):
+        raise ValueError("direct_query_models must map frontier harness names to model strings")
     return Staffing(
         pairings=pairings,
         seated=_seated_pairing(data, pairings),
         solo=solo,
+        work_unit_pairing=pairing_selection_from_payload(
+            data.get("work_unit_pairing", {"mode": "auto"})
+        ),
+        work_unit_pairing_overrides={
+            key: pairing_selection_from_payload(value) for key, value in overrides.items()
+        },
+        direct_query_models={Harness(name): model for name, model in query_models.items()},
     )
 
 

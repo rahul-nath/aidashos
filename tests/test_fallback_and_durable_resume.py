@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from local_first_agent_os.cli import _active_general_selection
 from local_first_agent_os.contracts import (
     ModelRole,
     SourceType,
@@ -88,6 +89,15 @@ def test_active_general_role_persists_across_runtime_rebuild(tmp_path: Path) -> 
 
     second = build_runtime(settings)
     assert second.model_manager.effective_general_role() == ModelRole.GENERAL_FALLBACK
+
+
+def test_active_general_selection_command_is_machine_readable(runtime) -> None:
+    runtime.model_manager.set_active_general_role(ModelRole.GENERAL_FALLBACK, "operator")
+
+    assert _active_general_selection(runtime) == (
+        "general_fallback",
+        "qwen3.8-27b-mtp",
+    )
 
 
 def test_done_directive_records_fallback_when_default_unavailable(runtime, tmp_path: Path) -> None:

@@ -7,6 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from local_first_agent_os.coordination.checkpoints import (
     append_execution_event,
     create_execution_checkpoint,
@@ -22,13 +24,17 @@ from local_first_agent_os.coordination.dispatch import (
 )
 from local_first_agent_os.coordination.execution import open_execution_lease
 from local_first_agent_os.coordination.projects import create_saga
-from local_first_agent_os.coordination.store import set_root
+from local_first_agent_os.coordination.store import set_root, tx
 
 
 def _claimed_lease(tmp_path: Path) -> tuple[str, str]:
     set_root(str(tmp_path))
     submitted = submit_dispatch_intent(
-        "senior", "Implement bounded change", kind="code", target_project_id="target"
+        "senior",
+        "Implement bounded change",
+        kind="code",
+        target_project_id="target",
+        permitted_capabilities=("read_repository", "invoke_model"),
     )
     intent_id = submitted["intent_id"]
     claimed = claim_next_dispatch_intent("test-worker", "senior")
@@ -37,6 +43,38 @@ def _claimed_lease(tmp_path: Path) -> tuple[str, str]:
         "checkpoint-test", "test-worker", intent_id=intent_id, timeout_seconds=60
     )
     return intent_id, opened["lease"]["lease_id"]
+
+
+@pytest.mark.parametrize(
+    "names", [[], ["read_repository"], ["invoke_model"], ["unknown_grant"], {}]
+)
+def test_recovery_cannot_invent_missing_source_authority(tmp_path, names):
+    intent_id, lease_id = _claimed_lease(tmp_path)
+    saga = create_saga("authority fixture", 1000, 60)
+    checkpoint = create_execution_checkpoint(
+        lease_id,
+        reason="deadline",
+        status="PAUSED",
+        saga_id=saga["saga_id"],
+        base_head_sha="a" * 40,
+    )["checkpoint"]
+    with tx() as connection:
+        connection.execute(
+            "UPDATE dispatch_intents SET permitted_capabilities=? WHERE intent_id=?",
+            (json.dumps(names), intent_id),
+        )
+    result = request_recovery_staff_review(
+        checkpoint["checkpoint_id"],
+        target_project_id="target",
+        branch="agent/retained",
+        base_sha="a" * 40,
+        commit_sha="b" * 40,
+    )
+    assert result["error"] in {
+        "recovery_source_authority_invalid",
+        "recovery_source_authority_missing",
+    }
+    assert list_dispatch_intents(status_filter="PENDING")["intents"] == []
 
 
 def test_events_are_append_only_and_idempotent(tmp_path: Path, monkeypatch) -> None:
@@ -201,6 +239,10 @@ def test_recovery_staff_review_request_is_typed_idempotent_and_staff_only(
     assert first["intent"]["intent_id"] == replay["intent"]["intent_id"]
     assert first["intent"]["tier"] == "staff"
     assert first["intent"]["kind"] == "code"
+    assert json.loads(first["intent"]["permitted_capabilities"]) == [
+        "invoke_model",
+        "read_repository",
+    ]
     request = json.loads(first["intent"]["prompt"])
     assert request == {
         "base_sha": base_sha,
@@ -225,6 +267,52 @@ def test_recovery_staff_review_request_is_typed_idempotent_and_staff_only(
         milestone_id="milestone-3",
     )
     assert conflict["error"] == "recovery_staff_review_conflict"
+
+
+def test_recovery_retry_preserves_terminal_history_and_exact_anchor(tmp_path):
+    _, lease_id = _claimed_lease(tmp_path)
+    saga = create_saga("Retry unavailable review", 1000, 300)
+    checkpoint = create_execution_checkpoint(
+        lease_id,
+        reason="supervisor_error",
+        status="PAUSED",
+        saga_id=saga["saga_id"],
+        base_head_sha="a" * 40,
+    )["checkpoint"]
+    args = dict(
+        target_project_id="target", branch="agent/retained", base_sha="a" * 40, commit_sha="b" * 40
+    )
+    first = request_recovery_staff_review(checkpoint["checkpoint_id"], **args)["intent"]
+    retry = dict(args, retry_of=first["intent_id"])
+    assert request_recovery_staff_review(checkpoint["checkpoint_id"], **retry)["error"] == (
+        "recovery_retry_requires_exact_failed_predecessor"
+    )
+    claim_next_dispatch_intent("staff-fixture", "staff")
+    unavailable = json.dumps(
+        {
+            "schema_version": "dispatch_runner_result.v1",
+            "intent_id": first["intent_id"],
+            "target_project_id": "target",
+            "run_result": {"status": "UNAVAILABLE"},
+        }
+    )
+    assert complete_dispatch_intent(first["intent_id"], "FAILED", result=unavailable)["ok"]
+    assert (
+        request_recovery_staff_review(
+            checkpoint["checkpoint_id"], **dict(retry, commit_sha="c" * 40)
+        )["error"]
+        == "recovery_retry_requires_exact_failed_predecessor"
+    )
+    second = request_recovery_staff_review(checkpoint["checkpoint_id"], **retry)
+    replay = request_recovery_staff_review(checkpoint["checkpoint_id"], **retry)
+    assert second["created"] and not replay["created"]
+    assert second["intent"]["intent_id"] != first["intent_id"]
+    assert second["intent"]["intent_id"] == replay["intent"]["intent_id"]
+    with tx() as connection:
+        old = connection.execute(
+            "SELECT status,result FROM dispatch_intents WHERE intent_id=?", (first["intent_id"],)
+        ).fetchone()
+    assert old["status"] == "FAILED" and old["result"] == unavailable
 
 
 def test_recovery_staff_review_rejects_checkpoint_base_drift(

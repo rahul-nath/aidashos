@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Protocol
 
 from .coordination.store import ConnectionLike, connect, now, rowdict, tx
 from .harness_availability import USAGE_LIMIT_COOLDOWN, parse_quota_reset
@@ -27,12 +27,23 @@ from .pairing_lattice import (
     Pairing,
     PairingSelected,
     ProbeCache,
+    ProbeResult,
     QualityChart,
     ScoredModel,
-    load_quality_chart,
+    parse_quality_chart,
+    policy_candidates,
     select_live_pairing,
 )
-from .staffing import Bench, BenchSlot, Harness
+from .staffing import (
+    AutoRanked,
+    Bench,
+    BenchSlot,
+    Harness,
+    PairingSelection,
+    PreferredPair,
+    load_staffing,
+    pairing_selection_from_payload,
+)
 from .vocabulary import DispatchTier
 
 PAIRING_ASSIGNMENT_EVENT: Final = "pairing_assignment"
@@ -40,7 +51,6 @@ PAIRING_INVALIDATED_EVENT: Final = "pairing_assignment_invalidated"
 PAIRING_RELEASED_EVENT: Final = "pairing_assignment_released"
 PAIRING_ASSIGNMENT_SCHEMA: Final = "pairing_assignment.v1"
 _USAGE_LIMIT: Final = "USAGE_LIMIT"
-_PROBE_CACHE = ProbeCache()
 
 
 class NoLivePairing(RuntimeError):
@@ -60,9 +70,17 @@ class PairingAssignment:
     chart_hash: str
     pairing: Pairing
     probed: tuple[str, ...]
+    selection: PairingSelection = AutoRanked()
+    resolution_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.resolution_id is not None and (
+            not isinstance(self.resolution_id, str) or not self.resolution_id
+        ):
+            raise ValueError("pairing resolution id must be a nonempty string")
 
     def to_payload(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": PAIRING_ASSIGNMENT_SCHEMA,
             "state": "ASSIGNED",
             "assignment_id": self.assignment_id,
@@ -72,13 +90,20 @@ class PairingAssignment:
             "chart_hash": self.chart_hash,
             "score": self.pairing.score,
             "cross_vendor": self.pairing.cross_vendor,
-            "senior": _model_payload(self.pairing.senior),
-            "staff": _model_payload(self.pairing.staff),
+            "senior": model_payload(self.pairing.senior),
+            "staff": model_payload(self.pairing.staff),
             "selection_evidence": {
                 "kind": "recent_real_dispatch_outcomes",
                 "probed": list(self.probed),
             },
         }
+        # Auto-ranked v1 records predate this field. Preserve their exact wire
+        # shape so replay still verifies the original immutable ledger event.
+        if not isinstance(self.selection, AutoRanked):
+            payload["selection_policy"] = self.selection.to_payload()
+        if self.resolution_id is not None:
+            payload["resolution_id"] = self.resolution_id
+        return payload
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> PairingAssignment:
@@ -101,6 +126,10 @@ class PairingAssignment:
             chart_hash=str(payload["chart_hash"]),
             pairing=pairing,
             probed=tuple(str(item) for item in evidence.get("probed", ())),
+            selection=pairing_selection_from_payload(
+                payload.get("selection_policy", {"mode": "auto"})
+            ),
+            resolution_id=payload.get("resolution_id"),
         )
 
 
@@ -111,7 +140,7 @@ def _object(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
-def _model_payload(model: ScoredModel) -> dict[str, Any]:
+def model_payload(model: ScoredModel) -> dict[str, Any]:
     return {
         "harness": model.harness.value,
         "model": model.model,
@@ -182,31 +211,68 @@ def recent_dispatch_probe(
     return False, f"usage limited until {eligible_at.isoformat()}"
 
 
+class SelectionObserver(Protocol):
+    """Resolution records decisions without becoming another selector."""
+
+    def requested(
+        self, selection: PairingSelection, chart_hash: str, candidates: tuple[Pairing, ...]
+    ) -> None: ...
+    def rejected(self, model: ScoredModel, evidence: ProbeResult) -> None: ...
+    def fallback_selected(self, pair: Pairing) -> None: ...
+
+
 def select_assignment(
     *,
     work_unit_id: str,
     milestone_key: str,
     attempt: int,
     chart_path: Path,
+    staffing_path: Path | None = None,
     moment: datetime | None = None,
-    cache: ProbeCache = _PROBE_CACHE,
+    cache: ProbeCache | None = None,
+    observer: SelectionObserver | None = None,
 ) -> PairingAssignment:
-    """Select the highest-ranked pair not excluded by real dispatch evidence."""
+    """Apply operator selection, then check recent real dispatch evidence.
+
+    Fixed selection restricts candidates, never bypasses availability. Callers
+    must reuse an incumbent assignment before loading policy for a new attempt.
+    """
 
     chart_text = chart_path.read_text(encoding="utf-8")
-    chart: QualityChart = load_quality_chart(chart_path)
+    chart: QualityChart = parse_quality_chart(chart_text, source=str(chart_path))
+    selection: PairingSelection = AutoRanked()
+    declarations = {}
+    if staffing_path is not None:
+        if not staffing_path.is_file():
+            raise FileNotFoundError(f"pairing configuration is missing: {staffing_path}")
+        staffing = load_staffing(staffing_path)
+        selection = staffing.selection_for(work_unit_id)
+        declarations = staffing.pairings
+    candidates = policy_candidates(chart, selection, declarations)
+    chart_hash = sha256_text(chart_text)
+    if observer is not None:
+        observer.requested(selection, chart_hash, candidates)
     current = moment or datetime.now(UTC)
     selected = select_live_pairing(
         chart,
         lambda harness, model: recent_dispatch_probe(harness, model, moment=current),
-        cache=cache,
+        cache=cache if cache is not None else ProbeCache(),
         now=current.timestamp(),
+        candidates=candidates,
+        on_rejection=observer.rejected if observer is not None else None,
     )
     if isinstance(selected, NoPairingAnswered):
         raise NoLivePairing(selected)
     assert isinstance(selected, PairingSelected)
-    chart_hash = sha256_text(chart_text)
+    if (
+        isinstance(selection, PreferredPair)
+        and selected.pairing != candidates[0]
+        and observer is not None
+    ):
+        observer.fallback_selected(selected.pairing)
     identity = f"{work_unit_id}:{milestone_key}:{attempt}:{chart_hash}:{selected.pairing.label}"
+    if not isinstance(selection, AutoRanked):
+        identity += ":" + json.dumps(selection.to_payload(), sort_keys=True)
     return PairingAssignment(
         assignment_id=f"pa_{sha256_text(identity)[:24]}",
         work_unit_id=work_unit_id,
@@ -215,6 +281,7 @@ def select_assignment(
         chart_hash=chart_hash,
         pairing=selected.pairing,
         probed=selected.probed,
+        selection=selection,
     )
 
 
@@ -243,6 +310,10 @@ def record_assignment(
     """Persist or verify the one assignment attached to this intent."""
 
     event_id = f"pairing-assignment:{intent_id}"
+    if assignment.resolution_id is not None:
+        from .pairing_resolution import require_resolved_assignment
+
+        require_resolved_assignment(c, assignment)
     encoded = json.dumps(assignment.to_payload(), sort_keys=True)
     c.execute(
         "INSERT INTO ledger_events(event_id, event_type, aggregate_type, aggregate_id, "
@@ -298,7 +369,6 @@ def invalidate_assignment(
 ) -> None:
     """Append the quota invalidation that permits only the next attempt to re-seat."""
 
-    _PROBE_CACHE.invalidate(harness, model or "")
     payload = {
         "schema_version": "pairing_assignment_transition.v1",
         "state": "INVALIDATED_BY_QUOTA_FAILURE",

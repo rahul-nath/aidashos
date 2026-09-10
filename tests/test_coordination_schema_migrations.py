@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from local_first_agent_os.coordination import store
 from local_first_agent_os.coordination.contracts import CoordinationCommandName
 
 
@@ -477,3 +478,138 @@ def test_reset_closes_connections_opened_on_other_threads(
     module.reset_connections()
     assert module._pools == {}
     assert held() == 0
+
+
+_STRUCTURED_OUTCOME_COLUMNS = (
+    "outcome",
+    "agent_status",
+    "agent_failure_category",
+    "agent_failure",
+    "supervisor_status",
+    "supervisor_failure",
+    "persistence_status",
+    "persistence_failure",
+    "next_action",
+)
+
+
+def _prepare_historical_execution_schema(version: int, *, before_outcomes: bool) -> None:
+    """Materialize the relevant older table shape in the per-test real schema."""
+    with store.connect() as connection:
+        connection.execute("DROP TABLE host_verification_receipts")
+        if before_outcomes:
+            connection.execute("ALTER TABLE dispatch_intents DROP COLUMN outcome")
+            for column in _STRUCTURED_OUTCOME_COLUMNS:
+                connection.execute(f"ALTER TABLE agent_execution_leases DROP COLUMN {column}")
+        connection.execute(
+            "UPDATE coordination_schema_versions SET version=? WHERE component=?",
+            (version, store.POSTGRES_SCHEMA_COMPONENT),
+        )
+        connection.execute(
+            "INSERT INTO dispatch_intents(intent_id, tier, prompt, status, error, created_at) "
+            "VALUES ('migration-intent', 'senior', 'historical fixture', 'FAILED', "
+            "'supervisor fixture failed', 1)"
+        )
+        connection.execute(
+            "INSERT INTO agent_execution_leases(lease_id, idempotency_key, intent_id, "
+            "worker_id, status, error, lease_expires_at, created_at, heartbeat_at) "
+            "VALUES ('migration-lease', 'migration-key', 'migration-intent', 'fixture-worker', "
+            "'FAILED', 'supervisor fixture failed', 2, 1, 1)"
+        )
+        connection.commit()
+    store._SCHEMA_READY.clear()
+
+
+def _historical_execution_rows() -> tuple[dict[str, object], dict[str, object]]:
+    # _borrow avoids normal connect's migration refusal when observing the old
+    # version; mutations still go through the supported explicit migration.
+    connection = store._borrow(None)
+    try:
+        dispatch = connection.execute(
+            "SELECT * FROM dispatch_intents WHERE intent_id='migration-intent'"
+        ).fetchone()
+        lease = connection.execute(
+            "SELECT * FROM agent_execution_leases WHERE lease_id='migration-lease'"
+        ).fetchone()
+        assert dispatch is not None and lease is not None
+        return dict(dispatch), dict(lease)
+    finally:
+        connection.rollback()
+        connection.close()
+
+
+@pytest.mark.parametrize("previous_version", [8, 22])
+def test_receipt_upgrade_preserves_terminal_pending_history(previous_version: int) -> None:
+    _prepare_historical_execution_schema(previous_version, before_outcomes=False)
+    before = _historical_execution_rows()
+    assert before[1]["status"] == "FAILED" and before[1]["agent_status"] == "PENDING"
+
+    result = store.migrate_postgres_schema()
+
+    assert result["previous_version"] == previous_version
+    assert result["version"] == store.SCHEMA_VERSION
+    assert _historical_execution_rows() == before
+    with store.connect() as connection:
+        relation = connection.execute(
+            "SELECT to_regclass(current_schema() || '.host_verification_receipts') AS name"
+        ).fetchone()
+        assert relation is not None and relation["name"] is not None
+
+    # A new process's explicit migration must also preserve the same history.
+    store._SCHEMA_READY.clear()
+    repeated = store.migrate_postgres_schema()
+    assert repeated["migrated"] is False
+    assert _historical_execution_rows() == before
+
+
+def test_pre_outcome_upgrade_backfills_once_and_retains_later_observations() -> None:
+    _prepare_historical_execution_schema(7, before_outcomes=True)
+
+    first = store.migrate_postgres_schema()
+
+    assert first["previous_version"] == 7
+    dispatch, lease = _historical_execution_rows()
+    assert dispatch["outcome"] == "UNKNOWN_FAILURE"
+    assert lease["outcome"] == "SUPERVISOR_FAILED"
+    assert lease["agent_status"] == "FAILED"
+    assert lease["agent_failure_category"] == "INFRASTRUCTURE"
+    assert lease["agent_failure"] == "SUPERVISOR_FAILED"
+    assert lease["supervisor_status"] == "FAILED"
+    assert lease["supervisor_failure"] == "supervisor fixture failed"
+
+    # A later terminal observation with unresolved agent state is retained as
+    # such, not treated as another unconverted version-7 row on reconnection.
+    with store.connect() as connection:
+        connection.execute(
+            "UPDATE agent_execution_leases SET agent_status='PENDING', "
+            "agent_failure=NULL, agent_failure_category=NULL, supervisor_status='PENDING', "
+            "supervisor_failure=NULL WHERE lease_id='migration-lease'"
+        )
+        connection.commit()
+    after = _historical_execution_rows()
+    store._SCHEMA_READY.clear()
+    repeated = store.migrate_postgres_schema()
+    assert repeated["migrated"] is False
+    assert _historical_execution_rows() == after
+
+
+@pytest.mark.parametrize(
+    ("observed_version", "locked_version", "expected_backfills"),
+    [(7, 8, 0), (22, 7, 1), (None, None, 0)],
+)
+def test_historical_conversion_requires_version_evidence_under_migration_lock(
+    postgres_schema_env: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    observed_version: int | None,
+    locked_version: int | None,
+    expected_backfills: int,
+) -> None:
+    module = postgres_schema_env
+    connection = _FakePostgresConnection(observed_version, version_after_lock=locked_version)
+    converted: list[store.ConnectionLike] = []
+    monkeypatch.setattr(module, "_backfill_structured_outcomes", converted.append)
+
+    module.ensure_schema(connection, allow_migration=True)
+
+    assert len(converted) == expected_backfills
+    assert connection.scripts == [module.load_postgres_schema_sql()]

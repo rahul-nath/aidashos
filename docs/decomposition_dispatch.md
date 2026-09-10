@@ -66,8 +66,8 @@ scheduled task assigned to a tier. The tier resolves through `configs/staffing.t
 to an execution mode:
 
 - junior: local Pi delegate, usually `gemma4`, no worktree;
-- senior: external `claude` CLI process, worktree for code tasks;
-- staff: external `codex exec` process, read-only for review tasks.
+- senior: the configured implementing CLI, worktree for code tasks;
+- staff: the configured reviewing CLI in a separate session, read-only for review tasks.
 
 Coordination happens through the ledger and artifacts, not process namespace or
 shared chat state. Dependency output is fed to downstream task prompts through

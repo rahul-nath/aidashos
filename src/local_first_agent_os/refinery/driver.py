@@ -62,6 +62,7 @@ from ..pow_wow.verification import (
     classify_verification,
 )
 from ..project_center import LinkedProject
+from ..toolchains import verification_gate_environment
 from .bisect import (
     AwaitingStack,
     IntegrationOutcome,
@@ -305,11 +306,13 @@ def _check_provenance_and_land(
             assert_never(verdict)
 
     declared = tuple(project.verification_commands)
+    gate_environment, _stripped_names = verification_gate_environment(workspace.path)
     captures = tuple(
         run_captured_shell_command(
             command,
             workspace.path,
             timeout_seconds=DEFAULT_VERIFICATION_COMMAND_TIMEOUT_SECONDS,
+            environment=gate_environment,
         )
         for command in declared
     )
@@ -319,7 +322,14 @@ def _check_provenance_and_land(
             pass
         case VerificationFailed(failed=failed):
             first = failed[0]
-            excerpt = (first.stderr.strip() or first.stdout.strip())[-4_000:]
+            excerpt = "\n".join(
+                part
+                for part in (
+                    first.stderr.strip(),
+                    first.stdout.strip(),
+                )
+                if part
+            )[-4_000:]
             return StackGateRed(
                 failure=GateFailed(
                     command=first.command,

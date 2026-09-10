@@ -26,12 +26,12 @@ def _script_text() -> str:
 
 
 def test_failure_messages_name_the_resolved_log_not_a_fixed_path() -> None:
-    """Both exits are covered: the readiness timeout and the gemma4 proof."""
+    """Both exits name the resolved log and selected-model remedy."""
 
     text = _script_text()
 
     assert 'echo "llama-server did not become ready. Check $LLAMA_LOG" >&2' in text
-    assert "Check $LLAMA_LOG, then retry: pi /start /gemma4" in text
+    assert 'echo "       Check $LLAMA_LOG, then retry: pi /start /$junior_role" >&2' in text
 
 
 def test_the_hardcoded_log_path_survives_only_where_it_is_written() -> None:

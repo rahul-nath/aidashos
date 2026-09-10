@@ -251,7 +251,16 @@ def _browser_acceptance_profile(raw: object) -> BrowserAcceptanceProfile | None:
     return profile
 
 
-def _parse_linked_project_record(raw: dict[str, Any]) -> LinkedProject:
+def resolve_registered_project_path(path: Path, registry_path: Path) -> Path:
+    """Bind relative registry paths to the checkout containing its config directory."""
+
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return (registry_path.expanduser().parent.resolve().parent / expanded).resolve()
+
+
+def _parse_linked_project_record(raw: dict[str, Any], registry_path: Path) -> LinkedProject:
     """One registry entry, refusing the combination that cannot be verified.
 
     A project that may take code work must declare how that work is checked. The
@@ -283,7 +292,9 @@ def _parse_linked_project_record(raw: dict[str, Any]) -> LinkedProject:
     return LinkedProject(
         id=project_id,
         kind=_string(raw.get("kind"), "project.kind"),
-        path=Path(_string(raw.get("path"), "project.path")),
+        path=resolve_registered_project_path(
+            Path(_string(raw.get("path"), "project.path")), registry_path
+        ),
         status=_string(raw.get("status"), "project.status"),
         access=access_policy_from_record(
             read_only=read_only,
@@ -318,7 +329,9 @@ def load_project_center(settings: Settings | None = None) -> ProjectCenter:
         raise ValueError("linked_projects.toml must define at least one [[projects]] entry.")
 
     projects = tuple(
-        _parse_linked_project_record(item) for item in raw_projects if isinstance(item, dict)
+        _parse_linked_project_record(item, settings.linked_projects_path)
+        for item in raw_projects
+        if isinstance(item, dict)
     )
     project_ids = {project.id for project in projects}
     for required in (

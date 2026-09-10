@@ -182,7 +182,11 @@ def test_an_outage_after_a_partial_sweep_waits_before_retrying() -> None:
                 return {"ok": True, "intent": intent}
             raise LedgerUnavailable("coordination database is unavailable")
         assert isinstance(command, CompleteDispatchIntent)
-        return {"ok": True}
+        return {
+            "ok": True,
+            "intent_id": command.intent_id,
+            "status": command.status.value,
+        }
 
     dispatcher = LedgerDispatcher(
         lambda _intent: (DispatchTerminalStatus.DONE, None, None),
@@ -197,6 +201,7 @@ def test_an_outage_after_a_partial_sweep_waits_before_retrying() -> None:
     dispatched = dispatcher.dispatch_pending_intents(interval_seconds=0.0, max_polls=1)
 
     assert dispatched == 1
+    assert dispatcher.last_deferred == []
     assert claim_calls == 2
     assert waits == [UNAVAILABLE_INTERVAL_SECONDS]
 
@@ -396,7 +401,7 @@ def _legacy_two_approved_gawd_milestones_run_overlapped_on_two_senior_seats(
     def fake_delegate(**kwargs):
         with delegate_lock:
             delegate_calls.append(kwargs)
-        return {"ok": True, "output": f"junior context for {kwargs['task_name']}", "metadata": {}}
+        return {"ok": True, "output": f"junior context for {kwargs['task_name']}"}
 
     runner = DispatcherIntentRunner(
         runtime,

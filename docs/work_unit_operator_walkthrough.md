@@ -8,11 +8,18 @@ Commands are typed as `agent-ledger`, the `[project.scripts]` entry for `local_f
 
 ## 1. The example DesignDoc
 
+The examples target `local_first_agent_os`, the control-plane ID in the public project registry.
+Its `path = "."` resolves to the checkout containing the registry's `configs` directory, regardless of the shell's working directory.
+An absolute path also works when the target repository lives elsewhere.
+If your registry uses a different ID, change the example's `Target project:` line to that registered ID.
+
 Milestone blocks are ordinary Markdown headings with typed fields.
 Nothing else in the document is required to be machine readable, and nothing in it is discarded.
 
 ```markdown
 # Acceptance design doc
+
+Target project: local_first_agent_os
 
 ## Requirements
 

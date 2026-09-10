@@ -211,6 +211,30 @@ function attemptArtifacts(milestone: MilestoneView, artifacts: ArtifactView[]): 
     .sort((left, right) => rank(left) - rank(right))
 }
 
+/** Display evidence as text, never turn the reviewer report into UI authority. */
+function StaffReviewReport({ review }: { review: MilestoneView['staff_review'] }) {
+  if (!review) return null
+  return (
+    <section className="staffReviewReport" aria-label="Latest staff review">
+      <h3>Latest staff review</h3>
+      {review.kind === 'INVALID_ARTIFACT' ? (
+        <p>{review.explanation}</p>
+      ) : (
+        <>
+          <p>
+            {review.verdict === 'unclassified'
+              ? 'Verdict format was not recognized. No approval was recorded; read the staff report below.'
+              : `Recorded verdict: ${review.verdict.replaceAll('_', ' ')}`}
+          </p>
+          <p className="staffReviewText">{review.review_text}</p>
+          {review.reviewed_commit_sha && <p>Reviewed commit: <code>{review.reviewed_commit_sha}</code></p>}
+        </>
+      )}
+      <p className="laneMuted">Review artifact: <code>{review.artifact_id}</code></p>
+    </section>
+  )
+}
+
 /**
  * One milestone row: what it is, how it went, and whether its evidence exists.
  *
@@ -310,7 +334,9 @@ function MilestoneRow({
               />
               <Field label="Dispatch intent" value={milestone.dispatch_intent_id} />
               <Field label="Dispatch status" value={milestone.dispatch_status} />
+              <Field label="Latest dispatch failure" value={milestone.dispatch_failure_summary} />
             </dl>
+            <StaffReviewReport review={milestone.staff_review} />
             {own.length > 0 ? (
               <ArtifactList artifacts={own} />
             ) : (
@@ -476,10 +502,8 @@ function EventList({ events }: { events: EventView[] }) {
  * Two questions an operator standing in front of a stopped WorkUnit has, which
  * the cockpit answered neither of. "What do I run?" is answered by the same
  * `next_commands` rule tables the terminal prints from, fetched rather than
- * re-derived here so the two surfaces cannot drift. "What am I supposed to
- * *do*?" is answered by the blocking milestone's own description and acceptance
- * criteria: a milestone titled "on-device operator verification" does not say
- * what to verify, and until now the design document was the only place that did.
+ * re-derived here so the two surfaces cannot drift. Only a pending decision
+ * assigns work to the operator; a blocked agent task remains an agent task.
  *
  * Numbered, because the ready commands are ordered and an operator asked for a
  * list they could work down. Refused and unproved commands keep their place
@@ -497,11 +521,7 @@ function OperatorPlaybook({
   error: string | null
 }) {
   const blockingKeys = new Set(workUnit.blocking?.milestone_keys ?? [])
-  const waiting = workUnit.milestones.filter(
-    (milestone) =>
-      blockingKeys.has(milestone.stable_key) &&
-      (milestone.description !== '' || milestone.acceptance_criteria.length > 0),
-  )
+  const waiting = workUnit.milestones.filter((milestone) => blockingKeys.has(milestone.stable_key))
   const ready = nextCommands?.commands.filter((item) => item.status === 'READY') ?? []
   const blocked = nextCommands?.commands.filter((item) => item.status !== 'READY') ?? []
   if (error === null && nextCommands === null && waiting.length === 0) return null
@@ -513,25 +533,41 @@ function OperatorPlaybook({
       </header>
       {error && <p className="projectActionError">{error}</p>}
       {nextCommands && <p className="playbookHeadline">{nextCommands.headline}</p>}
-      {nextCommands?.detail && <p className="playbookDetail">{nextCommands.detail}</p>}
+      {nextCommands?.detail && !waiting.some((item) => item.dispatch_failure_summary) && (
+        <p className="playbookDetail">{nextCommands.detail}</p>
+      )}
 
-      {waiting.map((milestone) => (
-        <div key={milestone.stable_key} className="playbookAsk">
-          <p className="playbookAskTitle">
-            {milestone.stable_key} · {milestone.title} asks of you:
-          </p>
-          {milestone.description !== '' && (
-            <p className="playbookAskBody">{milestone.description}</p>
-          )}
-          {milestone.acceptance_criteria.length > 0 && (
-            <ul className="playbookCriteria">
-              {milestone.acceptance_criteria.map((criterion) => (
-                <li key={criterion}>{criterion}</li>
-              ))}
-            </ul>
-          )}
-        </div>
-      ))}
+      {waiting.map((milestone) => {
+        const operatorTask = workUnit.pending_decisions.some(
+          (decision) => decision.milestone_execution_id === milestone.milestone_execution_id,
+        )
+        return (
+          <div key={milestone.stable_key} className="playbookAsk">
+            <p className="playbookAskTitle">
+              {milestone.stable_key} · {milestone.title}
+            </p>
+            <StaffReviewReport review={milestone.staff_review} />
+            {milestone.dispatch_failure_summary && (
+              <p className="playbookReason">
+                Dispatch diagnostics: {milestone.dispatch_failure_summary}
+              </p>
+            )}
+            <details open={operatorTask}>
+              <summary>{operatorTask ? 'Operator task details' : 'Agent task details'}</summary>
+              {milestone.description !== '' && (
+                <p className="playbookAskBody">{milestone.description}</p>
+              )}
+              {milestone.acceptance_criteria.length > 0 && (
+                <ul className="playbookCriteria">
+                  {milestone.acceptance_criteria.map((criterion) => (
+                    <li key={criterion}>{criterion}</li>
+                  ))}
+                </ul>
+              )}
+            </details>
+          </div>
+        )
+      })}
 
       {ready.length > 0 && (
         <ol className="playbookList">
@@ -600,7 +636,11 @@ function WorkUnitPicker({
           <option value="">Select a WorkUnit</option>
           {visible.map((unit) => (
             <option key={unit.work_unit_id} value={unit.work_unit_id}>
-              {unit.title} · {unit.status} · {unit.work_unit_id}
+              {unit.design_doc_name
+                ? unit.design_doc_name.replace(/(?:_design|_gawd)?\.md$/, '').replaceAll('_', ' ')
+                : unit.title}
+              {unit.target_project_id ? ` · ${unit.target_project_id}` : ''}
+              {' · '}{unit.status} · {unit.work_unit_id}
             </option>
           ))}
         </select>

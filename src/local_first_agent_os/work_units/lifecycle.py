@@ -103,9 +103,14 @@ class MilestoneExecutionStatus(StrEnum):
 
 
 class FailureClass(StrEnum):
-    """How a failure must be handled, not what raised it."""
+    """How a failure must be handled, not what raised it.
+
+    SCHEDULING means external capacity stopped execution before the work could
+    be judged.
+    """
 
     TRANSIENT = "TRANSIENT"
+    SCHEDULING = "SCHEDULING"
     CORRECTABLE = "CORRECTABLE"
     REQUIRES_REPLAN = "REQUIRES_REPLAN"
     REQUIRES_OPERATOR = "REQUIRES_OPERATOR"

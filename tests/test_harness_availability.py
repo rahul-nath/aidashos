@@ -521,7 +521,8 @@ def test_a_restaffing_names_the_cross_check_it_collapses() -> None:
     assert len(notices) == 1
     assert "staff" in notices[0]
     assert DEFAULT_BENCH[DispatchTier.SENIOR].harness.value in notices[0]
-    assert "cross-check is collapsed" in notices[0]
+    assert "model and provider diversity are absent" in notices[0]
+    assert "separate review sessions remain required" in notices[0]
 
 
 def test_a_restaffing_between_distinct_providers_collapses_nothing() -> None:

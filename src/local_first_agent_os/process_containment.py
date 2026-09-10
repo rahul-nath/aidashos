@@ -14,6 +14,7 @@ import ipaddress
 import json
 import os
 import platform
+import shlex
 import shutil
 import socket
 import subprocess
@@ -36,6 +37,7 @@ from .staffing import FrontierHarness
 from .toolchains import project_environment
 
 _SANDBOX_EXEC: Final = Path("/usr/bin/sandbox-exec")
+_PTY_DEVICE_FILTER: Final = '(literal "/dev/ptmx") (regex #"^/dev/ttys")'
 _CONTEXT_ENV: Final = frozenset(
     {
         "LOCAL_AGENT_ASSIGNED_WORKTREE",
@@ -182,17 +184,57 @@ def _git_paths(cwd: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     return reads, tuple(writes)
 
 
+def _runtime_read_paths(executable: Path) -> tuple[Path, ...]:
+    resolved = executable.resolve()
+    roots = [executable, resolved]
+    runtime_library = resolved.parent.parent / "lib"
+    if resolved.parent.name == "bin" and runtime_library.is_dir():
+        # Relocatable runtimes such as uv-managed Python load both their dylib
+        # and standard library beside the real bin directory.
+        roots.append(runtime_library)
+    return tuple(roots)
+
+
+def _shebang_executable(script: Path, environment: Mapping[str, str]) -> Path | None:
+    try:
+        with script.open("rb") as stream:
+            first_line = stream.readline(4096)
+    except OSError:
+        return None
+    if not first_line.startswith(b"#!"):
+        return None
+    try:
+        arguments = shlex.split(first_line[2:].decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not arguments:
+        return None
+    interpreter = arguments[0]
+    if Path(interpreter).name == "env":
+        candidates = (
+            argument
+            for argument in arguments[1:]
+            if not argument.startswith("-") and "=" not in argument
+        )
+        interpreter = next(candidates, "")
+    resolved = shutil.which(interpreter, path=environment.get("PATH"))
+    return Path(resolved) if resolved else None
+
+
 def _command_read_paths(command: Sequence[str], environment: Mapping[str, str]) -> tuple[Path, ...]:
     executable = str(command[0]) if command else ""
     resolved = shutil.which(executable, path=environment.get("PATH"))
     roots: list[Path] = []
     if resolved:
         binary = Path(resolved)
-        roots.extend((binary, binary.resolve()))
+        roots.extend(_runtime_read_paths(binary))
+        interpreter = _shebang_executable(binary, environment)
+        if interpreter is not None:
+            roots.extend(_runtime_read_paths(interpreter))
     elif executable:
         binary = Path(executable).expanduser()
         if binary.exists():
-            roots.extend((binary, binary.resolve()))
+            roots.extend(_runtime_read_paths(binary))
     for entry in environment.get("PATH", "").split(os.pathsep):
         if entry:
             path_entry = Path(entry).expanduser()
@@ -259,6 +301,10 @@ def _profile(
         Path("/sbin"),
         Path("/private/etc"),
         Path("/private/var/db/dyld"),
+        # Claude Code initializes Foundation before it parses its command line.
+        # Foundation reads the system timezone database and terminates the
+        # process when Seatbelt hides it, even for `claude --version`.
+        Path("/private/var/db/timezone"),
         Path("/Library/Apple"),
         home / ".gitconfig",
         home / ".config" / "git",
@@ -268,7 +314,17 @@ def _profile(
     if harness is FrontierHarness.CODEX:
         readable.append(Path(environment.get("CODEX_HOME") or home / ".codex"))
     else:
-        readable.extend((home / ".claude", home / ".claude.json"))
+        readable.extend(
+            (
+                home / ".claude",
+                home / ".claude.json",
+                # Claude Code stores its session in the macOS login keychain.
+                # Security.framework cannot discover that item when Seatbelt
+                # hides the backing database, so expose this file rather than
+                # the whole Keychains directory.
+                home / "Library" / "Keychains" / "login.keychain-db",
+            )
+        )
     read_rules = tuple(
         _filter(
             "literal" if path == Path("/") else ("subpath" if path.is_dir() else "literal"),
@@ -291,6 +347,13 @@ def _profile(
             *(f"(allow file-read-data {item})" for item in read_rules),
             "(deny file-write*)",
             *(f"(allow file-write* {item})" for item in writable),
+            # Frontier harness tools use a pseudoterminal even for non-interactive
+            # commands. Keep that capability on the PTY multiplexer and its
+            # dynamically allocated slave devices rather than admitting /dev.
+            "(allow pseudo-tty)",
+            f"(allow file-ioctl {_PTY_DEVICE_FILTER})",
+            f"(allow file-write* {_PTY_DEVICE_FILTER})",
+            f"(allow file-read-data {_PTY_DEVICE_FILTER})",
             f"(deny file-read-data {_filter('literal', operator_token_file())})",
             "(deny network-outbound)",
             '(allow network-outbound (literal "/private/var/run/mDNSResponder"))',

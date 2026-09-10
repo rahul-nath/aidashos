@@ -11,8 +11,10 @@ from collections.abc import Iterator
 from typing import Any
 
 from ..agent_query import (
+    AGENT_QUERY_RECORD_SCHEMA,
     agent_query_request,
     build_agent_query_record,
+    configured_agent_query_model,
     resolve_transcript_pointer,
     run_agent_query,
 )
@@ -244,12 +246,20 @@ class ModelWorkflowMixin(WorkflowMixinBase):
                 "/claude and /codex each require a query.",
             )
 
-        request = agent_query_request(
-            workflow_id=workflow_id,
-            harness=spec.agent_harness,
-            alias=spec.alias,
-            query=spec.query,
-        )
+        try:
+            model = configured_agent_query_model(
+                spec.agent_harness,
+                config_dir=self.runtime.settings.config_dir,
+            )
+            request = agent_query_request(
+                workflow_id=workflow_id,
+                harness=spec.agent_harness,
+                model=model,
+                alias=spec.alias,
+                query=spec.query,
+            )
+        except Exception as exc:
+            return self._fail_agent_query(workflow_id, directive, str(exc))
         run = run_agent_query(request)
         transcript = resolve_transcript_pointer({**request, "session_id": run.get("session_id")})
         record = build_agent_query_record({**request, **run, "transcript": transcript})
@@ -279,13 +289,13 @@ class ModelWorkflowMixin(WorkflowMixinBase):
         artifact = self.runtime.artifact_store.write_json(
             role=ArtifactRole.AGENT_QUERY_RECORD.value,
             payload={
-                "schema_version": "agent_query_record.v1",
+                "schema_version": AGENT_QUERY_RECORD_SCHEMA,
                 "directive": directive,
                 "status": "failed",
                 "error": error,
             },
             workflow_id=workflow_id,
-            schema_version="agent_query_record.v1",
+            schema_version=AGENT_QUERY_RECORD_SCHEMA,
         )
         self.runtime.repository.update_workflow(
             workflow_id,

@@ -10,7 +10,7 @@ import shlex
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -95,6 +95,7 @@ from ..operator_commands import (
 )
 from ..operator_identity import verify_operator_actor
 from ..pow_wow import (
+    DelegateFn,
     PowWowExecutionContext,
 )
 from ..pow_wow.ledger import (
@@ -487,7 +488,7 @@ class WorkflowEngine(
     def __init__(self, runtime: AppRuntime):
         self.runtime = runtime
 
-    def _saga_delegate_fn(self, workflow_id: str) -> Callable[..., Mapping[str, Any]]:
+    def _saga_delegate_fn(self, workflow_id: str) -> DelegateFn:
         """Sync callback the executor uses to run junior-tier tasks on the local
         model via delegate_task (bounded prompt -> ledger artifact). The junior
         tier coordinates with the frontier tiers through the durable ledger, not

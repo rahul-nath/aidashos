@@ -21,8 +21,8 @@ pi /saga --executor cli \
 
 Per tier:
 
-- Senior tasks run `claude --print --output-format json` in the leased worktree.
-- Staff tasks run `codex exec` (read-only sandbox for review) in the same worktree, so a reviewer sees the implementer's actual diff.
+- Senior tasks run the implementing CLI selected by staffing or the immutable attempt assignment in the leased worktree.
+- Staff tasks run the selected reviewing CLI in a separate read-only session in the same worktree, so a reviewer sees the implementer's actual diff.
 - Junior tasks bypass external CLIs entirely and run through the local delegate path (a bounded prompt to a local model, output captured as a ledger artifact, no worktree).
 
 The executor preflights `codex login status` once per run and fails fast with a clear message when the codex token is missing or revoked.
@@ -218,6 +218,10 @@ an immediate `APPROVE` never starts the senior implementation harness. Any revie
 filesystem mutation fails the review. A `CODE_MERGE` request is created only when
 the final host-stamped staff verdict approves the same base and commit recorded by
 the merge checkpoint.
+
+An explicitly requested retry of an unavailable recovery uses the same command with `--retry-of <failed_recovery_intent_id>`.
+It creates one idempotent successor while preserving the failed row, and refuses a live predecessor or any change to its checkpoint, branch, base, commit, milestone, or authority.
+The retry does not itself change staffing or relax review gates.
 
 If the staff process completed and wrote a host-stamped `review_result.v1`, but an
 older host parser stored its explicit decision as `unclassified`, do not rerun

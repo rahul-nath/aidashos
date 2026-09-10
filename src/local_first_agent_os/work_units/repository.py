@@ -11,12 +11,12 @@ sanctioned write to an existing revision row is stamping
 ``compiled_plan_revisions.work_unit_id`` when the WorkUnit that adopts the plan is
 created, which is a link and not a change of content.
 
-Second, single authority: every status change goes through ``record_fact``. It
-locks the WorkUnit, validates the transition against the lifecycle state machines,
-appends exactly one event, updates the summary and the affected milestone
-execution, and inserts artifact references, all in one transaction. A replayed
-fact returns the original event instead of writing a second one. No dispatcher,
-CLI command, MCP tool, or agent writes these columns directly.
+Second, single authority: every status change uses this module's fact writer.
+``record_fact`` applies one fact; conditional and compound operations reuse the
+same writer under one WorkUnit lock. Each fact validates the lifecycle transition,
+appends one event, updates summaries, and inserts artifact references atomically.
+A replay returns the original event. No dispatcher, CLI command, MCP tool, or
+agent writes these columns directly.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import uuid
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 
@@ -55,6 +55,7 @@ from .lifecycle import (
     LIFECYCLE_PROFILE,
     LIFECYCLE_PROFILE_VERSION,
     ORDERED_PHASES,
+    TERMINAL_WORK_UNIT_STATUSES,
     FailureClass,
     LifecyclePhase,
     MilestoneExecutionStatus,
@@ -236,6 +237,7 @@ class MilestoneFailureAttempt:
     stable_key: str
     execution_ordinal: int
     failure_class: FailureClass | None
+    failure_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -733,10 +735,15 @@ def start_work_unit(
             + "; ".join(revision.execution_blockers)
         )
     plan = revision.plan
+    if approved_plan_hash is not None and approved_plan_hash != revision.plan_hash:
+        raise WorkUnitError(
+            "start must name the exact compiled hash "
+            f"{revision.plan_hash!r} for revision {compiled_plan_revision_id!r}"
+        )
     if (
         plan.permission_policy is not None
         and plan.permission_policy.requires_start_approval
-        and approved_plan_hash != revision.plan_hash
+        and approved_plan_hash is None
     ):
         raise WorkUnitError(
             "this plan requests gated capabilities; start must approve its exact "
@@ -1057,155 +1064,303 @@ def record_fact(
 ) -> FactOutcome:
     """Apply one fact to the WorkUnit aggregate, atomically and idempotently.
 
-    This is the only writer of ``work_units``, ``milestone_executions``,
-    ``work_unit_artifacts``, and ``work_unit_events``. Everything else asks for a
-    fact to be recorded, which is why an invalid transition is impossible to reach
-    from a dispatcher, a CLI command, or an agent.
+    This is the single-fact door to the shared aggregate writer. Conditional and
+    compound transitions use that same implementation under their existing lock;
+    consumers cannot write state without the lifecycle and artifact checks.
     """
 
-    t = now()
     with tx() as c:
-        unit = _load_work_unit(c, work_unit_id, lock=True)
-        key = idempotency_key(unit.root_workflow_id, fact)
-        existing = c.execute(
-            "SELECT * FROM work_unit_events WHERE idempotency_key=?",
-            (key,),
-        ).fetchone()
-        if existing is not None:
-            return FactOutcome(applied=False, event=_event(existing), work_unit=unit)
+        return _record_fact_on_connection(
+            c, work_unit_id, fact, child_workflow_id=child_workflow_id
+        )
 
-        milestone: MilestoneExecutionRow | None = None
-        milestone_key = getattr(fact, "milestone_key", None)
-        if milestone_key:
-            milestone = _load_milestone_execution(c, work_unit_id, str(milestone_key))
 
-        new_status: WorkUnitStatus | None = None
-        new_phase: str | None = None
-        failure_code: str | None = None
-        failure_summary: str | None = None
+def _record_fact_on_connection(
+    c: ConnectionLike,
+    work_unit_id: str,
+    fact: LifecycleFact,
+    *,
+    child_workflow_id: str | None = None,
+) -> FactOutcome:
+    """The single fact writer, also used for atomic compound transitions."""
+    t = now()
+    unit = _load_work_unit(c, work_unit_id, lock=True)
+    key = idempotency_key(unit.root_workflow_id, fact)
+    existing = c.execute(
+        "SELECT * FROM work_unit_events WHERE idempotency_key=?",
+        (key,),
+    ).fetchone()
+    if existing is not None:
+        return FactOutcome(applied=False, event=_event(existing), work_unit=unit)
 
-        match fact:
-            case WorkUnitTransition():
-                assert_work_unit_transition(unit.status, fact.status)
-                new_status = fact.status
-                if fact.current_phase is not None:
-                    new_phase = fact.current_phase.value
-                failure_code = fact.failure_code
-                failure_summary = fact.failure_summary
-            case PhaseTransition():
-                current = _phase_status_from_events(c, work_unit_id).get(
-                    fact.phase, PhaseStatus.PENDING
-                )
-                assert_phase_transition(current, fact.status)
-                new_phase = fact.phase.value
-            case MilestoneTransition():
-                assert milestone is not None
-                assert_milestone_transition(milestone.status, fact.status)
-                if fact.status is MilestoneExecutionStatus.SUCCEEDED:
-                    required = set(_required_artifacts(c, milestone.milestone_id))
-                    present = _recorded_artifact_types(c, milestone.milestone_execution_id) | {
-                        artifact.artifact_type.value
-                        for artifact in fact.artifacts
-                        if artifact.satisfies_requirement
-                    }
-                    missing = sorted(required - present)
-                    if missing:
-                        raise MissingRequiredArtifacts(milestone.stable_key, missing)
-                new_status = _work_unit_status_for_milestone(unit.status, fact.status)
-                new_phase = fact.phase.value
-            case ApprovalRequested():
-                assert milestone is not None
-                _insert_decision_request(
-                    c,
-                    request_id=fact.request_id,
-                    work_unit_id=work_unit_id,
-                    milestone_execution_id=milestone.milestone_execution_id,
-                    kind=fact.kind,
-                    prompt=fact.prompt,
-                    occurred_at=t,
-                )
-                new_phase = fact.phase.value
-            case ApprovalReceived():
-                assert milestone is not None
-                _resolve_decision_request(
-                    c,
-                    fact=fact,
-                    work_unit_id=work_unit_id,
-                    milestone_execution_id=milestone.milestone_execution_id,
-                    occurred_at=t,
-                )
-                new_phase = fact.phase.value
-            case ArtifactRecorded():
-                assert milestone is not None
-                new_phase = fact.phase.value
-            case DispatchIntentCreated():
-                assert milestone is not None
-                _link_milestone_to_dispatch_intent(
-                    c,
-                    milestone=milestone,
-                    dispatch_intent_id=fact.dispatch_intent_id,
-                )
-                new_phase = fact.phase.value
-            case AutomaticCrashRecovery():
-                # Nothing to update. The repair it names was written by the facts
-                # `recover_dead_execution` recorded; this only marks that an
-                # unattended reconciler was the one who asked for them, so the
-                # automatic budget has something of its own to count.
-                pass
+    milestone: MilestoneExecutionRow | None = None
+    milestone_key = getattr(fact, "milestone_key", None)
+    if milestone_key:
+        milestone = _load_milestone_execution(c, work_unit_id, str(milestone_key))
 
-        artifacts: tuple[ArtifactRecord, ...] = ()
-        if isinstance(fact, MilestoneTransition):
-            artifacts = fact.artifacts
-        elif isinstance(fact, ArtifactRecorded):
-            artifacts = (fact.artifact,)
-        if artifacts:
-            _insert_artifacts(
+    new_status: WorkUnitStatus | None = None
+    new_phase: str | None = None
+    failure_code: str | None = None
+    failure_summary: str | None = None
+
+    match fact:
+        case WorkUnitTransition():
+            assert_work_unit_transition(unit.status, fact.status)
+            new_status = fact.status
+            if fact.current_phase is not None:
+                new_phase = fact.current_phase.value
+            failure_code = fact.failure_code
+            failure_summary = fact.failure_summary
+        case PhaseTransition():
+            current = _phase_status_from_events(c, work_unit_id).get(
+                fact.phase, PhaseStatus.PENDING
+            )
+            assert_phase_transition(current, fact.status)
+            new_phase = fact.phase.value
+        case MilestoneTransition():
+            assert milestone is not None
+            assert_milestone_transition(milestone.status, fact.status)
+            if fact.status is MilestoneExecutionStatus.SUCCEEDED:
+                required = set(_required_artifacts(c, milestone.milestone_id))
+                present = _recorded_artifact_types(c, milestone.milestone_execution_id) | {
+                    artifact.artifact_type.value
+                    for artifact in fact.artifacts
+                    if artifact.satisfies_requirement
+                }
+                missing = sorted(required - present)
+                if missing:
+                    raise MissingRequiredArtifacts(milestone.stable_key, missing)
+            new_status = _work_unit_status_for_milestone(unit.status, fact.status)
+            new_phase = fact.phase.value
+        case ApprovalRequested():
+            assert milestone is not None
+            _insert_decision_request(
                 c,
+                request_id=fact.request_id,
                 work_unit_id=work_unit_id,
-                milestone_execution_id=(
-                    milestone.milestone_execution_id if milestone is not None else None
-                ),
-                producer_workflow_id=child_workflow_id or unit.root_workflow_id,
-                artifacts=artifacts,
+                milestone_execution_id=milestone.milestone_execution_id,
+                kind=fact.kind,
+                prompt=fact.prompt,
                 occurred_at=t,
             )
-
-        if isinstance(fact, MilestoneTransition):
+            new_phase = fact.phase.value
+        case ApprovalReceived():
             assert milestone is not None
-            _update_milestone_execution(
+            _resolve_decision_request(
+                c,
+                fact=fact,
+                work_unit_id=work_unit_id,
+                milestone_execution_id=milestone.milestone_execution_id,
+                occurred_at=t,
+            )
+            new_phase = fact.phase.value
+        case ArtifactRecorded():
+            assert milestone is not None
+            new_phase = fact.phase.value
+        case DispatchIntentCreated():
+            assert milestone is not None
+            _link_milestone_to_dispatch_intent(
                 c,
                 milestone=milestone,
-                fact=fact,
-                child_workflow_id=child_workflow_id,
-                occurred_at=t,
+                dispatch_intent_id=fact.dispatch_intent_id,
             )
+            new_phase = fact.phase.value
+        case AutomaticCrashRecovery():
+            # Nothing to update. The repair it names was written by the facts
+            # `recover_dead_execution` recorded; this only marks that an
+            # unattended reconciler was the one who asked for them, so the
+            # automatic budget has something of its own to count.
+            pass
 
-        event = _insert_event(
+    artifacts: tuple[ArtifactRecord, ...] = ()
+    if isinstance(fact, MilestoneTransition):
+        artifacts = fact.artifacts
+    elif isinstance(fact, ArtifactRecorded):
+        artifacts = (fact.artifact,)
+    if artifacts:
+        _insert_artifacts(
             c,
             work_unit_id=work_unit_id,
-            root_workflow_id=unit.root_workflow_id,
-            event_type=fact.event_type,
-            phase=getattr(fact, "phase", None),
             milestone_execution_id=(
                 milestone.milestone_execution_id if milestone is not None else None
             ),
-            child_workflow_id=child_workflow_id,
-            key=key,
-            payload=fact.event_payload(),
+            producer_workflow_id=child_workflow_id or unit.root_workflow_id,
+            artifacts=artifacts,
             occurred_at=t,
         )
 
-        _update_work_unit_summary(
+    if isinstance(fact, MilestoneTransition):
+        assert milestone is not None
+        _update_milestone_execution(
             c,
-            unit=unit,
-            status=new_status,
-            current_phase=new_phase,
-            failure_code=failure_code,
-            failure_summary=failure_summary,
+            milestone=milestone,
+            fact=fact,
+            child_workflow_id=child_workflow_id,
             occurred_at=t,
         )
-        updated = _load_work_unit(c, work_unit_id)
+
+    event = _insert_event(
+        c,
+        work_unit_id=work_unit_id,
+        root_workflow_id=unit.root_workflow_id,
+        event_type=fact.event_type,
+        phase=getattr(fact, "phase", None),
+        milestone_execution_id=(
+            milestone.milestone_execution_id if milestone is not None else None
+        ),
+        child_workflow_id=child_workflow_id,
+        key=key,
+        payload=fact.event_payload(),
+        occurred_at=t,
+    )
+
+    _update_work_unit_summary(
+        c,
+        unit=unit,
+        status=new_status,
+        current_phase=new_phase,
+        failure_code=failure_code,
+        failure_summary=failure_summary,
+        occurred_at=t,
+    )
+    updated = _load_work_unit(c, work_unit_id)
     return FactOutcome(applied=True, event=event, work_unit=updated)
+
+
+def record_integrated_milestone_completion(
+    work_unit_id: str,
+    *,
+    phase: LifecyclePhase,
+    milestone_key: str,
+    recovery_child_workflow_id: str,
+    dispatch_intent_id: str | None,
+    artifact: ArtifactRecord,
+    shared_payload: dict[str, Any],
+    result_summary: str,
+) -> FactOutcome:
+    """Choose the current attempt and record its landing under one aggregate lock.
+
+    Integration provenance is validated by the caller before this transition.
+    A timeout may win before this lock, but cannot interleave the recovery facts.
+    Callers cannot supply a stale attempt or overwrite a replacement dispatch.
+    """
+    with tx() as c:
+        unit = _load_work_unit(c, work_unit_id, lock=True)
+        if unit.status in TERMINAL_WORK_UNIT_STATUSES:
+            raise WorkUnitError("a terminal WorkUnit cannot accept an integration completion")
+        milestone = _load_milestone_execution(c, work_unit_id, milestone_key)
+        if milestone.phase is not phase:
+            raise WorkUnitError("integration completion names the wrong milestone phase")
+        if dispatch_intent_id and milestone.dispatch_intent_id not in (None, dispatch_intent_id):
+            raise WorkUnitError("integration completion names a superseded dispatch")
+        if milestone.status is MilestoneExecutionStatus.SUCCEEDED:
+            row = c.execute(
+                "SELECT * FROM work_unit_events WHERE work_unit_id=? "
+                "AND milestone_execution_id=? AND event_type=? "
+                "ORDER BY sequence_number DESC LIMIT 1",
+                (
+                    work_unit_id,
+                    milestone.milestone_execution_id,
+                    WorkUnitEventType.MILESTONE_SUCCEEDED.value,
+                ),
+            ).fetchone()
+            if row is None:
+                raise WorkUnitError("successful milestone has no completion event")
+            event = _event(row)
+            if any(event.payload.get(key) != value for key, value in shared_payload.items()):
+                raise WorkUnitError("milestone was completed by different integration evidence")
+            return FactOutcome(applied=False, event=event, work_unit=unit)
+        if milestone.status not in {
+            MilestoneExecutionStatus.RUNNING,
+            MilestoneExecutionStatus.BLOCKED,
+        }:
+            raise WorkUnitError(
+                f"integration cannot complete milestone in {milestone.status.value}"
+            )
+        live = milestone.status is MilestoneExecutionStatus.RUNNING
+        attempt = milestone.attempt if live else milestone.attempt + 1
+        child = (
+            milestone.child_workflow_id
+            if live and milestone.child_workflow_id
+            else recovery_child_workflow_id
+        )
+        payload = {**shared_payload, "integration_previous_status": milestone.status.value}
+        if not live:
+            for status in (MilestoneExecutionStatus.READY, MilestoneExecutionStatus.RUNNING):
+                _record_fact_on_connection(
+                    c,
+                    work_unit_id,
+                    MilestoneTransition(
+                        phase=phase,
+                        milestone_key=milestone_key,
+                        status=status,
+                        attempt=attempt,
+                        child_workflow_id=child,
+                        dispatch_intent_id=dispatch_intent_id,
+                        payload=payload,
+                    ),
+                    child_workflow_id=child,
+                )
+        return _record_fact_on_connection(
+            c,
+            work_unit_id,
+            MilestoneTransition(
+                phase=phase,
+                milestone_key=milestone_key,
+                status=MilestoneExecutionStatus.SUCCEEDED,
+                attempt=attempt,
+                child_workflow_id=child,
+                dispatch_intent_id=dispatch_intent_id,
+                result_summary=result_summary,
+                artifacts=(replace(artifact, producer_step_name=child),),
+                payload=payload,
+            ),
+            child_workflow_id=child,
+        )
+
+
+def record_dispatch_wait_halt(
+    work_unit_id: str,
+    *,
+    phase: LifecyclePhase,
+    milestone_key: str,
+    attempt: int,
+    child_workflow_id: str,
+    failure_code: str,
+    failure_summary: str,
+) -> MilestoneExecutionRow:
+    """Park only the still-running attempt whose wait expired.
+
+    A landing or a replacement attempt that won the row lock is authoritative.
+    Returning its actual state prevents a late timeout from reporting BLOCKED.
+    """
+    with tx() as c:
+        unit = _load_work_unit(c, work_unit_id, lock=True)
+        milestone = _load_milestone_execution(c, work_unit_id, milestone_key)
+        if milestone.phase is not phase:
+            raise WorkUnitError("dispatch timeout names the wrong milestone phase")
+        if (
+            unit.status in TERMINAL_WORK_UNIT_STATUSES
+            or milestone.status is not MilestoneExecutionStatus.RUNNING
+            or milestone.attempt != attempt
+            or milestone.child_workflow_id not in (None, child_workflow_id)
+        ):
+            return milestone
+        _record_fact_on_connection(
+            c,
+            work_unit_id,
+            MilestoneTransition(
+                phase=phase,
+                milestone_key=milestone_key,
+                status=MilestoneExecutionStatus.BLOCKED,
+                attempt=attempt,
+                child_workflow_id=child_workflow_id,
+                failure_code=failure_code,
+                failure_summary=failure_summary,
+            ),
+            child_workflow_id=child_workflow_id,
+        )
+        return _load_milestone_execution(c, work_unit_id, milestone_key)
 
 
 def _link_milestone_to_dispatch_intent(
@@ -1606,19 +1761,23 @@ def list_milestone_failure_attempts(work_unit_id: str) -> tuple[MilestoneFailure
               ON m.milestone_execution_id = e.milestone_execution_id
             JOIN compiled_milestones c
               ON c.milestone_id = m.milestone_id
-            WHERE e.work_unit_id=? AND e.event_type IN (?, ?)
+            WHERE e.work_unit_id=? AND e.event_type IN (?, ?, ?)
             ORDER BY e.sequence_number
             """,
             (
                 work_unit_id,
                 WorkUnitEventType.MILESTONE_BLOCKED.value,
                 WorkUnitEventType.MILESTONE_FAILED.value,
+                WorkUnitEventType.MILESTONE_WAITING_FOR_OPERATOR.value,
             ),
         ).fetchall()
     attempts: dict[tuple[str, int], MilestoneFailureAttempt] = {}
     for row in rows:
         data = rowdict(row)
         payload = _json_object(data["payload_json"])
+        waiting = data["event_type"] == WorkUnitEventType.MILESTONE_WAITING_FOR_OPERATOR.value
+        if waiting and not payload.get("failure_code"):
+            continue
         stable_key = str(data["stable_key"])
         execution_ordinal = int(payload["attempt"])
         raw_class = payload.get("failure_class")
@@ -1626,13 +1785,14 @@ def list_milestone_failure_attempts(work_unit_id: str) -> tuple[MilestoneFailure
             stable_key=stable_key,
             execution_ordinal=execution_ordinal,
             failure_class=FailureClass(str(raw_class)) if raw_class else None,
+            failure_code=str(payload["failure_code"]) if payload.get("failure_code") else None,
         )
         key = (stable_key, execution_ordinal)
         previous = attempts.get(key)
-        if previous is not None and previous.failure_class != attempt.failure_class:
+        if previous is not None and previous != attempt:
             raise WorkUnitError(
                 f"milestone {stable_key!r} execution {execution_ordinal} has conflicting "
-                "failure classes"
+                "failure facts"
             )
         attempts[key] = attempt
     return tuple(attempts.values())
@@ -1737,6 +1897,32 @@ def get_decision_request(request_id: str) -> DecisionRequestRow | None:
             (request_id,),
         ).fetchone()
     return _decision_request(row) if row is not None else None
+
+
+def decision_request_execution_ordinal(request: DecisionRequestRow) -> int:
+    """Read the immutable execution binding, including for legacy request IDs."""
+
+    with tx() as c:
+        rows = c.execute(
+            "SELECT payload_json FROM work_unit_events "
+            "WHERE work_unit_id=? AND milestone_execution_id=? AND event_type=? "
+            "AND (payload_json::jsonb)->>'request_id'=?",
+            (
+                request.work_unit_id,
+                request.milestone_execution_id,
+                WorkUnitEventType.APPROVAL_REQUESTED.value,
+                request.request_id,
+            ),
+        ).fetchall()
+    if len(rows) != 1:
+        raise WorkUnitError(f"decision request {request.request_id!r} lacks one request event")
+    payload = _json_object(rows[0]["payload_json"])
+    ordinal = payload.get("attempt")
+    if type(ordinal) is not int or ordinal < 1 or payload.get("kind") != request.request_kind.value:
+        raise WorkUnitError(
+            f"decision request {request.request_id!r} has invalid execution binding"
+        )
+    return ordinal
 
 
 def _phase_status_from_events(

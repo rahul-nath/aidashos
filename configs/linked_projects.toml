@@ -18,7 +18,7 @@ default_memory_project = "example_notes"
 [[projects]]
 id = "local_first_agent_os"
 kind = "control_plane"
-path = "~/ai_projects/local_first_agent_os"
+path = "."
 status = "active_center"
 read_only = false
 description = "Pi, ASR, policies, /saga, /pow-wow, agent dispatch, durable artifacts, and coordination ledger."

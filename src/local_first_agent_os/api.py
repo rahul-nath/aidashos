@@ -21,7 +21,7 @@ from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from .access_posture import announce_posture
+from .access_posture import announce_posture, flush_observed_refusal_summary
 from .contracts import (
     FileIngressRequest,
     IngressEvent,
@@ -168,6 +168,7 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
+            flush_observed_refusal_summary()
             # The runtime's worker threads are non-daemon; without this a
             # Ctrl-C'd server prints its shutdown banner and then hangs in
             # interpreter finalization joining them.

@@ -39,8 +39,10 @@ import sys
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import psycopg
@@ -165,14 +167,20 @@ def _golden_path_config_dir(root: Path, target: Path) -> Path:
         """
 seated_pairing = "all-local"
 
+[work_unit_pairing]
+mode = "fixed"
+pairing = "all-local"
+
 [pairings.all-local.senior]
 harness = "pi"
 model = "gemma4"
+reasoning_effort = "high"
 capacity = 2
 
 [pairings.all-local.staff]
 harness = "pi"
 model = "glimmer"
+reasoning_effort = "high"
 capacity = 1
 
 [bench.junior]
@@ -186,14 +194,14 @@ capacity = 4
     (config_dir / "linked_projects.toml").write_text(
         f"""
 [center]
-id = "local-first-agent-os"
+id = "local_first_agent_os"
 description = "golden path center"
-control_plane_project = "local-first-agent-os"
-default_saga_project = "local-first-agent-os"
-default_memory_project = "local-first-agent-os"
+control_plane_project = "local_first_agent_os"
+default_saga_project = "local_first_agent_os"
+default_memory_project = "local_first_agent_os"
 
 [[projects]]
-id = "local-first-agent-os"
+id = "local_first_agent_os"
 kind = "test_repo"
 path = {json.dumps(str(target))}
 status = "active"
@@ -240,12 +248,18 @@ def _resident_env(
     }
 
 
-@contextmanager
-def _resident_loops(env: dict[str, str]) -> Iterator[list[subprocess.Popen[bytes]]]:
-    """Start the two loops the operator scripts start, and stop them after.
+@dataclass(frozen=True)
+class ResidentLoop:
+    process: subprocess.Popen[bytes]
+    log_path: Path
 
-    `hold_resident_loop` releases its advisory lock when the connection closes, so
-    SIGTERM is enough; nothing has to be unlocked by hand.
+
+@contextmanager
+def _resident_loops(env: dict[str, str]) -> Iterator[list[ResidentLoop]]:
+    """Run the real residents with continuously writable diagnostic output.
+
+    Unread subprocess pipes fill and stop the resident inside a logging call.
+    Separate files preserve output without making log volume a lifecycle gate.
     """
 
     commands = [
@@ -258,65 +272,57 @@ def _resident_loops(env: dict[str, str]) -> Iterator[list[subprocess.Popen[bytes
         ],
         [
             sys.executable,
-            str(REPO_ROOT / "agent_coordination_mcp.py"),
-            "run_ledger_dispatcher",
+            "-m",
+            "local_first_agent_os.operator_dispatcher_host",
+            "--root",
+            env["AGENT_COORDINATION_ROOT"],
             "--interval-seconds",
-            "1",
+            "2",
         ],
     ]
-    processes = [
-        subprocess.Popen(
-            command, env=env, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-        )
-        for command in commands
-    ]
-    try:
-        _assert_still_running(processes)
-        yield processes
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.send_signal(signal.SIGTERM)
-        for process in processes:
-            try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                process.kill()
+    with TemporaryDirectory(prefix="aidashos-resident-logs-") as log_dir, ExitStack() as stack:
+        loops: list[ResidentLoop] = []
+        try:
+            for index, command in enumerate(commands):
+                path = Path(log_dir) / f"resident-{index}.log"
+                stream = stack.enter_context(path.open("wb"))
+                process = subprocess.Popen(
+                    command, env=env, cwd=REPO_ROOT, stdout=stream, stderr=subprocess.STDOUT
+                )
+                loops.append(ResidentLoop(process, path))
+            _assert_still_running(loops)
+            yield loops
+        finally:
+            for loop in loops:
+                if loop.process.poll() is None:
+                    loop.process.send_signal(signal.SIGTERM)
+            for loop in loops:
+                try:
+                    loop.process.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    loop.process.kill()
+                    loop.process.wait(timeout=10)
 
 
-def _assert_still_running(processes: list[subprocess.Popen[bytes]]) -> None:
-    """Fail now, with the loop's own words, if one of them has already exited.
-
-    A resident loop that dies immediately still returns a well-formed `err`
-    payload on stdout and exits zero, so nothing downstream notices. Without this
-    the symptom is a 240-second timeout on a ledger nobody is draining.
-    """
+def _assert_still_running(loops: list[ResidentLoop]) -> None:
+    """Report a resident that exits before its first poll with its diagnostics."""
 
     time.sleep(3.0)
-    for process in processes:
-        if process.poll() is not None:
+    for loop in loops:
+        if loop.process.poll() is not None:
             raise AssertionError(
-                f"resident loop {process.args} exited immediately "
-                f"(code {process.returncode}):\n{_drain(process)}"
+                f"resident loop {loop.process.args} exited immediately "
+                f"(code {loop.process.returncode}):\n{_drain(loop)}"
             )
 
 
-def _drain(process: subprocess.Popen[bytes]) -> str:
-    """Whatever a loop has written so far, without blocking on one still running.
+def _drain(loop: ResidentLoop) -> str:
+    """Read a bounded tail without stopping the resident or moving its writer."""
 
-    A resident loop that died silently is the failure most worth seeing here, and
-    reading its pipe only after it exits is how that stays invisible.
-    """
-
-    if process.stdout is None:
-        return ""
-    if process.poll() is None:
-        process.send_signal(signal.SIGTERM)
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-    return process.stdout.read().decode("utf-8", "replace")[-6000:]
+    with loop.log_path.open("rb") as stream:
+        size = stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, size - 6000))
+        return stream.read().decode("utf-8", "replace")
 
 
 def _await(predicate: Any, *, timeout: float, what: str, diagnose: Any = None) -> Any:
@@ -464,8 +470,8 @@ def test_the_golden_path_runs_through_the_resident_loops(tmp_path: Path) -> None
                 events = _coordination("list_work_unit_events", work_unit_id)
                 loops = [
                     {
-                        "argv": process.args,
-                        "exit_code": process.poll(),
+                        "argv": process.process.args,
+                        "exit_code": process.process.poll(),
                         "output": _drain(process),
                     }
                     for process in processes
@@ -800,7 +806,9 @@ def _not_ready(world: dict[str, Any]) -> None:
 
 @then("an operator override decision is waiting")
 def _override_waiting(world: dict[str, Any]) -> None:
-    request_id = service.retry_override_request_id(world["work_unit_id"], FIRST_MILESTONE)
+    request_id = service.retry_override_request_id(
+        world["work_unit_id"], FIRST_MILESTONE, _milestone(world["work_unit_id"]).attempt
+    )
     pending = service.pending_operator_decisions(world["work_unit_id"])
     assert request_id in {item["request_id"] for item in pending}
 
@@ -879,12 +887,28 @@ def test_the_ordinary_suite_cannot_run_the_full_drive() -> None:
     assert is_dbos_active() is False
 
 
+def test_golden_path_pairing_policy_cannot_select_a_frontier_provider(tmp_path: Path) -> None:
+    from local_first_agent_os.pairing_lattice import load_quality_chart, policy_candidates
+    from local_first_agent_os.staffing import Harness, load_staffing
+
+    config = _golden_path_config_dir(tmp_path, tmp_path / "target")
+    staffing = load_staffing(config / "staffing.toml")
+    candidates = policy_candidates(
+        load_quality_chart(config / "model_quality.toml"),
+        staffing.selection_for("golden-path"),
+        staffing.pairings,
+    )
+    assert len(candidates) == 1
+    assert {model.harness for pair in candidates for model in pair.models()} == {Harness.PI}
+
+
 def test_the_resident_loops_this_test_starts_are_the_ones_the_runtime_starts() -> None:
     """Same subcommands as `scripts/start-agent-runtime.sh`, not a reimplementation."""
 
     script = (REPO_ROOT / "scripts" / "start-agent-runtime.sh").read_text(encoding="utf-8")
     assert "run_enqueue_drainer" in script
-    assert "run_ledger_dispatcher" in script
+    assert "-m local_first_agent_os.operator_dispatcher_host" in script
+    assert "--interval-seconds 2" in script
 
 
 def test_a_cancelled_work_unit_reaches_the_lease_its_intent_started(

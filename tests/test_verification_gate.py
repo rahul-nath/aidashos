@@ -243,9 +243,9 @@ def _read_only_empty(state: dict[str, Any]) -> None:
 
 
 @then("loading the registry fails")
-def _registry_fails(state: dict[str, Any]) -> None:
+def _registry_fails(state: dict[str, Any], tmp_path: Path) -> None:
     with pytest.raises(ValueError) as excinfo:
-        _parse_linked_project_record(state["record"])
+        _parse_linked_project_record(state["record"], tmp_path / "configs" / "linked_projects.toml")
     state["complaint"] = str(excinfo.value)
 
 
@@ -258,8 +258,10 @@ def _complaint_names(state: dict[str, Any]) -> None:
 
 
 @then("loading the registry succeeds")
-def _registry_succeeds(state: dict[str, Any]) -> None:
-    project = _parse_linked_project_record(state["record"])
+def _registry_succeeds(state: dict[str, Any], tmp_path: Path) -> None:
+    project = _parse_linked_project_record(
+        state["record"], tmp_path / "configs" / "linked_projects.toml"
+    )
     assert project.verification_commands == []
     assert project.read_only is True
 

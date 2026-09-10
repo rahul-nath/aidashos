@@ -43,6 +43,7 @@ class LedgerFactKind(StrEnum):
 
     MILESTONE_FAILED = "MILESTONE_FAILED"
     DISPATCH_INTENT_FAILED = "DISPATCH_INTENT_FAILED"
+    DISPATCH_CONTRACT_VIOLATION = "DISPATCH_CONTRACT_VIOLATION"
 
 
 class Severity(StrEnum):
@@ -52,13 +53,10 @@ class Severity(StrEnum):
     or a ``retry_saga_milestone``.  ``CRITICAL`` means automatic recovery is
     already exhausted, so nothing improves without a decision.
 
-    Phase 1 produces only ``WARNING``.  Nothing it collects can prove
-    exhaustion: retries are separate intent rows sharing one milestone source,
-    so exhaustion is a property of an attempt sequence that no Phase 1 collector
-    reads.  ``CRITICAL`` arrives with the kind that can establish it.  Unlike a
-    ``LedgerFactKind`` with no collector, this gap is safe, because a rule
-    selecting an unproduced severity simply never matches, and an unmatched
-    signal is still recorded as ``ESCALATED_DIGEST`` rather than vanishing.
+    A retained dispatch contract violation is ``CRITICAL`` because the affected
+    completion is refused and requires inspection of its diagnostic evidence.
+    Ordinary failed attempts remain ``WARNING``; one attempt does not prove
+    retry exhaustion.
     """
 
     WARNING = "WARNING"

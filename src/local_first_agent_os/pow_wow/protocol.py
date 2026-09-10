@@ -82,6 +82,7 @@ class ReviewDisposition(StrEnum):
     REQUEST_CHANGES = "request_changes"
     REJECT = "reject"
     ESCALATE = "escalate"
+    UNAVAILABLE = "unavailable"
     UNCLASSIFIED = "unclassified"
 
     @property
@@ -97,6 +98,7 @@ _APPROVAL_TOKENS = frozenset({"approve", "approved", "accept", "accepted"})
 _CHANGE_TOKENS = frozenset({"block", "blocked", "request_changes", "changes_requested"})
 _REJECTION_TOKENS = frozenset({"reject", "rejected"})
 _ESCALATION_TOKENS = frozenset({"escalate", "escalated"})
+_UNAVAILABLE_TOKENS = frozenset({"cannot_review", "unavailable"})
 # A line that announces itself as the decision, wherever it sits in the text.
 # Reviewers are told to open with the verdict, and on 2026-08-10 both frontier
 # reviewers opened with a markdown heading instead and put "**Verdict:
@@ -110,6 +112,8 @@ _LABELED_DECISION_PATTERN = re.compile(r"^\W*(?:verdict|decision)\b", re.IGNOREC
 
 def _classify_tokens(line: str) -> ReviewDisposition:
     tokens = frozenset(_TOKEN_PATTERN.findall(line.casefold()))
+    if tokens & _UNAVAILABLE_TOKENS:
+        return ReviewDisposition.UNAVAILABLE
     if tokens & _REJECTION_TOKENS:
         return ReviewDisposition.REJECT
     if tokens & _CHANGE_TOKENS:

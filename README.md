@@ -12,7 +12,9 @@ When a coding task needs more than a chat, aidashos gives your AI tool a local p
 - Preserve milestones, attempts, artifacts, reviews, and decisions in a local Postgres ledger.
 - Stop before merge, deploy, spend, or external communication for operator approval.
 
-The default setup uses your logged-in Codex and Claude Code CLIs, so aidashos needs no per-token model API integration.
+The default setup uses your logged-in coding-agent CLI; in the shipped configuration, that is Codex implementing and Codex reviewing in separate sessions.
+Claude Code is available as a fallback.
+No per-token model API integration is required.
 Provider subscription limits still apply.
 Local models handle routine judgment, and frontier pairings can move between providers on a later attempt.
 Automatic all-local senior and staff fallback is not shipped yet.

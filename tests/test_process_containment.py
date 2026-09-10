@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -10,7 +13,10 @@ from pathlib import Path
 
 import pytest
 
-from local_first_agent_os.process_containment import contained_frontier_process
+from local_first_agent_os.process_containment import (
+    _command_read_paths,
+    contained_frontier_process,
+)
 from local_first_agent_os.spawn_authority import ReadOnlyInspection, UnattendedImplementation
 from local_first_agent_os.staffing import FrontierHarness
 
@@ -31,6 +37,116 @@ def _run(
         text=True,
         check=False,
     )
+
+
+@pytest.mark.parametrize("via_env", (False, True), ids=("direct", "env-shebang"))
+def test_symlinked_interpreter_exposes_only_its_runtime_library_subtree(
+    tmp_path: Path, via_env: bool
+) -> None:
+    runtime_root = tmp_path / "runtime"
+    runtime_bin = runtime_root / "bin"
+    runtime_lib = runtime_root / "lib"
+    runtime_bin.mkdir(parents=True)
+    runtime_lib.mkdir()
+    interpreter = runtime_bin / "python3"
+    interpreter.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    interpreter.chmod(0o755)
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    venv_python = venv_bin / "python3"
+    venv_python.symlink_to(interpreter)
+    command = venv_python
+    if via_env:
+        command = tmp_path / "agent"
+        command.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        command.chmod(0o755)
+
+    readable = _command_read_paths((str(command),), {"PATH": str(venv_bin)})
+
+    assert interpreter.resolve() in readable
+    assert runtime_lib.resolve() in readable
+    assert runtime_root.resolve() not in readable
+    assert tmp_path.resolve() not in readable
+
+
+def test_claude_code_can_initialize_inside_the_read_only_boundary(tmp_path: Path) -> None:
+    """The real harness must survive Foundation startup inside Seatbelt."""
+
+    claude = shutil.which("claude")
+    if claude is None:
+        pytest.skip("Claude Code is not installed")
+    with contained_frontier_process(
+        (claude, "--version"),
+        tmp_path,
+        posture=ReadOnlyInspection(),
+        harness=FrontierHarness.CLAUDE,
+    ) as contained:
+        result = _run(contained.command, tmp_path, dict(contained.environment))
+
+    assert result.returncode == 0, result.stderr
+    assert "Claude Code" in result.stdout
+
+
+def test_frontier_process_can_run_a_child_through_a_pseudoterminal(tmp_path: Path) -> None:
+    """Harness tool processes need a PTY without broader host-device access."""
+
+    script = """
+import os
+import subprocess
+
+master, slave = os.openpty()
+result = subprocess.run(
+    ("/usr/bin/true",),
+    stdin=slave,
+    stdout=slave,
+    stderr=slave,
+    check=False,
+)
+os.close(slave)
+os.close(master)
+raise SystemExit(result.returncode)
+"""
+    with contained_frontier_process(
+        (sys.executable, "-c", script),
+        tmp_path,
+        posture=ReadOnlyInspection(),
+        harness=FrontierHarness.CODEX,
+    ) as contained:
+        result = _run(contained.command, tmp_path, dict(contained.environment))
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize(
+    "posture",
+    (ReadOnlyInspection(), UnattendedImplementation()),
+    ids=("read-only", "implementation"),
+)
+def test_claude_code_can_read_its_authenticated_session_inside_the_boundary(
+    tmp_path: Path,
+    posture: ReadOnlyInspection | UnattendedImplementation,
+) -> None:
+    """Both production postures must reach Claude's login keychain item."""
+
+    claude = shutil.which("claude")
+    if claude is None:
+        pytest.skip("Claude Code is not installed")
+    host_result = _run((claude, "auth", "status", "--json"), tmp_path, dict(os.environ))
+    host_payload = json.loads(host_result.stdout) if host_result.stdout.strip() else {}
+    if not host_payload.get("loggedIn"):
+        pytest.skip("Claude Code host session is not authenticated")
+
+    with contained_frontier_process(
+        (claude, "auth", "status", "--json"),
+        tmp_path,
+        posture=posture,
+        harness=FrontierHarness.CLAUDE,
+    ) as contained:
+        result = _run(contained.command, tmp_path, dict(contained.environment))
+
+    payload = json.loads(result.stdout) if result.stdout.strip() else {}
+    assert result.returncode == 0, result.stderr
+    assert payload.get("loggedIn") is True
 
 
 def test_frontier_environment_carries_context_but_no_control_plane_authority(

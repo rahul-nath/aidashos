@@ -124,3 +124,13 @@ def test_startup_skill_makes_live_documentation_reduce_code_knowledge() -> None:
     text = _STARTUP_SKILL.read_text(encoding="utf-8")
     assert "Make comments and docstrings reduce code knowledge" in text
     assert "leave implementation history in version control" in text
+
+
+def test_startup_skill_triages_single_go_work_against_cgd_work() -> None:
+    """Agents advise on the execution shape before a non-trivial mutation."""
+
+    text = _STARTUP_SKILL.read_text(encoding="utf-8")
+    assert "safe for one bounded pass" in text
+    assert "prudent to specify as a compilable GAWD document first" in text
+    assert "Use `CGD` as the accepted shorthand" in text
+    assert "The classification is advisory, not an authority grant" in text

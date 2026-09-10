@@ -105,13 +105,10 @@ def attempt_charge(failure_class: FailureClass | None) -> AttemptCharge:
     `decide_retry` asserts BLOCKED. They are answered here to keep the match
     exhaustive over the enum, not because an uncharged failure is retried freely.
 
-    TRANSIENT does reach BLOCKED and is still uncharged, because the request died
-    in flight and the work was never judged. Its bound does not live in this
-    budget: the only unattended actor that re-drives a transient-blocked
-    milestone is `auto_resume.sweep_transient_blocked`, which counts the
-    milestone's recorded transient failures and stops at its own cap, so a
-    provider that keeps dropping ends up in front of an operator rather than in
-    a loop.
+    TRANSIENT and SCHEDULING reach BLOCKED and are still uncharged, because the
+    work was never judged. Only TRANSIENT is eligible for bounded unattended
+    re-drive. A scheduling condition remains parked until an operator resumes it
+    after the external condition changes.
     """
 
     match failure_class:
@@ -120,6 +117,7 @@ def attempt_charge(failure_class: FailureClass | None) -> AttemptCharge:
         case (
             None
             | FailureClass.TRANSIENT
+            | FailureClass.SCHEDULING
             | FailureClass.REQUIRES_OPERATOR
             | FailureClass.POLICY_VIOLATION
             | FailureClass.NONRECOVERABLE

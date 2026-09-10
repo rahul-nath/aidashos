@@ -9,19 +9,37 @@ import json
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 from ..constants import dispatch_settlement_topic
 from ..contracts import DispatchIntentStatus, MilestoneStatus
+from ..dispatch_contracts import (
+    DispatchContractCode,
+    DispatchContractViolation,
+    DispatchIngressFailureCode,
+    InvalidDispatchReport,
+)
+from ..dispatch_payloads import AutomatedRunObservation, InterruptedRunObservation, TaskObservation
+from ..dispatch_results import (
+    DispatchEvidenceSubject,
+    UnscopedDispatchFailureSubject,
+    normalize_dispatch_runner_result,
+)
+from ..execution_admission import ExecutionDriver
+from ..operator_identity import verify_operator_actor
 from .contracts import DispatchKind, DispatchTerminalStatus
+from .dispatch_diagnostics import record_dispatch_contract_violation
 from .milestones import (
     ClaimedMilestone,
     MalformedMilestoneReference,
     parse_milestone_reference,
     record_dispatch_outcome_on_milestone,
 )
-from .outcomes import TerminalOutcome, classify_failure
+from .outcomes import DispatchResultState, TerminalOutcome, classify_failure, failure_category
 from .store import (
+    ConnectionLike,
     connect,
     emit,
     err,
@@ -67,6 +85,33 @@ _QUORUM_SETTLING_SQL = sql_status_list(*_QUORUM_SETTLING_STATUSES)
 _OPERATOR_CANCELABLE_SQL = sql_status_list(*_OPERATOR_CANCELABLE_STATUSES)
 
 
+class _CompletionAdmission(StrEnum):
+    APPLY = "apply"
+    IDENTICAL_REPLAY = "identical_replay"
+    RECOVERY_OWNS_STATE = "recovery_owns_state"
+    UNCLAIMED = "unclaimed"
+    TERMINAL_CONFLICT = "terminal_conflict"
+
+
+def _completion_admission(
+    current: DispatchIntentStatus,
+    requested: DispatchTerminalStatus,
+    *,
+    same_payload: bool,
+    has_claim: bool,
+) -> _CompletionAdmission:
+    """Terminal facts are immutable; only a recorded claim can produce a new one."""
+    if current in _DISPATCH_NOT_RESUMABLE:
+        return _CompletionAdmission.RECOVERY_OWNS_STATE
+    if current in _QUORUM_SETTLING_STATUSES:
+        if current.value == requested.value and same_payload:
+            return _CompletionAdmission.IDENTICAL_REPLAY
+        return _CompletionAdmission.TERMINAL_CONFLICT
+    if current is DispatchIntentStatus.CLAIMED and has_claim:
+        return _CompletionAdmission.APPLY
+    return _CompletionAdmission.UNCLAIMED
+
+
 def dispatch_intent_to_dict(r: dict[str, Any]) -> dict[str, Any]:
     d = rowdict(r)
     d["created_at"] = iso(d["created_at"])
@@ -88,8 +133,14 @@ def _dispatch_intent_row(intent_id: str) -> dict[str, Any] | None:
     return rowdict(row) if row is not None else None
 
 
-def dispatch_intent_statuses(intent_ids: Sequence[str]) -> dict[str, DispatchIntentStatus]:
-    """Live status for each named intent, keyed by id; unknown ids are omitted.
+@dataclass(frozen=True)
+class DispatchObservation:
+    status: DispatchIntentStatus
+    failure_summary: str | None
+
+
+def dispatch_intent_observations(intent_ids: Sequence[str]) -> dict[str, DispatchObservation]:
+    """Live status and terminal failure; unknown ids are omitted.
 
     The cockpit's milestone view is the caller: a milestone that says RUNNING
     while its intent sits PENDING is parked, not working, and an operator
@@ -102,11 +153,17 @@ def dispatch_intent_statuses(intent_ids: Sequence[str]) -> dict[str, DispatchInt
     placeholders = ",".join("?" for _ in intent_ids)
     with tx() as c:
         rows = c.execute(
-            f"SELECT intent_id, status FROM dispatch_intents WHERE intent_id IN ({placeholders})",
+            "SELECT intent_id, status, error FROM dispatch_intents "
+            f"WHERE intent_id IN ({placeholders})",
             tuple(intent_ids),
         ).fetchall()
     return {
-        entry["intent_id"]: DispatchIntentStatus(entry["status"])
+        entry["intent_id"]: DispatchObservation(
+            status=DispatchIntentStatus(entry["status"]),
+            failure_summary=(
+                entry["error"] if entry["status"] == DispatchIntentStatus.FAILED else None
+            ),
+        )
         for entry in (rowdict(row) for row in rows)
     }
 
@@ -633,26 +690,210 @@ def claim_next_dispatch_intent(
     return data
 
 
+@dataclass(frozen=True)
+class _CompletionReportAccepted:
+    failure_outcome: TerminalOutcome | None
+
+
+@dataclass(frozen=True)
+class _CompletionReportRefused:
+    response: dict[str, Any]
+
+
+def _reported_task_failure(tasks: tuple[TaskObservation, ...]) -> TerminalOutcome | None:
+    """Reduce admitted host-owned failures without reading diagnostic prose.
+
+    A no-fault outcome applies only when every unsuccessful task agrees on that
+    cause. Dependency-blocked tasks already inherit their causal FailureV1 from
+    the executor. Missing, inconsistent or mixed failures remain chargeable;
+    an infrastructure failure cannot erase a separate failed judgment.
+    """
+
+    outcomes: set[TerminalOutcome] = set()
+    for task in tasks:
+        if task.status in ("completed", "COMPLETED", "APPROVE") and task.failure is None:
+            continue
+        failure = task.failure
+        if task.status not in ("failed", "blocked") or failure is None:
+            return TerminalOutcome.UNKNOWN_FAILURE
+        try:
+            outcome = TerminalOutcome(failure.terminal_outcome)
+        except ValueError:
+            return TerminalOutcome.UNKNOWN_FAILURE
+        category = failure_category(outcome)
+        if (
+            category is None
+            or failure.error_code != outcome.value
+            or failure.category is not category
+        ):
+            return TerminalOutcome.UNKNOWN_FAILURE
+        outcomes.add(outcome)
+    if len(outcomes) > 1:
+        return TerminalOutcome.UNKNOWN_FAILURE
+    return next(iter(outcomes), None)
+
+
+def _completion_report_admission(
+    connection: ConnectionLike,
+    *,
+    intent_id: str,
+    kind: DispatchKind,
+    target_project_id: str | None,
+    requested: DispatchTerminalStatus,
+    result: str | None,
+) -> _CompletionReportAccepted | _CompletionReportRefused:
+    """Code and WorkUnit settlement consume typed subject-bound observations.
+
+    Standalone advisory/cast text is retained as an unverified answer. It cannot
+    discharge a WorkUnit requirement. A failed host process may have no report;
+    reporting that failure must remain possible even when no agent ran.
+    """
+    work_unit = connection.execute(
+        "SELECT p.plan_json::jsonb->>'target_project_id' AS target_project_id, cm.executor_kind "
+        "FROM milestone_executions m "
+        "JOIN compiled_milestones cm ON cm.milestone_id=m.milestone_id "
+        "JOIN work_units w ON w.work_unit_id=m.work_unit_id "
+        "JOIN compiled_plan_revisions p "
+        "ON p.compiled_plan_revision_id=w.compiled_plan_revision_id "
+        "WHERE m.dispatch_intent_id=?",
+        (intent_id,),
+    ).fetchall()
+    if kind is not DispatchKind.CODE and not work_unit:
+        return _CompletionReportAccepted(None)
+    if requested is DispatchTerminalStatus.FAILED and (result is None or not result.strip()):
+        return _CompletionReportAccepted(None)
+    try:
+        expected: DispatchEvidenceSubject | UnscopedDispatchFailureSubject
+        if (
+            target_project_id is None
+            and not work_unit
+            and requested is DispatchTerminalStatus.FAILED
+        ):
+            # Failure before project resolution is recordable, but cannot claim
+            # project-scoped work or become a successful execution receipt.
+            expected = UnscopedDispatchFailureSubject(intent_id)
+        elif (
+            not target_project_id
+            or len(work_unit) > 1
+            or (work_unit and work_unit[0]["target_project_id"] != target_project_id)
+        ):
+            raise DispatchContractViolation(
+                InvalidDispatchReport.from_input(DispatchContractCode.SUBJECT_MISMATCH, result)
+            )
+        else:
+            expected = DispatchEvidenceSubject(intent_id, target_project_id)
+        normalized = normalize_dispatch_runner_result(
+            intent_result=result,
+            approval_payload={},
+            expected_subject=expected,
+        )
+        if normalized.state is DispatchResultState.UNAVAILABLE:
+            raise DispatchContractViolation(
+                InvalidDispatchReport.from_input(DispatchContractCode.INVALID_ENVELOPE, result)
+            )
+        if (
+            requested is DispatchTerminalStatus.DONE
+            and normalized.state is not DispatchResultState.COMPLETED
+        ):
+            raise DispatchContractViolation(
+                InvalidDispatchReport.from_input(DispatchContractCode.INCONSISTENT_OUTCOME, result)
+            )
+    except DispatchContractViolation as violation:
+        event_id = record_dispatch_contract_violation(
+            connection, intent_id=intent_id, diagnostic=violation.diagnostic
+        )
+        return _CompletionReportRefused(
+            err(
+                DispatchIngressFailureCode.REPORT_CONTRACT_VIOLATION.value,
+                intent_id=intent_id,
+                code=violation.diagnostic.code.value,
+                diagnostic_event_id=event_id,
+            )
+        )
+    from ..work_units.executors import ExecutorKind
+
+    # The compiled executor and validated subject establish which protocol owns
+    # this observation. A caller's executor label alone cannot exempt code work
+    # from its failure budget, and diagnostic prose cannot classify an outcome.
+    observation = normalized.observation
+    if (
+        len(work_unit) == 1
+        and work_unit[0]["executor_kind"] == ExecutorKind.VERIFY_TESTS.value
+        and observation is not None
+        and observation.executor == ExecutionDriver.REGISTERED_VERIFICATION.value
+    ):
+        match observation:
+            case InterruptedRunObservation(status="UNAVAILABLE"):
+                return _CompletionReportAccepted(TerminalOutcome.VERIFICATION_UNAVAILABLE)
+            case InterruptedRunObservation(status="CANCELED"):
+                return _CompletionReportAccepted(TerminalOutcome.VERIFICATION_CANCELED)
+            case InterruptedRunObservation(status="TIMED_OUT"):
+                return _CompletionReportAccepted(TerminalOutcome.DEADLINE_EXCEEDED)
+            case AutomatedRunObservation(status="VERIFICATION_FAILED"):
+                return _CompletionReportAccepted(TerminalOutcome.VERIFICATION_FAILED)
+    if normalized.state is DispatchResultState.FAILED and isinstance(
+        observation, AutomatedRunObservation
+    ):
+        return _CompletionReportAccepted(_reported_task_failure(observation.tasks))
+    return _CompletionReportAccepted(None)
+
+
 def complete_dispatch_intent(
     intent_id: str,
     status: str,
     result: str | None = None,
     error: str | None = None,
 ) -> dict[str, Any]:
-    """Resolve a claimed intent as DONE or FAILED with its captured output."""
-    if status not in {member.value for member in DispatchTerminalStatus}:
-        return err("invalid_status", status=status, allowed=["DONE", "FAILED"])
-    outcome = (
-        TerminalOutcome.AUTOMATED_COMPLETION
-        if status == DispatchTerminalStatus.DONE
-        else classify_failure(error or result)
-    )
+    """Admit a host supervisor's observation without lending authority to callers.
+
+    Until scoped worker credentials are implemented, direct Python callers and
+    all transports require actual operator-host proof. A recorded claim or
+    request forwarded by a token-holding server is not caller authentication.
+    Qualifying verification evidence remains owned by the receipt consumer.
+    """
+    verify_operator_actor("dispatch-completion-supervisor")
+    try:
+        terminal_status = DispatchTerminalStatus(status)
+    except ValueError:
+        return err(
+            "invalid_status",
+            status=status,
+            allowed=[member.value for member in DispatchTerminalStatus],
+        )
     t = now()
     with tx() as c:
-        r = c.execute("SELECT * FROM dispatch_intents WHERE intent_id=?", (intent_id,)).fetchone()
+        r = c.execute(
+            "SELECT * FROM dispatch_intents WHERE intent_id=? FOR UPDATE", (intent_id,)
+        ).fetchone()
         if not r:
             return err("not_found", intent_id=intent_id)
-        if DispatchIntentStatus(str(r["status"])) in _DISPATCH_NOT_RESUMABLE:
+        admission = _completion_admission(
+            DispatchIntentStatus(r["status"]),
+            terminal_status,
+            same_payload=r["result"] == result and r["error"] == error,
+            has_claim=bool(r["claimed_by"]) and r["claimed_at"] is not None,
+        )
+        if admission is _CompletionAdmission.IDENTICAL_REPLAY:
+            return ok(
+                intent_id=intent_id,
+                status=terminal_status.value,
+                completed_at=iso(r["completed_at"]),
+                identical_replay=True,
+                milestone_update=None,
+                completed_parent_intent_id=None,
+            )
+        if admission in (
+            _CompletionAdmission.UNCLAIMED,
+            _CompletionAdmission.TERMINAL_CONFLICT,
+        ):
+            return err(
+                "invalid_completion_transition",
+                reason=admission.value,
+                intent_id=intent_id,
+                current_status=r["status"],
+                requested_status=terminal_status.value,
+            )
+        if admission is _CompletionAdmission.RECOVERY_OWNS_STATE:
             data = ok(
                 intent_id=intent_id,
                 status=r["status"],
@@ -662,6 +903,23 @@ def complete_dispatch_intent(
                 completed_parent_intent_id=None,
             )
             return data
+        if admission is not _CompletionAdmission.APPLY:
+            raise AssertionError(f"unhandled completion admission: {admission}")
+        report_admission = _completion_report_admission(
+            c,
+            intent_id=str(r["intent_id"]),
+            kind=DispatchKind(r["kind"]),
+            target_project_id=r["target_project_id"],
+            requested=terminal_status,
+            result=result,
+        )
+        if isinstance(report_admission, _CompletionReportRefused):
+            return report_admission.response
+        outcome = (
+            TerminalOutcome.AUTOMATED_COMPLETION
+            if terminal_status is DispatchTerminalStatus.DONE
+            else report_admission.failure_outcome or classify_failure(error or result)
+        )
         c.execute(
             "UPDATE dispatch_intents SET status=?, outcome=?, result=?, error=?, completed_at=? "
             "WHERE intent_id=?",
@@ -726,14 +984,15 @@ def complete_dispatch_intent(
                         completed_at=t,
                     )
         # A reducer's terminal outcome IS the quorum's outcome: completing the
-        # reducer completes its parent with the reduced answer (unless an
-        # operator already canceled the parent).
+        # reducer completes its still-pending quorum parent with the reduced
+        # answer. Parked, replaced, and terminal parents retain their history.
         completed_parent_intent_id: str | None = None
         if updated_intent["intent_role"] == "reducer" and updated_intent["parent_intent_id"]:
             cur = c.execute(
                 "UPDATE dispatch_intents SET status=?, outcome=?, result=?, error=?, "
                 "completed_at=? "
-                f"WHERE intent_id=? AND status NOT IN ({_QUORUM_SETTLING_SQL})",
+                f"WHERE intent_id=? AND status='{DispatchIntentStatus.PENDING}' "
+                "AND intent_role='quorum'",
                 (
                     status,
                     outcome.value,

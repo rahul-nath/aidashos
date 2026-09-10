@@ -26,6 +26,7 @@ import psycopg
 import pytest
 
 from local_first_agent_os import dispatcher as dispatcher_module
+from local_first_agent_os import operator_dispatcher_host
 from local_first_agent_os.coordination import ClaimNextDispatchIntent, DispatchTerminalStatus, store
 from local_first_agent_os.coordination.availability import (
     LedgerUnavailable,
@@ -272,7 +273,9 @@ def test_an_ordinary_failure_is_still_a_rejected_command(
 # --- the loops the runtime actually starts -------------------------------------
 
 
-def test_both_started_loops_are_the_ones_covered_here() -> None:
+def test_both_started_loops_are_the_ones_covered_here(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A guard against this file testing loops the runtime no longer starts.
 
     `start-agent-runtime.sh` is the operator's entry point, so it decides which
@@ -281,7 +284,23 @@ def test_both_started_loops_are_the_ones_covered_here() -> None:
     """
 
     script = (REPO_ROOT / "scripts" / "start-agent-runtime.sh").read_text(encoding="utf-8")
+    launchers = dict(
+        re.findall(r"^start_resident_loop\s+(\S+)\s+(.+)$", script.replace("\\\n", " "), re.M)
+    )
+    assert set(launchers) == {"work-unit-enqueue-drainer", "ledger-dispatcher"}
+    assert (
+        "python -m local_first_agent_os.operator_dispatcher_host " in launchers["ledger-dispatcher"]
+    )
     started = set(re.findall(r"agent_coordination_mcp\.py[^\n]*?\s(run_[a-z_]+)", script))
+    dispatched: list[str] = []
+
+    def capture_dispatcher(arguments: list[str]) -> int:
+        dispatched.extend(arguments)
+        return 0
+
+    monkeypatch.setattr("local_first_agent_os.coordination.cli.main", capture_dispatcher)
+    assert operator_dispatcher_host.main(["--root", str(tmp_path)]) == 0
+    started.update(argument for argument in dispatched if argument.startswith("run_"))
 
     assert started == {"run_enqueue_drainer", "run_ledger_dispatcher"}, (
         f"the runtime starts resident loops this file does not cover: {started}"

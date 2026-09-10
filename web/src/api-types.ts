@@ -1005,6 +1005,21 @@ export interface components {
             /** Tier */
             tier: string | null;
         };
+        /** InvalidStaffReview */
+        InvalidStaffReview: {
+            /** Artifact Id */
+            artifact_id: string;
+            /**
+             * Explanation
+             * @default Stored review evidence is malformed; its verdict cannot be displayed.
+             */
+            explanation: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "INVALID_ARTIFACT";
+        };
         /**
          * LeaseFacts
          * @description One agent execution lease, as the cockpit renders it.
@@ -1100,6 +1115,8 @@ export interface components {
              * @default
              */
             description: string;
+            /** Dispatch Failure Summary */
+            dispatch_failure_summary: string | null;
             /** Dispatch Intent Id */
             dispatch_intent_id: string | null;
             dispatch_status: components["schemas"]["DispatchIntentStatus"] | null;
@@ -1130,6 +1147,8 @@ export interface components {
             result_summary: string | null;
             /** Stable Key */
             stable_key: string;
+            /** Staff Review */
+            staff_review: (components["schemas"]["RecordedStaffReview"] | components["schemas"]["InvalidStaffReview"]) | null;
             status: components["schemas"]["MilestoneExecutionStatus"];
             /** Title */
             title: string;
@@ -1440,6 +1459,21 @@ export interface components {
              */
             workspace_id: string;
         };
+        /** RecordedStaffReview */
+        RecordedStaffReview: {
+            /** Artifact Id */
+            artifact_id: string;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            kind: "RECORDED";
+            /** Review Text */
+            review_text: string;
+            /** Reviewed Commit Sha */
+            reviewed_commit_sha: string | null;
+            verdict: components["schemas"]["ReviewDisposition"];
+        };
         /**
          * ResumeDeliveryView
          * @description What a decision that unblocks a BLOCKED WorkUnit did about resuming it.
@@ -1451,6 +1485,12 @@ export interface components {
             reason: string;
         };
         RetryPolicyView: components["schemas"]["ChargedFailureBudgetView"] | components["schemas"]["OperatorOnlyRetryView"];
+        /**
+         * ReviewDisposition
+         * @description Finite control-flow outcomes parsed from a reviewer response.
+         * @enum {string}
+         */
+        ReviewDisposition: "approve" | "request_changes" | "reject" | "escalate" | "unavailable" | "unclassified";
         /** ReviseWalkthru */
         ReviseWalkthru: {
             /** Accepted Summary */
@@ -2068,11 +2108,15 @@ export interface components {
             compiled_plan_revision_id: string;
             /** Current Phase */
             current_phase: string;
+            /** Design Doc Name */
+            design_doc_name: string | null;
             /** Design Doc Revision Id */
             design_doc_revision_id: string;
             /** Root Workflow Id */
             root_workflow_id: string;
             status: components["schemas"]["WorkUnitStatus"];
+            /** Target Project Id */
+            target_project_id: string | null;
             /** Title */
             title: string;
             /** Work Unit Id */

@@ -27,6 +27,7 @@ from local_first_agent_os.work_units import cancellation, service
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units.events import ArtifactKind, RequirableArtifact
 from local_first_agent_os.work_units.execution import (
+    DispatchBackedExecutorRuntime,
     MilestoneContext,
     MilestoneFailed,
     MilestoneOutcome,
@@ -260,6 +261,9 @@ def test_a_failed_sibling_does_not_erase_the_other_sibling_or_earlier_phases(
     assert statuses["b"] is MilestoneExecutionStatus.SUCCEEDED
     assert statuses["c"] is MilestoneExecutionStatus.FAILED
     assert view.status is WorkUnitStatus.FAILED
+    failed = next(item for item in view.milestones if item.stable_key == "c")
+    assert view.failure_code == failed.failure_code == "simulated_failure"
+    assert view.failure_summary == failed.failure_summary
     phases = {item.phase: item.status for item in view.phases}
     assert phases[LifecyclePhase.PLAN] is PhaseStatus.SUCCEEDED
     assert phases[LifecyclePhase.IMPLEMENT] is PhaseStatus.FAILED
@@ -317,7 +321,83 @@ def test_a_correctable_failure_blocks_rather_than_failing_the_milestone(
     plan_milestone = next(item for item in view.milestones if item.stable_key == "a")
     assert plan_milestone.status is MilestoneExecutionStatus.BLOCKED
     assert view.status is WorkUnitStatus.BLOCKED
+    assert view.failure_code == plan_milestone.failure_code == "patch_conflict"
+    assert view.failure_summary == plan_milestone.failure_summary == "the patch did not apply"
     assert view.blocking.kind == "BLOCKED_MILESTONE"
+
+
+@pytest.mark.parametrize("assignment_policy", ["missing", "fixed"])
+def test_a_dispatch_outcome_reaches_the_milestone_and_work_unit_without_spending_work(
+    work_unit_ledger: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    assignment_policy: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from local_first_agent_os import pairing_assignment
+    from local_first_agent_os.coordination.dispatch import (
+        claim_next_dispatch_intent,
+        complete_dispatch_intent,
+        submit_dispatch_intent,
+    )
+    from local_first_agent_os.coordination.outcomes import TerminalOutcome
+    from local_first_agent_os.staffing import StrictPair
+    from local_first_agent_os.work_units.execution import dispatch_intent_row
+    from local_first_agent_os.work_units.retry import count_charged_failures
+
+    if assignment_policy == "fixed":
+        monkeypatch.setattr(
+            pairing_assignment,
+            "assignment_for_intent",
+            lambda _intent_id: SimpleNamespace(selection=StrictPair("codex-only")),
+        )
+
+    failure_summary = "claude reported: You've hit your session limit; resets 9:20pm"
+
+    def _settle_usage_limit(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        submitted = submit_dispatch_intent(*args, **kwargs)
+        intent_id = str(submitted["intent_id"])
+        claimed = claim_next_dispatch_intent("test-dispatcher")
+        assert claimed["intent"]["intent_id"] == intent_id
+        completed = complete_dispatch_intent(
+            intent_id,
+            status="FAILED",
+            error=failure_summary,
+        )
+        assert completed["ok"] is True
+        return submitted
+
+    set_engine(
+        WorkUnitEngine(
+            runtime=DispatchBackedExecutorRuntime(
+                intent_submitter=_settle_usage_limit,
+                target_project_id="test-project",
+                poll_interval_seconds=0.0,
+            ),
+            approval_wait_seconds=0.0,
+            approval_poll_seconds=0.01,
+        )
+    )
+
+    started = _start()
+
+    view = service.get_work_unit(started["work_unit_id"])
+    milestone = next(item for item in view.milestones if item.stable_key == "a")
+    assert milestone.dispatch_intent_id is not None
+    intent = dispatch_intent_row(milestone.dispatch_intent_id)
+    assert intent is not None
+    assert intent["outcome"] == TerminalOutcome.USAGE_LIMIT.value
+    assert milestone.failure_code == TerminalOutcome.USAGE_LIMIT.value
+    assert milestone.failure_summary == failure_summary
+    assert milestone.status is MilestoneExecutionStatus.BLOCKED
+    assert milestone.attempt == 1
+    assert view.failure_code == milestone.failure_code
+    assert view.failure_summary == milestone.failure_summary
+    assert view.status is WorkUnitStatus.BLOCKED
+    failures = repo.list_milestone_failure_attempts(started["work_unit_id"])
+    assert len(failures) == 1
+    assert failures[0].failure_class is FailureClass.SCHEDULING
+    assert count_charged_failures(failure.failure_class for failure in failures) == 0
 
 
 def test_re_entering_a_finished_execution_repeats_no_work(work_unit_ledger: Path) -> None:

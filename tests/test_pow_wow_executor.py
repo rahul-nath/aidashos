@@ -11,10 +11,12 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import pytest
 from staffing_support import repo_bench, seat_agent_name, two_vendor_bench
 
 from local_first_agent_os.constants import DEFAULT_VERIFICATION_COMMAND_TIMEOUT_SECONDS
@@ -29,6 +31,7 @@ from local_first_agent_os.coordination import (
     SubmitArtifact,
     parse_coordination_result,
 )
+from local_first_agent_os.coordination.outcomes import TerminalOutcome
 from local_first_agent_os.coordination.store import tx
 from local_first_agent_os.engineering_doctrine import CURRENT_ENGINEERING_DOCTRINE
 from local_first_agent_os.lifecycle_failure_harness import (
@@ -48,6 +51,7 @@ from local_first_agent_os.pow_wow import (
     DryRunPowWowExecutor,
     FakeProcessPowWowExecutor,
     PowWowExecutionContext,
+    PowWowTaskResult,
     PowWowTaskSpec,
     build_agent_task_prompt,
     build_default_saga_tasks,
@@ -62,6 +66,56 @@ from local_first_agent_os.staffing import Bench, BenchSlot, Harness
 from local_first_agent_os.vocabulary import DispatchTier
 
 
+@pytest.fixture(autouse=True)
+def _explicit_fake_inspection_launch(tmp_path, monkeypatch):
+    """Scheduler tests inject a fake port; native containment has its own suite.
+
+    The fixture refuses real installed executables, even when a test forgot to
+    name a fake. It cannot accidentally spend a model call while testing a DAG.
+    """
+    from local_first_agent_os.pow_wow.executor import CliPowWowExecutor
+    from local_first_agent_os.process_containment import (
+        ProcessContainmentUnavailable,
+        process_container_for_host,
+    )
+    from local_first_agent_os.spawn_authority import ReadOnlyInspection
+    from local_first_agent_os.staffing import FrontierHarness
+
+    def preflight(repository, binary, authority):
+        if not binary.resolve().is_relative_to(tmp_path.resolve()):
+            raise ProcessContainmentUnavailable("test requires an explicitly provided fake Codex")
+
+    @contextmanager
+    def prepared(request):
+        preflight(request.repository, request.codex_bin, request.authority)
+        command = (
+            str(request.codex_bin),
+            "exec",
+            "-s",
+            "read-only",
+            "--model",
+            request.model,
+            request.prompt,
+        )
+        with process_container_for_host().contain(
+            command,
+            request.repository,
+            posture=ReadOnlyInspection(),
+            harness=FrontierHarness.CODEX,
+            overrides={"LOCAL_AGENT_ASSIGNED_WORKTREE": str(request.repository)},
+        ) as contained:
+            yield contained
+
+    original_init = CliPowWowExecutor.__init__
+
+    def initialize(self, *args, **kwargs):
+        kwargs.setdefault("readonly_codex_launcher", prepared)
+        kwargs.setdefault("readonly_codex_preflight", preflight)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(CliPowWowExecutor, "__init__", initialize)
+
+
 def _run_git_command(command: list[str], cwd: Path) -> None:
     subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
 
@@ -69,6 +123,10 @@ def _run_git_command(command: list[str], cwd: Path) -> None:
 _FAKE_AGENT_PREAMBLE = (
     "#!/usr/bin/env python3\n"
     "import json as _json, sys\n"
+    # A fixture tool launcher, not evidence about the installed Codex binary.
+    "if 'sandbox' in sys.argv:\n"
+    "    import subprocess\n"
+    "    raise SystemExit(subprocess.call(sys.argv[sys.argv.index('--') + 1:]))\n"
     # `codex login status` is asked before any codex-seated task spawns, so a
     # fake standing in for whichever vendor holds a seat has to answer it. Every
     # fake carries this rather than only the ones seated as codex today, because
@@ -119,25 +177,29 @@ def _seated(
     exist, which is what the tests passing only one script already relied on.
     """
 
-    seating = bench if bench is not None else repo_bench()
+    seating = {
+        tier: slot if slot.model else replace(slot, model="fixture-model")
+        for tier, slot in (bench if bench is not None else repo_bench()).items()
+    }
     senior = seating[DispatchTier.SENIOR].harness
     staff = seating[DispatchTier.STAFF].harness
 
     if senior is staff and implementer and reviewer:
-        # One vendor holds both frontier seats: an outage staffing. The binary
-        # can no longer say which seat is spawning, but the spawn command still
-        # can, because each seat pins its own model and the executor passes it
-        # as `--model <id>`. A dispatcher script routes on the senior slot's
-        # model, so the two fakes keep the seats they were written for and
-        # these tests stay about the executor rather than about the seating.
-        senior_model = seating[DispatchTier.SENIOR].model or ""
+        # The fake selects its behavior from the host's staff-only prompt
+        # contract, never model or effort: identical pins can fill both seats.
+        # Embed both bodies so containment admits only the launched script.
+        scripts = (
+            (implementer, Path(implementer).read_text()),
+            (reviewer, Path(reviewer).read_text()),
+        )
         wrapper = Path(implementer).with_name(f"seat_dispatch_{uuid.uuid4().hex[:6]}.py")
         wrapper.write_text(
             "#!/usr/bin/env python3\n"
-            "import os, sys\n"
-            f"seat = {implementer!r} if {senior_model!r} and {senior_model!r} in sys.argv "
-            f"else {reviewer!r}\n"
-            "os.execv(seat, [seat] + sys.argv[1:])\n",
+            "import sys\n"
+            f"scripts = {scripts!r}\n"
+            "name, source = scripts['Staff doctrine enforcement:' in sys.argv[-1]]\n"
+            "sys.argv[0] = name\n"
+            "exec(compile(source, name, 'exec'), {'__name__': '__main__', '__file__': name})\n",
             encoding="utf-8",
         )
         os.chmod(wrapper, 0o755)
@@ -638,7 +700,12 @@ def test_junior_task_routes_through_delegate_not_frontier_cli(tmp_path: Path) ->
 
     def fake_delegate(**kwargs):
         calls.append(kwargs)
-        return {"ok": True, "output": "PONG", "metadata": {"adapter": "local_llama"}}
+        return {
+            "ok": True,
+            "output": "PONG",
+            "artifact_ids": ["artifact-prompt", "artifact-output"],
+            "provenance": {"runtime": "local_model", "model_role": "general"},
+        }
 
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "worktrees",
@@ -655,16 +722,21 @@ def test_junior_task_routes_through_delegate_not_frontier_cli(tmp_path: Path) ->
     )
     result = executor.dispatch_pow_wow("pow-junior", target, (junior,), _context(target))
 
-    # delegate was called once with the junior model; no frontier CLI was launched
+    # The unpinned local seat delegates selection to the durable active-general
+    # role; no frontier CLI was launched.
     assert len(calls) == 1
-    assert calls[0]["tier"] == "junior"
-    assert calls[0]["model"] == "gemma4"
+    assert "tier" not in calls[0]
+    assert "role" not in calls[0]
+    assert calls[0]["model"] is None
     task_result = result.tasks[0]
     assert task_result.status == "completed"
     art = task_result.artifacts[0]
     assert art.artifact_type == "delegated_task_run"
     assert art.content["output"] == "PONG"
     assert art.content["mode"] == "delegate"
+    assert art.schema_version == "delegated_task_run.v2"
+    assert art.content["artifact_ids"] == ["artifact-prompt", "artifact-output"]
+    assert art.content["provenance"]["runtime"] == "local_model"
     # no worktree allocated for a delegate-only pow-wow
     assert not any(a.artifact_type == "worktree_allocation" for a in task_result.artifacts)
     assert result.status == "COMPLETED"
@@ -1270,7 +1342,7 @@ def test_frontier_usage_limit_falls_back_to_other_frontier_provider(tmp_path: Pa
 
     def fake_delegate(**kwargs):
         calls.append(kwargs)
-        return {"ok": True, "output": f"fallback:{kwargs['task_name']}", "metadata": {}}
+        return {"ok": True, "output": f"fallback:{kwargs['task_name']}"}
 
     tasks = (
         PowWowTaskSpec(
@@ -1324,24 +1396,25 @@ def test_governed_pairing_never_swaps_one_provider_mid_attempt(tmp_path: Path) -
     repo = tmp_path / "target"
     _init_git_repo(repo)
     target = _target(repo)
-    claude = tmp_path / "fake_claude.py"
-    claude.write_text(
+    implementer = tmp_path / "fake_implementer.py"
+    implementer.write_text(
         _FAKE_AGENT_PREAMBLE
         + "import sys\n"
-        + 'print("You\'ve hit your session limit", file=sys.stderr)\n'
+        + 'print("You\'ve hit your session limit; resets 9:20pm", file=sys.stderr)\n'
         + "raise SystemExit(1)\n",
         encoding="utf-8",
     )
-    os.chmod(claude, 0o755)
-    codex = tmp_path / "fake_codex.py"
-    codex.write_text(
+    os.chmod(implementer, 0o755)
+    reviewer = tmp_path / "fake_reviewer.py"
+    reviewer.write_text(
         _FAKE_AGENT_PREAMBLE + "emit('the undeclared replacement ran')\n",
         encoding="utf-8",
     )
-    os.chmod(codex, 0o755)
+    os.chmod(reviewer, 0o755)
+    bench = two_vendor_bench()
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
-        **_seated(implementer=str(claude), reviewer=str(codex), bench=two_vendor_bench()),
+        **_seated(implementer=str(implementer), reviewer=str(reviewer), bench=bench),
         delegate_fn=lambda **_: {"ok": True, "output": "junior"},
     )
     executor._codex_auth_ok_cache = True
@@ -1366,9 +1439,118 @@ def test_governed_pairing_never_swaps_one_provider_mid_attempt(tmp_path: Path) -
 
     assert result.status == "FAILED"
     assert result.tasks[0].status == "failed"
+    assert result.tasks[0].failure is not None
+    assert result.tasks[0].failure.error_code == TerminalOutcome.USAGE_LIMIT, result.tasks[
+        0
+    ].failure.message
+    assert "session limit" in result.tasks[0].failure.message
+    reported_seat = f"{bench[DispatchTier.SENIOR].harness.value} reported"
+    assert any(
+        reported_seat in risk and "resets 9:20pm" in risk for risk in result.tasks[0].risks
+    )
+    assert result.tasks[0].to_payload()["failure"]["retryable"] is True
     assert all(
         artifact.artifact_type != "frontier_fallback_run" for artifact in result.tasks[0].artifacts
     )
+
+
+def test_cli_failure_boundary_records_session_limit_with_raw_text() -> None:
+    from local_first_agent_os.coordination.failures import FailureClassificationSource
+    from local_first_agent_os.pow_wow.executor import _harness_failure
+
+    raw_text = "You've hit your session limit - resets 9:20pm"
+    classification = _harness_failure(
+        CommandRunCapture(
+            command="claude",
+            cwd="/repo",
+            stdout="",
+            stderr=raw_text,
+            exit_code=1,
+        ),
+        operation="run_advisory_agent",
+    )
+
+    assert classification.failure.error_code == TerminalOutcome.USAGE_LIMIT
+    assert classification.failure.retryable is True
+    assert classification.failure.message == raw_text
+    assert classification.source is FailureClassificationSource.MARKER
+
+
+def test_unclassified_cli_failure_uses_junior_classifier(tmp_path: Path) -> None:
+    from local_first_agent_os.agent_execution_supervisor import SupervisedCommandResult
+    from local_first_agent_os.coordination.failures import FailureClassificationSource
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+    from local_first_agent_os.pow_wow.executor import _harness_failure
+
+    calls: list[dict[str, object]] = []
+
+    def delegate(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"ok": True, "output": '{"outcome":"POLICY_DENIED"}'}
+
+    executor = CliPowWowExecutor(
+        worktree_root=tmp_path / "wt",
+        delegate_fn=delegate,
+    )
+    raw_text = "request refused by project ruleset ZEBRA-17"
+    capture = CommandRunCapture(
+        command="claude",
+        cwd="/repo",
+        stdout="",
+        stderr=raw_text,
+        exit_code=1,
+    )
+    classification = _harness_failure(
+        capture,
+        operation="run_advisory_agent",
+        supervised_result=SupervisedCommandResult(
+            capture=capture,
+            deadline_reached=False,
+            cancel_requested=False,
+            transcript_artifact_id=None,
+            checkpoint_id=None,
+            checkpoint_artifact_ids=(),
+            checkpoint_reason=None,
+            preserve_worktree=False,
+            event_count=1,
+            agent_failure=TerminalOutcome.UNKNOWN_FAILURE.value,
+        ),
+        unknown_classifier=executor._unknown_failure_classifier(
+            pow_wow_id="pow-classify",
+            task_name="senior_advisory",
+        ),
+    )
+
+    assert classification.failure.error_code == TerminalOutcome.POLICY_DENIED
+    assert classification.source is FailureClassificationSource.JUNIOR_MODEL
+    assert classification.failure.message == raw_text
+    assert len(calls) == 1
+    assert calls[0]["task_name"] == "failure_classifier_senior_advisory"
+    assert calls[0]["timeout_seconds"] == 30.0
+
+
+def test_failure_classification_source_is_recorded_outside_failure_v1() -> None:
+    from local_first_agent_os.coordination.failures import (
+        FailureClassification,
+        FailureClassificationSource,
+        expected_failure,
+    )
+    from local_first_agent_os.pow_wow.executor import _failure_classification_payload
+
+    classification = FailureClassification(
+        failure=expected_failure(
+            TerminalOutcome.POLICY_DENIED,
+            operation="run_advisory_agent",
+            message="project policy denied the request",
+        ),
+        source=FailureClassificationSource.JUNIOR_MODEL,
+    )
+
+    assert "classification_source" not in classification.failure.to_dict()
+    assert _failure_classification_payload(classification) == {
+        "terminal_outcome": TerminalOutcome.POLICY_DENIED,
+        "source": FailureClassificationSource.JUNIOR_MODEL,
+    }
 
 
 def test_frontier_timeout_uses_other_provider_once(tmp_path: Path) -> None:
@@ -1470,7 +1652,7 @@ def test_four_junior_delegates_feed_codex_reviewer(tmp_path: Path) -> None:
         time.sleep(0.2)
         with lock:
             state["active"] -= 1
-        return {"ok": True, "output": f"gemma-output:{kwargs['task_name']}", "metadata": {}}
+        return {"ok": True, "output": f"gemma-output:{kwargs['task_name']}"}
 
     junior_names = tuple(f"gemma_{idx}" for idx in range(4))
     tasks = tuple(
@@ -1529,7 +1711,7 @@ def test_empty_junior_delegate_output_blocks_dependent_task(tmp_path: Path) -> N
     target = _target(repo)
 
     def empty_delegate(**_kwargs):
-        return {"ok": True, "output": "", "metadata": {}}
+        return {"ok": True, "output": ""}
 
     tasks = (
         PowWowTaskSpec(
@@ -1551,6 +1733,7 @@ def test_empty_junior_delegate_output_blocks_dependent_task(tmp_path: Path) -> N
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
         delegate_fn=empty_delegate,
+        readonly_codex_preflight=lambda *_: None,
     )
 
     result = executor.dispatch_pow_wow(
@@ -1565,8 +1748,45 @@ def test_empty_junior_delegate_output_blocks_dependent_task(tmp_path: Path) -> N
     assert result.status == "FAILED"
     assert junior.status == "failed"
     assert "empty output" in junior.risks[0]
+    assert junior.failure is not None
+    assert junior.failure.error_code == TerminalOutcome.UNKNOWN_FAILURE
+    assert junior.failure.message == "delegate returned ok with empty output"
     assert review.status == "blocked"
     assert "dependencies did not complete" in review.risks[0]
+    assert review.failure is junior.failure
+
+
+def test_completed_review_without_typed_output_has_explicit_failure(tmp_path: Path) -> None:
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+
+    repo = tmp_path / "target"
+    _init_git_repo(repo)
+    target = _target(repo)
+    task = PowWowTaskSpec(
+        task_name="staff_review",
+        role="reviewer",
+        dispatch_kind=DispatchKind.CODE,
+        description="review the change",
+    )
+    completed_without_review = PowWowTaskResult(
+        task_name=task.task_name,
+        role=task.role,
+        status="completed",
+        summary="review process completed without output",
+    )
+    executor = CliPowWowExecutor(worktree_root=tmp_path / "wt")
+
+    results = executor._require_approved_code_review(
+        tasks=(task,),
+        context=_context(target),
+        task_results=(completed_without_review,),
+    )
+
+    unresolved = results[-1]
+    assert unresolved.status == "failed"
+    assert unresolved.failure is not None
+    assert unresolved.failure.error_code == TerminalOutcome.REVIEW_OUTPUT_MISSING
+    assert unresolved.to_payload()["failure"]["error_code"] == "REVIEW_OUTPUT_MISSING"
 
 
 def test_junior_tasks_fan_out_concurrently(tmp_path: Path) -> None:
@@ -1589,7 +1809,7 @@ def test_junior_tasks_fan_out_concurrently(tmp_path: Path) -> None:
         time.sleep(0.2)
         with lock:
             state["active"] -= 1
-        return {"ok": True, "output": "done", "metadata": {}}
+        return {"ok": True, "output": "done"}
 
     juniors = tuple(
         PowWowTaskSpec(
@@ -1696,6 +1916,195 @@ def _review_loop_fixture(
         ),
     )
     return repo, str(claude), str(codex), tasks
+
+
+def test_broken_review_preflight_starts_no_agents(tmp_path: Path, monkeypatch) -> None:
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+    from local_first_agent_os.process_containment import ProcessContainmentUnavailable
+
+    repo, claude_bin, codex_bin, tasks = _review_loop_fixture(
+        tmp_path,
+        codex_verdicts=["APPROVE"],
+    )
+    target = _review_loop_target(repo)
+
+    def unavailable(*args, **kwargs):
+        raise ProcessContainmentUnavailable("fixture: nested sandbox cannot start")
+
+    result = CliPowWowExecutor(
+        worktree_root=tmp_path / "wt",
+        readonly_codex_preflight=unavailable,
+        **_seated(implementer=claude_bin, reviewer=codex_bin),
+    ).dispatch_pow_wow("pow-preflight", target, tasks, _context(target))
+    assert result.status == "BLOCKED"
+    assert not result.external_agents_started
+    assert not (tmp_path / "wt").exists()
+    assert result.tasks[0].failure is not None
+    assert result.tasks[0].failure.error_code == "REVIEW_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("stage", ["version", "repository_read"])
+def test_native_preflight_denial_blocks_before_implementation(
+    tmp_path: Path, monkeypatch, stage: str
+) -> None:
+    from local_first_agent_os import codex_review_launch as launch
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+    from local_first_agent_os.process_containment import ProcessContainmentUnavailable
+    from local_first_agent_os.sandbox_runtime import SandboxRuntimeInstallation
+
+    repo, claude_bin, codex_bin, tasks = _review_loop_fixture(tmp_path, codex_verdicts=["APPROVE"])
+    calls = []
+
+    class DeniedWorker:
+        def __init__(self, *_):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            calls.append("closed")
+
+        async def require_ready(self):
+            calls.append("ready")
+
+        async def read_repository(self, request):
+            calls.append(request)
+            raise launch.NativeWorkerError({"code": -32600, "message": "Operation not permitted"})
+
+    def validate(*_):
+        if stage == "version":
+            raise ProcessContainmentUnavailable("Codex version differs from the verified protocol")
+        return "fixture-verified-binary"
+
+    monkeypatch.setattr(launch, "CodexToolWorker", DeniedWorker)
+    monkeypatch.setattr(launch, "_validate_codex", validate)
+    monkeypatch.setattr(
+        launch,
+        "_configured_installation",
+        lambda: SandboxRuntimeInstallation(tmp_path, Path("/bin/sh"), "fixture"),
+    )
+    target = _review_loop_target(repo)
+    result = CliPowWowExecutor(
+        worktree_root=tmp_path / "wt",
+        readonly_codex_preflight=launch.preflight_configured_codex_review,
+        **_seated(implementer=claude_bin, reviewer=codex_bin),
+    ).dispatch_pow_wow("pow-native-denied", target, tasks, _context(target))
+    assert calls == (
+        []
+        if stage == "version"
+        else ["ready", {"operation": "list_directory", "path": "."}, "closed"]
+    )
+    assert result.status == "BLOCKED"
+    assert not result.external_agents_started
+    assert not (tmp_path / "wt").exists()
+    assert result.tasks[0].failure is not None
+    assert result.tasks[0].failure.error_code == "REVIEW_UNAVAILABLE"
+
+
+def test_unavailable_review_does_not_spend_an_implementation_revision(tmp_path: Path) -> None:
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+
+    repo, claude_bin, codex_bin, tasks = _review_loop_fixture(
+        tmp_path,
+        codex_verdicts=[
+            "CANNOT_REVIEW - cannot access the repository\n"
+            "sandbox-exec: sandbox_apply: Operation not permitted",
+        ],
+    )
+    target = _review_loop_target(repo)
+    result = CliPowWowExecutor(
+        worktree_root=tmp_path / "wt",
+        **_seated(implementer=claude_bin, reviewer=codex_bin),
+        max_review_rounds=4,
+    ).dispatch_pow_wow("pow-unavailable-review", target, tasks, _context(target))
+
+    assert result.status != "COMPLETED"
+    assert not any("revision_r" in task.task_name for task in result.tasks)
+    review = next(task for task in result.tasks if task.task_name == "review_next_step")
+    assert review.status == "failed"
+    assert review.failure is not None
+    assert review.failure.error_code == "REVIEW_UNAVAILABLE", review.to_payload()
+    assert review.failure.category.value == "INFRASTRUCTURE"
+    assert not review.failure.retryable
+    artifact = next(a.content for a in review.artifacts if a.artifact_type == "review_result")
+    assert artifact["verdict"] == "unavailable"
+    assert artifact["completion_status"] == "FAILED"
+    assert "sandbox_apply" in artifact["review_text"]
+    assert result.tasks[-1].failure == review.failure
+
+
+@pytest.mark.parametrize(
+    ("host_failure", "expected_code", "expected_message"),
+    [
+        ("exit", "UNKNOWN_FAILURE", "fixture process failure"),
+        ("verification", "VERIFICATION_FAILED", "fixture verification failure"),
+        ("mutation", "VERIFICATION_FAILED", "reviewer mutated its read-only worktree"),
+    ],
+)
+def test_review_unavailability_preserves_host_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    host_failure: str,
+    expected_code: str,
+    expected_message: str,
+) -> None:
+    from local_first_agent_os.pow_wow import CliPowWowExecutor
+    from local_first_agent_os.pow_wow import executor as executor_module
+
+    repo, claude_bin, codex_bin, tasks = _review_loop_fixture(
+        tmp_path, codex_verdicts=["CANNOT_REVIEW - required evidence unavailable"]
+    )
+    target = _review_loop_target(repo)
+    original_frontier = CliPowWowExecutor._run_frontier_command
+    original_verification = executor_module.run_captured_shell_command
+    review_started = False
+
+    def frontier(self, command, cwd, **kwargs):
+        nonlocal review_started
+        if "Review the change" not in kwargs["task_contract"]:
+            return original_frontier(self, command, cwd, **kwargs)
+        review_started = True
+        if host_failure == "mutation":
+            (cwd / "REVIEWER_EDIT.md").write_text("not allowed\n", encoding="utf-8")
+        return (
+            CommandRunCapture(
+                command=shlex.join(command),
+                cwd=str(cwd),
+                stdout=json.dumps(
+                    {"type": "result", "result": "CANNOT_REVIEW - required evidence unavailable"}
+                ),
+                stderr="fixture process failure" if host_failure == "exit" else "",
+                exit_code=9 if host_failure == "exit" else 0,
+            ),
+            None,
+        )
+
+    def verification(command, cwd, **kwargs):
+        if review_started and host_failure == "verification":
+            return CommandRunCapture(
+                command=command,
+                cwd=str(cwd),
+                stdout="fixture verification failure",
+                stderr="",
+                exit_code=1,
+            )
+        return original_verification(command, cwd, **kwargs)
+
+    monkeypatch.setattr(CliPowWowExecutor, "_run_frontier_command", frontier)
+    monkeypatch.setattr(executor_module, "run_captured_shell_command", verification)
+    result = CliPowWowExecutor(
+        worktree_root=tmp_path / "wt",
+        **_seated(implementer=claude_bin, reviewer=codex_bin),
+    ).dispatch_pow_wow("pow-unavailable-with-host-failure", target, tasks, _context(target))
+
+    review = next(task for task in result.tasks if task.task_name == "review_next_step")
+    assert review.status == "failed"
+    assert review.failure is not None
+    assert review.failure.error_code == expected_code
+    assert expected_message in review.failure.message
+    assert result.tasks[-1].failure == review.failure
+    assert not any("revision_r" in task.task_name for task in result.tasks)
 
 
 def test_review_block_triggers_revision_loop_and_converges(tmp_path: Path) -> None:
@@ -2016,7 +2425,7 @@ def test_review_loop_stops_when_classifier_detects_circling(tmp_path: Path) -> N
     classifier_calls: list[str] = []
 
     def fake_delegate(**kwargs):
-        classifier_calls.append(kwargs["role"])
+        classifier_calls.append(kwargs["task_name"])
         return {"ok": True, "output": "CIRCLING\nstyle-only iteration"}
 
     target = _review_loop_target(repo)
@@ -2031,7 +2440,7 @@ def test_review_loop_stops_when_classifier_detects_circling(tmp_path: Path) -> N
     # The classifier stopped the loop after round 1; rounds 2-4 never ran.
     assert "implement_next_step_revision_r1" in names
     assert "implement_next_step_revision_r2" not in names
-    assert classifier_calls == ["review_convergence_classifier"]
+    assert classifier_calls == ["review_convergence_r1"]
     re_review = next(tr for tr in result.tasks if tr.task_name == "review_next_step_r1")
     convergence = next(a for a in re_review.artifacts if a.artifact_type == "review_convergence")
     assert convergence.content["classification"] == "circling"
@@ -2235,8 +2644,7 @@ def test_cli_progress_assessor_uses_junior_delegate_and_parses_json(tmp_path: Pa
 
     assert decision["recommendation"] == "SPLIT"
     assert decision["continuations"] == ["repair persistence", "retry review"]
-    assert calls[0]["tier"] == "junior"
-    assert calls[0]["role"] == "progress_assessor"
+    assert calls[0]["task_name"] == "progress_assessment_lease-123"
     assert "Heartbeats prove only ownership/liveness" in str(calls[0]["prompt"])
 
 

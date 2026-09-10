@@ -54,6 +54,13 @@ else
   blocked "docker is not running" "start Docker Desktop, then ./scripts/start-docker-compose-infra.sh postgres"
 fi
 
+section "Operator identity"
+if uv run --offline --no-sync python -m local_first_agent_os.operator_credentials check >/dev/null 2>&1; then
+  ok "protected operator credential is ready"
+else
+  blocked "protected operator credential is missing or invalid" "./scripts/initialize-operator-identity.sh"
+fi
+
 section "Durable ledger"
 # The ledger is the recovery and audit authority, so an unreachable one is not a
 # degraded mode: every dispatch, approval, and lease needs it.
@@ -105,6 +112,14 @@ if uv run python -c "from local_first_agent_os.process_containment import assert
 else
   blocked "frontier process containment is unavailable" \
     "run on supported macOS with /usr/bin/sandbox-exec available"
+fi
+
+section "Verification database"
+if uv run --offline --no-sync python -m local_first_agent_os.local_verification_setup check >/dev/null 2>&1; then
+  ok "protected verification database binding is ready"
+else
+  blocked "protected verification database binding is missing or unavailable" \
+    "./scripts/initialize-verification-resources.sh (uses the existing PG16 image; never pulls)"
 fi
 
 section "Local junior model (required)"

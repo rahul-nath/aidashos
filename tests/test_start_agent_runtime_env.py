@@ -6,9 +6,91 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
+
+
+@pytest.mark.parametrize("docker_ready", [True, False])
+def test_runtime_relaunch_initializes_identity_then_starts_only_installed_verification_service(
+    tmp_path: Path, docker_ready: bool
+) -> None:
+    """Exercise actual startup wiring, stopping before database or model runtime mutation."""
+
+    source = Path(__file__).resolve().parents[1]
+    checkout = tmp_path / "checkout"
+    scripts = checkout / "scripts"
+    scripts.mkdir(parents=True)
+    for name in (
+        "start-agent-runtime.sh",
+        "initialize-operator-identity.sh",
+        "start-verification-database.sh",
+    ):
+        shutil.copy2(source / "scripts" / name, scripts / name)
+    core = scripts / "start-docker-compose-infra.sh"
+    core.write_text('#!/bin/sh\necho "core-infrastructure" >> "$STARTUP_TRACE"\n')
+    core.chmod(0o755)
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    uv = commands / "uv"
+    uv.write_text(
+        '#!/bin/sh\ncase "$*" in\n'
+        "sync) exit 0 ;;\n"
+        '"run --offline --no-sync python -m '
+        'local_first_agent_os.operator_credentials initialize")\n'
+        '  echo identity >> "$STARTUP_TRACE"\n'
+        '  exec "$STARTUP_PYTHON" -m local_first_agent_os.operator_credentials initialize ;;\n'
+        '"run local-agent init-db") exit 91 ;;\n'
+        '*) echo "undeclared uv startup command" >&2; exit 97 ;;\nesac\n'
+    )
+    uv.chmod(0o755)
+    git = commands / "git"
+    git.write_text("#!/bin/sh\necho fixture-revision\n")
+    git.chmod(0o755)
+    docker = commands / "docker"
+    docker.write_text(
+        '#!/bin/sh\ncase "$*" in\n'
+        f"info) exit {0 if docker_ready else 1} ;;\n"
+        '"compose up --pull never --no-build --wait --wait-timeout 120 -d postgres-test")\n'
+        '  echo verification-service >> "$STARTUP_TRACE"; exit 0 ;;\n'
+        '*) echo "undeclared docker startup command" >&2; exit 97 ;;\nesac\n'
+    )
+    docker.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    trace = tmp_path / "trace"
+    token = home / "operator.token"
+    completed = subprocess.run(
+        ["bash", str(scripts / "start-agent-runtime.sh")],
+        env={
+            **os.environ,
+            "HOME": str(home),
+            "PATH": str(commands) + os.pathsep + os.environ["PATH"],
+            "PYTHONPATH": str(source / "src"),
+            "STARTUP_PYTHON": sys.executable,
+            "STARTUP_TRACE": str(trace),
+            "LOCAL_AGENT_OPERATOR_TOKEN_FILE": str(token),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert token.stat().st_mode & 0o777 == 0o600
+    assert token.read_text().strip()
+    if docker_ready:
+        assert completed.returncode == 91, completed.stderr
+        assert trace.read_text().splitlines() == [
+            "identity",
+            "core-infrastructure",
+            "verification-service",
+        ]
+    else:
+        assert completed.returncode == 1
+        assert "Docker is unavailable" in completed.stderr
+        assert trace.read_text().splitlines() == ["identity", "core-infrastructure"]
 
 
 def test_startup_dotenv_loader_preserves_json_array(tmp_path: Path) -> None:
@@ -142,6 +224,32 @@ def test_the_whisper_launchd_agent_is_not_bootstrapped_by_default() -> None:
 
     assert "com.rahul.local-first-agent.whisper" not in unconditional
     assert "com.rahul.local-first-agent.whisper" in gated
+
+
+def test_work_moving_residents_start_only_after_junior_readiness() -> None:
+    """Startup cannot let a queued dispatch race the model it depends on."""
+
+    script = (Path(__file__).resolve().parents[1] / "scripts" / "start-agent-runtime.sh").read_text(
+        encoding="utf-8"
+    )
+    service_labels = script.split("SERVICE_LAUNCH_LABELS=(", 1)[1].split(")", 1)[0]
+    work_labels = script.split("WORK_LAUNCH_LABELS=(", 1)[1].split(")", 1)[0]
+    moving = (
+        "com.rahul.local-first-agent.enqueue-drainer",
+        "com.rahul.local-first-agent.ledger-dispatcher",
+        "com.rahul.local-first-agent.work-unit-crash-reconciler",
+        "com.rahul.local-first-agent.refinery-fleet",
+    )
+
+    assert all(label not in service_labels for label in moving)
+    assert all(label in work_labels for label in moving)
+    assert script.index('bootstrap_launch_agents "${SERVICE_LAUNCH_LABELS[@]}"') < script.index(
+        'active_general_selection="$(uv run local-agent active-general-selection)"'
+    )
+    assert script.index('uv run pi /start "/$junior_role"') < script.index(
+        'bootstrap_launch_agents "${WORK_LAUNCH_LABELS[@]}"'
+    )
+    assert "uv run pi /start /gemma4" not in script
 
 
 def test_the_legacy_force_direct_spelling_still_disables_handoff(

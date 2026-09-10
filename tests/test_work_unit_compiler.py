@@ -662,7 +662,7 @@ def test_a_document_with_no_declared_target_cannot_be_started() -> None:
     produce different plans in different checkouts.
     """
 
-    document = ACCEPTANCE_DESIGN_DOC.replace("Target project: local-first-agent-os\n", "")
+    document = ACCEPTANCE_DESIGN_DOC.replace("Target project: local_first_agent_os\n", "")
     assert "Target project:" not in document
 
     parsed = parse_design_doc(document, design_doc_id="no-declared-target")

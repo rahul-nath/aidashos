@@ -235,6 +235,9 @@ def run_pi_daemon() -> None:
         server.serve_forever()
     finally:
         logger.warning("pi_daemon_shutdown_cleanup")
+        from .access_posture import flush_observed_refusal_summary
+
+        flush_observed_refusal_summary()
         runtime.close()
 
 

@@ -37,6 +37,7 @@ import traceback
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Final
 
 from .coordination import (
@@ -47,6 +48,9 @@ from .coordination import (
     DispatchTier,
 )
 from .coordination.availability import ledger_unavailable
+from .coordination.outcomes import DispatchPromotionState, DispatchResultOrigin, DispatchResultState
+from .coordination.transport import CoordinationCommandRefused
+from .dispatch_payloads import AutomatedRunObservation, DispatchReportEnvelope
 from .lifecycle_failure_harness import (
     LifecycleTransitionPoint,
     reach_lifecycle_transition,
@@ -57,8 +61,28 @@ from .settings import Settings
 
 logger = logging.getLogger(__name__)
 
-# A runner turns a claimed intent (dict from the ledger) into a terminal result.
-IntentResult = tuple[DispatchTerminalStatus, str | None, str | None]  # status, result, error
+
+class DispatchDeferralReason(StrEnum):
+    EXECUTION_ACTIVE = "execution_active"
+    RETAINED_OUTCOME_UNAVAILABLE = "retained_outcome_unavailable"
+    CLAIM_CHANGED = "claim_changed"
+    RESOURCE_CLEANUP_PENDING = "resource_cleanup_pending"
+    COMPLETION_REFUSED = "completion_refused"
+    RECOVERY_OWNS_STATE = "recovery_owns_state"
+    OWNER_RESPONSE_MISMATCH = "owner_response_mismatch"
+
+
+@dataclass(frozen=True)
+class IntentDeferred:
+    """The existing durable execution retains ownership of this intent."""
+
+    intent_id: str
+    lease_id: str | None
+    reason: DispatchDeferralReason
+
+
+TerminalIntentResult = tuple[DispatchTerminalStatus, str | None, str | None]
+IntentResult = TerminalIntentResult | IntentDeferred
 IntentRunner = Callable[[Mapping[str, Any]], IntentResult]
 
 
@@ -92,7 +116,8 @@ class Unavailable:
     error: str
 
 
-DispatchOutcome = Dispatched | Idle | Unavailable
+DispatchOutcome = Dispatched | IntentDeferred | Idle | Unavailable
+SettledPipeline = Dispatched | IntentDeferred
 
 
 @dataclass(frozen=True)
@@ -118,38 +143,33 @@ UNAVAILABLE_INTERVAL_SECONDS = 15.0
 _TRACEBACK_LIMIT: Final = 8000
 
 
-def _runner_crash_payload(intent_id: str, exc: BaseException) -> str:
-    """The traceback for a runner that died, in the shape readers already parse.
+def _runner_crash_payload(
+    intent_id: str, exc: BaseException, *, target_project_id: str | None
+) -> str:
+    """Retain a typed host-runner failure bound to its ledger-owned subject.
 
-    A crash here used to write `result=None`, so the only surviving trace of a
-    defect in our own code was one exception line in the `error` column. Every
-    reader of a settled intent expects `dispatch_runner_result.v1`, so writing
-    the traceback in any other shape would be evidence nothing knows how to
-    open. It carries `result_origin: runner_crash` rather than impersonating a
-    run: no agent produced this, and a reader must not count it as one.
-
-    Bounded, because a traceback is diagnostic text in a durable row and a deep
-    recursion would otherwise write a megabyte of frames into the ledger.
+    Crash provenance is distinct from an agent result and can never establish
+    completion or merge eligibility. The traceback remains bounded diagnostic
+    evidence even when the runner fails before launching an agent.
     """
-
     trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     if len(trace) > _TRACEBACK_LIMIT:
         trace = f"{trace[:_TRACEBACK_LIMIT]}..."
-    return json.dumps(
-        {
-            "schema_version": "dispatch_runner_result.v1",
-            "result_origin": "runner_crash",
-            "intent_id": intent_id,
-            "run_result": {
-                "status": "FAILED",
-                "output_summary": f"{type(exc).__name__}: {exc}",
-                "risks": [f"dispatcher runner raised {type(exc).__name__}: {exc}"],
-                "tasks": [],
-                "traceback": trace,
-            },
-        },
-        sort_keys=True,
-    )
+    return DispatchReportEnvelope(
+        schema_version="dispatch_runner_result.v1",
+        result_origin=DispatchResultOrigin.RUNNER_CRASH,
+        result_state=DispatchResultState.FAILED,
+        promotion_state=DispatchPromotionState.RESULT_RECORDED,
+        intent_id=intent_id,
+        target_project_id=target_project_id,
+        run_result=AutomatedRunObservation(
+            status="FAILED",
+            target_project_id=target_project_id,
+            output_summary=f"{type(exc).__name__}: {exc}",
+            risks=(f"dispatcher runner raised {type(exc).__name__}: {exc}",),
+            traceback=trace,
+        ),
+    ).model_dump_json(exclude_none=True)
 
 
 class LedgerDispatcher:
@@ -186,6 +206,7 @@ class LedgerDispatcher:
         # that can.
         self.seats = dict(seats) if seats is not None else None
         self.last_outcomes: list[Dispatched] = []
+        self.last_deferred: list[IntentDeferred] = []
 
     def _coord(self, command: CoordinationCommand) -> dict[str, Any]:
         return run_coordination_command(command, settings=self.settings)
@@ -254,29 +275,62 @@ class LedgerDispatcher:
         )
         return intent
 
-    def _settle(self, intent: Mapping[str, Any]) -> Dispatched:
+    def _settle(self, intent: Mapping[str, Any]) -> SettledPipeline:
         """Run one claimed intent's pipeline and record its terminal outcome."""
 
         try:
-            status, result, error = self.runner(intent)
+            runner_result = self.runner(intent)
+            if isinstance(runner_result, IntentDeferred):
+                if runner_result.intent_id != intent["intent_id"]:
+                    raise ValueError("deferred execution belongs to another dispatch intent")
+                return runner_result
+            status, result, error = runner_result
         except Exception as exc:  # noqa: BLE001 - a runner crash fails the intent, not the reactor
             status, result, error = (
                 DispatchTerminalStatus.FAILED,
-                _runner_crash_payload(str(intent["intent_id"]), exc),
+                _runner_crash_payload(
+                    str(intent["intent_id"]),
+                    exc,
+                    target_project_id=(
+                        str(intent["target_project_id"])
+                        if intent.get("target_project_id")
+                        else None
+                    ),
+                ),
                 f"{type(exc).__name__}: {exc}",
             )
         # A runner may hand back a bare "DONE"/"FAILED" string; normalize once
         # here so everything downstream carries the enum, not the raw value.
         status = DispatchTerminalStatus(status)
 
-        self._coord(
-            CompleteDispatchIntent(
-                intent_id=intent["intent_id"],
-                status=status,
-                result=result,
-                error=error,
+        try:
+            completion = self._coord(
+                CompleteDispatchIntent(
+                    intent_id=intent["intent_id"],
+                    status=status,
+                    result=result,
+                    error=error,
+                )
             )
-        )
+        except CoordinationCommandRefused:
+            return IntentDeferred(
+                str(intent["intent_id"]), None, DispatchDeferralReason.COMPLETION_REFUSED
+            )
+        if completion.get("ok") is not True:
+            return IntentDeferred(
+                str(intent["intent_id"]), None, DispatchDeferralReason.COMPLETION_REFUSED
+            )
+        if completion.get("completion_skipped") is True:
+            return IntentDeferred(
+                str(intent["intent_id"]), None, DispatchDeferralReason.RECOVERY_OWNS_STATE
+            )
+        if (
+            completion.get("intent_id") != intent["intent_id"]
+            or completion.get("status") != status.value
+        ):
+            return IntentDeferred(
+                str(intent["intent_id"]), None, DispatchDeferralReason.OWNER_RESPONSE_MISMATCH
+            )
         emit_progress(
             f"intent {intent['intent_id']} reached terminal status {status}",
             phase="intent_completed",
@@ -333,7 +387,7 @@ class LedgerDispatcher:
     def _free_seats(
         self,
         lanes: tuple[_ClaimLane, ...],
-        in_flight: Mapping[concurrent.futures.Future[Dispatched], str | None],
+        in_flight: Mapping[concurrent.futures.Future[SettledPipeline], str | None],
     ) -> dict[str | None, int]:
         busy = Counter(in_flight.values())
         return {lane.tier: lane.seats - busy[lane.tier] for lane in lanes}
@@ -343,7 +397,7 @@ class LedgerDispatcher:
         pool: concurrent.futures.ThreadPoolExecutor,
         lanes: tuple[_ClaimLane, ...],
         free: dict[str | None, int],
-        in_flight: dict[concurrent.futures.Future[Dispatched], str | None],
+        in_flight: dict[concurrent.futures.Future[SettledPipeline], str | None],
     ) -> tuple[int, str | None]:
         """Claim intents into free seats; (claims made, unavailable error or None).
 
@@ -394,8 +448,8 @@ class LedgerDispatcher:
 
     def _collect(
         self,
-        in_flight: dict[concurrent.futures.Future[Dispatched], str | None],
-        done: set[concurrent.futures.Future[Dispatched]],
+        in_flight: dict[concurrent.futures.Future[SettledPipeline], str | None],
+        done: set[concurrent.futures.Future[SettledPipeline]],
     ) -> int:
         """Fold finished pipelines into `last_outcomes`; their seats free up here.
 
@@ -421,13 +475,16 @@ class LedgerDispatcher:
                     exc,
                 )
                 continue
-            self.last_outcomes.append(outcome)
-            collected += 1
+            if isinstance(outcome, IntentDeferred):
+                self.last_deferred.append(outcome)
+            else:
+                self.last_outcomes.append(outcome)
+                collected += 1
         return collected
 
     def _idle_wait(
         self,
-        in_flight: dict[concurrent.futures.Future[Dispatched], str | None],
+        in_flight: dict[concurrent.futures.Future[SettledPipeline], str | None],
         seconds: float,
     ) -> None:
         """Wait out an idle or unavailable pass without sleeping through a finish.
@@ -466,12 +523,13 @@ class LedgerDispatcher:
 
         dispatched = 0
         self.last_outcomes = []
+        self.last_deferred = []
         lanes = self._claim_lanes()
         total_seats = sum(lane.seats for lane in lanes)
         if total_seats < 1:
             raise ValueError(f"{self.name} has no seats to dispatch with: seats={self.seats!r}")
         polls = 0
-        in_flight: dict[concurrent.futures.Future[Dispatched], str | None] = {}
+        in_flight: dict[concurrent.futures.Future[SettledPipeline], str | None] = {}
         pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=total_seats,
             thread_name_prefix=f"{self.name}-pipeline",

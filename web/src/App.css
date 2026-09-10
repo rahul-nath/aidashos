@@ -903,6 +903,15 @@ input:focus {
   max-width: 78ch;
 }
 
+.staffReviewText {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.staffReviewReport code {
+  overflow-wrap: anywhere;
+}
+
 .whyFacts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));

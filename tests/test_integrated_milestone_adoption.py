@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -162,7 +163,7 @@ def test_integrated_adoption_refuses_a_non_provider_failure(
 
     with pytest.raises(
         dispatch_adoption.DispatchAdoptionRefused,
-        match="only a milestone blocked by USAGE_LIMIT",
+        match="requires USAGE_LIMIT or a staff-approved no-op",
     ):
         dispatch_adoption.adopt_integrated_milestone(
             work_unit_id,
@@ -170,4 +171,144 @@ def test_integrated_adoption_refuses_a_non_provider_failure(
             commit_sha,
             accepted_by="operator",
             acceptance_evidence="The named commit implements the milestone.",
+        )
+
+
+def _staff_approved_noop_dispatch(commit_sha: str, *, verdict: str = "approve") -> dict:
+    return {
+        "status": "DONE",
+        "result": json.dumps(
+            {
+                "run_result": {
+                    "status": "COMPLETED",
+                    "changed_files": [],
+                    "tasks": [
+                        {
+                            "artifacts": [
+                                {
+                                    "artifact_type": "worktree_commit_checkpoint",
+                                    "content": {
+                                        "base_head_sha": commit_sha,
+                                        "changed_from_base": False,
+                                        "checkpointed_files": [],
+                                        "commit_created": False,
+                                        "commit_sha": None,
+                                        "worktree": {"head_sha": commit_sha},
+                                    },
+                                },
+                                {
+                                    "artifact_type": "review_result",
+                                    "content": {
+                                        "schema_version": "review_result.v1",
+                                        "completion_status": "COMPLETED",
+                                        "verdict": verdict,
+                                        "finding_severity": "NON_BLOCKING",
+                                        "review_origin": "AUTOMATED_STAFF",
+                                        "provenance_stamped_by": "pow_wow_executor",
+                                        "reviewer_tier": "STAFF",
+                                        "base_sha": commit_sha,
+                                        "reviewed_commit_sha": commit_sha,
+                                    },
+                                },
+                            ]
+                        }
+                    ],
+                }
+            }
+        ),
+    }
+
+
+def test_operator_can_adopt_a_staff_approved_noop_from_its_integrated_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    _git(target, "init", "-q", "-b", "main")
+    _git(target, "config", "user.email", "operator@example.com")
+    _git(target, "config", "user.name", "Operator")
+    (target / "feature.py").write_text("ENFORCED = True\n", encoding="utf-8")
+    _git(target, "add", "feature.py")
+    _git(target, "commit", "-qm", "implement existing acceptance")
+    commit_sha = _git(target, "rev-parse", "HEAD")
+    project = LinkedProject(
+        id="local_first_agent_os",
+        kind="code",
+        path=target,
+        status="active",
+        access=ProjectAccessPolicy(mode=AccessMode.READ_WRITE),
+        description="test target",
+    )
+    monkeypatch.setattr(
+        dispatch_adoption,
+        "load_project_center",
+        lambda _settings: SimpleNamespace(project_by_id=lambda _project_id: project),
+    )
+    monkeypatch.setattr(
+        dispatch_adoption,
+        "_dispatch_intent",
+        lambda _intent_id: _staff_approved_noop_dispatch(commit_sha),
+    )
+    work_unit_id, milestone_key = _blocked_implementation(failure_code="missing_required_artifacts")
+
+    adopted = dispatch_adoption.adopt_integrated_milestone(
+        work_unit_id,
+        milestone_key,
+        commit_sha,
+        accepted_by="operator",
+        acceptance_evidence="The named commit was the approved no-op dispatch base.",
+    )
+
+    source_patch = next(
+        artifact
+        for artifact in repo.list_work_unit_artifacts(work_unit_id)
+        if artifact.artifact_type.value == "source_patch"
+    )
+    assert adopted.applied is True
+    assert source_patch.metadata["adoption_basis"] == "staff_approved_noop.v1"
+    assert source_patch.metadata["integrated_commit_sha"] == commit_sha
+
+
+def test_integrated_adoption_refuses_a_noop_without_exact_staff_approval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    _git(target, "init", "-q", "-b", "main")
+    _git(target, "config", "user.email", "operator@example.com")
+    _git(target, "config", "user.name", "Operator")
+    (target / "feature.py").write_text("ENFORCED = True\n", encoding="utf-8")
+    _git(target, "add", "feature.py")
+    _git(target, "commit", "-qm", "implement existing acceptance")
+    commit_sha = _git(target, "rev-parse", "HEAD")
+    project = LinkedProject(
+        id="local_first_agent_os",
+        kind="code",
+        path=target,
+        status="active",
+        access=ProjectAccessPolicy(mode=AccessMode.READ_WRITE),
+        description="test target",
+    )
+    monkeypatch.setattr(
+        dispatch_adoption,
+        "load_project_center",
+        lambda _settings: SimpleNamespace(project_by_id=lambda _project_id: project),
+    )
+    monkeypatch.setattr(
+        dispatch_adoption,
+        "_dispatch_intent",
+        lambda _intent_id: _staff_approved_noop_dispatch(commit_sha, verdict="reject"),
+    )
+    work_unit_id, milestone_key = _blocked_implementation(failure_code="missing_required_artifacts")
+
+    with pytest.raises(
+        dispatch_adoption.DispatchAdoptionRefused,
+        match="does not prove a clean no-op and exact staff approval",
+    ):
+        dispatch_adoption.adopt_integrated_milestone(
+            work_unit_id,
+            milestone_key,
+            commit_sha,
+            accepted_by="operator",
+            acceptance_evidence="The named commit is claimed as accepted.",
         )

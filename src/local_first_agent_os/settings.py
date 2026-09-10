@@ -461,6 +461,7 @@ class Settings(BaseSettings):
     session_daemon_port: int = 8765
     pi_daemon_host: str = "127.0.0.1"
     pi_daemon_port: int = 8766
+    dispatcher_metrics_port: int = Field(default=8767, ge=0, le=65532)
     pi_daemon_url: str | None = Field(
         default=None,
         validation_alias="LOCAL_AGENT_PI_DAEMON_URL",

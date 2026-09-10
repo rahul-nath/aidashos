@@ -21,10 +21,10 @@
     <string>__UV_BIN__</string>
     <string>run</string>
     <string>python</string>
-    <string>agent_coordination_mcp.py</string>
+    <string>-m</string>
+    <string>local_first_agent_os.operator_dispatcher_host</string>
     <string>--root</string>
     <string>__REPO_ROOT__</string>
-    <string>run_ledger_dispatcher</string>
     <string>--interval-seconds</string>
     <string>2</string>
   </array>

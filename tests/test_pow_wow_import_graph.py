@@ -16,6 +16,7 @@ regression the way it masked the original bug.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -34,8 +35,12 @@ _LEAF_MODULES = sorted(
 
 
 def _run_probe(code: str) -> None:
+    # A shared interpreter may have another editable checkout installed.
+    # Probe the same source tree as the parent test, including new leaf modules.
+    source_root = str(Path(pow_wow_package.__file__).resolve().parents[2])
     probe = subprocess.run(
         [sys.executable, "-c", code],
+        env={**os.environ, "PYTHONPATH": source_root},
         capture_output=True,
         text=True,
         check=False,

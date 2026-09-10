@@ -57,7 +57,7 @@ Feature: Where a junior task actually runs
 
     Examples:
       | harness | review | flag                                        |
-      | codex   | yes    | read-only                                   |
+      | codex   | yes    | app-server                                  |
       | codex   | no     | --dangerously-bypass-approvals-and-sandbox  |
       | claude  | yes    | --print                                     |
       | claude  | no     | --dangerously-skip-permissions              |

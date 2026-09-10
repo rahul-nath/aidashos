@@ -8,6 +8,8 @@ import subprocess
 import threading
 from pathlib import Path
 
+import pytest
+
 from local_first_agent_os.coordination.contracts import (
     AcknowledgementResult,
     CollectionResult,
@@ -24,6 +26,7 @@ from local_first_agent_os.pow_wow import (
     PowWowExecutionContext,
     PowWowTaskResult,
 )
+from local_first_agent_os.pow_wow.executor import StartFreshIndependent
 from local_first_agent_os.pow_wow.planning import (
     build_planning_evidence_artifact,
     persist_repo_audit,
@@ -34,6 +37,7 @@ from local_first_agent_os.pow_wow.protocol import PlanningPhase
 from local_first_agent_os.pow_wow.repo_audit import RepoAudit
 from local_first_agent_os.project_access import AccessMode, ProjectAccessPolicy
 from local_first_agent_os.project_center import LinkedProject
+from local_first_agent_os.staffing import FrontierHarness, load_bench
 from local_first_agent_os.vocabulary import DispatchTier
 
 
@@ -360,6 +364,7 @@ def test_reviewer_prompt_never_inherits_repo_audit(tmp_path: Path) -> None:
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "worktrees",
         coordination_command=coordination,
+        bench=load_bench(Path(__file__).resolve().parents[1] / "configs/staffing.toml"),
     )
     audit_block = executor._audit_context_block_for(  # noqa: SLF001 - independence seam
         review,
@@ -374,6 +379,65 @@ def test_reviewer_prompt_never_inherits_repo_audit(tmp_path: Path) -> None:
 
     assert audit_block == ""
     assert "Prior repository audit" not in prompt
+
+
+@pytest.mark.parametrize(
+    "phase", [PlanningPhase.STAFF_INDEPENDENT_READING, PlanningPhase.STAFF_FINAL_REVIEW]
+)
+@pytest.mark.parametrize("same_model", [False, True])
+def test_staff_reviewer_starts_fresh_and_read_only(
+    tmp_path: Path, phase: PlanningPhase, same_model: bool
+) -> None:
+    target = _target(tmp_path / "target")
+    plan = _plan(target)
+    task = next(item for item in plan.tasks if item.planning_phase is phase)
+    bench = load_bench(Path(__file__).resolve().parents[1] / "configs/staffing.toml")
+    if same_model:
+        from dataclasses import replace
+
+        bench[DispatchTier.STAFF] = replace(
+            bench[DispatchTier.STAFF], model=bench[DispatchTier.SENIOR].model
+        )
+
+    def forbidden_lookup(command):
+        raise AssertionError("staff must not look up an implementer's continuation")
+
+    executor = CliPowWowExecutor(
+        worktree_root=tmp_path / "worktrees", bench=bench, coordination_command=forbidden_lookup
+    )
+    slot = executor._task_bench_slot(task)
+    assert slot is not None
+    assert slot.model == ("gpt-5.6-sol" if same_model else "gpt-6-astra")
+    assert slot.reasoning_effort == "high"
+    decision = executor._frontier_launch_decision(
+        pow_wow_id="pow-test",
+        target_project=target,
+        task=task,
+        context=_context(target, tuple(item.task_name for item in plan.tasks)),
+        dependency_results=(),
+        harness=FrontierHarness.CODEX,
+        model=slot.model,
+        source_revision="a" * 40,
+    )
+    assert isinstance(decision, StartFreshIndependent)
+    command = executor._build_agent_cli_command(
+        FrontierHarness.CODEX,
+        slot.model,
+        "review independently",
+        executor._task_spawn_authority(task).posture(),
+        reasoning_effort=slot.reasoning_effort,
+    )
+    assert "resume" not in command
+    assert command == (executor.codex_bin, "app-server")
+    request = executor._inspection_request(
+        harness=FrontierHarness.CODEX,
+        authority=executor._task_spawn_authority(task),
+        repository=target.expanded_path,
+        model=slot.model,
+        prompt="review independently",
+        effort=slot.reasoning_effort,
+    )
+    assert request is not None and request.effort == "high"
 
 
 def test_missing_or_malformed_audit_never_fails_the_reading(tmp_path: Path) -> None:

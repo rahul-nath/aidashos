@@ -1150,6 +1150,33 @@
         "title": "IntentFacts",
         "type": "object"
       },
+      "InvalidStaffReview": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "explanation": {
+            "default": "Stored review evidence is malformed; its verdict cannot be displayed.",
+            "title": "Explanation",
+            "type": "string"
+          },
+          "kind": {
+            "const": "INVALID_ARTIFACT",
+            "default": "INVALID_ARTIFACT",
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "artifact_id",
+          "explanation"
+        ],
+        "title": "InvalidStaffReview",
+        "type": "object"
+      },
       "LeaseFacts": {
         "additionalProperties": false,
         "description": "One agent execution lease, as the cockpit renders it.",
@@ -1519,6 +1546,17 @@
             "title": "Description",
             "type": "string"
           },
+          "dispatch_failure_summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatch Failure Summary"
+          },
           "dispatch_intent_id": {
             "anyOf": [
               {
@@ -1612,6 +1650,31 @@
             "title": "Stable Key",
             "type": "string"
           },
+          "staff_review": {
+            "anyOf": [
+              {
+                "discriminator": {
+                  "mapping": {
+                    "INVALID_ARTIFACT": "#/components/schemas/InvalidStaffReview",
+                    "RECORDED": "#/components/schemas/RecordedStaffReview"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/RecordedStaffReview"
+                  },
+                  {
+                    "$ref": "#/components/schemas/InvalidStaffReview"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Staff Review"
+          },
           "status": {
             "$ref": "#/components/schemas/MilestoneExecutionStatus"
           },
@@ -1638,6 +1701,8 @@
           "child_workflow_id",
           "dispatch_intent_id",
           "dispatch_status",
+          "dispatch_failure_summary",
+          "staff_review",
           "failure_code",
           "failure_summary",
           "result_summary"
@@ -2522,6 +2587,49 @@
         "title": "QuestionRequest",
         "type": "object"
       },
+      "RecordedStaffReview": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "kind": {
+            "const": "RECORDED",
+            "default": "RECORDED",
+            "title": "Kind",
+            "type": "string"
+          },
+          "review_text": {
+            "minLength": 1,
+            "title": "Review Text",
+            "type": "string"
+          },
+          "reviewed_commit_sha": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reviewed Commit Sha"
+          },
+          "verdict": {
+            "$ref": "#/components/schemas/ReviewDisposition"
+          }
+        },
+        "required": [
+          "kind",
+          "artifact_id",
+          "verdict",
+          "review_text",
+          "reviewed_commit_sha"
+        ],
+        "title": "RecordedStaffReview",
+        "type": "object"
+      },
       "ResumeDeliveryView": {
         "additionalProperties": false,
         "description": "What a decision that unblocks a BLOCKED WorkUnit did about resuming it.",
@@ -2551,6 +2659,19 @@
             "$ref": "#/components/schemas/OperatorOnlyRetryView"
           }
         ]
+      },
+      "ReviewDisposition": {
+        "description": "Finite control-flow outcomes parsed from a reviewer response.",
+        "enum": [
+          "approve",
+          "request_changes",
+          "reject",
+          "escalate",
+          "unavailable",
+          "unclassified"
+        ],
+        "title": "ReviewDisposition",
+        "type": "string"
       },
       "ReviseWalkthru": {
         "additionalProperties": false,
@@ -4099,6 +4220,17 @@
             "title": "Current Phase",
             "type": "string"
           },
+          "design_doc_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Design Doc Name"
+          },
           "design_doc_revision_id": {
             "title": "Design Doc Revision Id",
             "type": "string"
@@ -4109,6 +4241,17 @@
           },
           "status": {
             "$ref": "#/components/schemas/WorkUnitStatus"
+          },
+          "target_project_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Project Id"
           },
           "title": {
             "title": "Title",
@@ -4122,6 +4265,8 @@
         "required": [
           "work_unit_id",
           "title",
+          "design_doc_name",
+          "target_project_id",
           "status",
           "current_phase",
           "root_workflow_id",

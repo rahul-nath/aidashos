@@ -339,7 +339,8 @@ def test_the_notice_tells_the_two_losses_apart() -> None:
     bench[DispatchTier.SENIOR] = replace(bench[DispatchTier.SENIOR], backup_models=())
     lost = collapsed_cross_checks(_spent_codex_plan(bench))
     assert len(lost) == 1
-    assert "implementing and reviewing its own change" in lost[0]
+    assert "model and provider diversity are absent" in lost[0]
+    assert "separate review sessions remain required" in lost[0]
 
 
 # --- The escape hatch on a bare bench, which needs no peer ---------------------

@@ -41,6 +41,7 @@ from local_first_agent_os.capability_gate import (
     revoked_capabilities_for,
 )
 from local_first_agent_os.coordination import DispatchKind
+from local_first_agent_os.coordination.outcomes import TerminalOutcome
 from local_first_agent_os.coordination.pow_wows import (
     grant_tool_permission,
     restore_tool_permission,
@@ -539,6 +540,29 @@ def test_the_local_delegate_lane_is_gated_too(pow_wows: tuple[str, str], tmp_pat
 
 
 # Variable 5: what a denial does to the task.
+def test_capability_denied_result_records_policy_outcome(tmp_path: Path) -> None:
+    executor = _executor(
+        tmp_path,
+        ceiling=SpawnAuthority.of((Capability.READ_REPOSITORY, Capability.WRITE_REPOSITORY)),
+    )
+    task = _task(TaskPurpose.IMPLEMENTATION)
+    denial = CapabilityDenied(
+        capability=Capability.WRITE_REPOSITORY,
+        reason="POLICIES.md denies repository writes",
+        remedy="request operator approval",
+    )
+
+    result = executor._build_capability_denied_result(
+        task,
+        target_project=_target(tmp_path / "repo"),
+        agent_name=AGENT,
+        denial=denial,
+    )
+
+    assert result.failure is not None
+    assert result.failure.error_code == TerminalOutcome.POLICY_DENIED
+
+
 def test_a_denial_is_a_recorded_failure_not_a_crash(
     pow_wows: tuple[str, str], tmp_path: Path
 ) -> None:
@@ -566,6 +590,8 @@ def test_a_denial_is_a_recorded_failure_not_a_crash(
     )
 
     assert result.status == "failed"
+    assert result.failure is not None
+    assert result.failure.error_code == TerminalOutcome.POLICY_DENIED
     assert result.artifacts[0].artifact_type == "agent_capability_denied"
     assert result.artifacts[0].content["capability"] == "run_command"
 

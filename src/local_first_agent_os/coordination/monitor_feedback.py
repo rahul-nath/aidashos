@@ -18,9 +18,10 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4, uuid5
 
 from ..contracts import DispatchIntentStatus, MilestoneStatus
+from ..dispatch_contracts import DispatchContractEvent
 from ..monitor_feedback.reactor import (
     SECONDS_PER_DAY,
     CycleSnapshot,
@@ -37,10 +38,12 @@ from ..monitor_feedback.signals import (
 )
 from .contracts import DispatchKind
 from .dispatch import submit_dispatch_intent
+from .dispatch_diagnostics import DISPATCH_CONTRACT_VIOLATION_EVENT
 from .outcomes import failure_category
-from .store import connect, now, tx
+from .store import ConnectionLike, connect, now, tx
 
 FEEDBACK_SOURCE_PREFIX = "monitor_feedback"
+_CONTRACT_ALERT_NAMESPACE = UUID("0db35a02-37c3-4fdb-b7d0-ec6c9514d722")
 
 # Live means "an operator has not yet seen this proposal through". A terminal
 # intent releases its fingerprint so the same condition may propose again once
@@ -154,6 +157,50 @@ def _collect_failed_dispatch_intents(c: Any, since: float) -> list[MonitorSignal
     return signals
 
 
+def _collect_dispatch_contract_violations(c: ConnectionLike, _since: float) -> list[MonitorSignal]:
+    """Collect unprojected diagnostic identities, including late commits.
+
+    A diagnostic transaction can commit after a newer event advanced a time
+    watermark. Receipt identity, not timestamp order, determines whether this
+    operator alert has already been durably projected.
+    """
+
+    rows = c.execute(
+        """
+        SELECT e.event_id, e.aggregate_id, e.payload_json, e.created_at,
+               d.target_project_id, d.source
+        FROM ledger_events e
+        LEFT JOIN dispatch_intents d ON d.intent_id=e.aggregate_id
+        WHERE e.event_type=? AND NOT EXISTS (
+            SELECT 1 FROM monitor_feedback_events f
+            WHERE f.signal_kind=?
+              AND f.evidence_json::jsonb->'evidence'->>'row_id'=e.event_id
+        )
+        ORDER BY e.created_at, e.event_id
+        """,
+        (DISPATCH_CONTRACT_VIOLATION_EVENT, LedgerFactKind.DISPATCH_CONTRACT_VIOLATION.value),
+    ).fetchall()
+    signals: list[MonitorSignal] = []
+    for row in rows:
+        event = DispatchContractEvent.model_validate_json(row["payload_json"])
+        if event.intent_id != row["aggregate_id"]:
+            raise ValueError("retained dispatch diagnostic disagrees with its ledger subject")
+        signals.append(
+            LedgerFactSignal(
+                kind=LedgerFactKind.DISPATCH_CONTRACT_VIOLATION,
+                severity=Severity.CRITICAL,
+                identity=(str(row["event_id"]),),
+                observed_at=float(row["created_at"]),
+                evidence=EvidenceRef(table="ledger_events", row_id=str(row["event_id"])),
+                target_project_id=row["target_project_id"],
+                error_code=event.code.value,
+                summary="Dispatch report contract violation requires operator inspection.",
+                caused_by_feedback=_is_feedback_source(row["source"]),
+            )
+        )
+    return signals
+
+
 # Every kind must have a collector. A kind without one is a rule an operator
 # can write that can never fire, which is the "quietly off" failure the design
 # rules out. The assertion below makes adding one without the other fail at
@@ -161,6 +208,7 @@ def _collect_failed_dispatch_intents(c: Any, since: float) -> list[MonitorSignal
 _COLLECTORS = {
     LedgerFactKind.MILESTONE_FAILED: _collect_failed_milestones,
     LedgerFactKind.DISPATCH_INTENT_FAILED: _collect_failed_dispatch_intents,
+    LedgerFactKind.DISPATCH_CONTRACT_VIOLATION: _collect_dispatch_contract_violations,
 }
 
 _missing = set(LedgerFactKind) - set(_COLLECTORS)
@@ -274,9 +322,12 @@ class CoordinationReactorLedger:
                         severity, target_project_id, rule_id, decision, intent_id,
                         approval_id, evidence_json, observed_at, created_at
                     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(feedback_event_id) DO NOTHING
                     """,
                     (
-                        str(uuid4()),
+                        str(uuid5(_CONTRACT_ALERT_NAMESPACE, signal.fingerprint))
+                        if signal.kind is LedgerFactKind.DISPATCH_CONTRACT_VIOLATION
+                        else str(uuid4()),
                         signal.fingerprint,
                         signal.source.value,
                         signal.kind.value,
@@ -329,7 +380,9 @@ def list_monitor_feedback_events(limit: int = 50) -> list[dict[str, Any]]:
             dict(row)
             for row in c.execute(
                 "SELECT feedback_event_id, fingerprint, signal_kind, severity, "
-                "target_project_id, rule_id, decision, intent_id, observed_at, created_at "
+                "target_project_id, rule_id, decision, intent_id, observed_at, created_at, "
+                "evidence_json::jsonb->'evidence' AS evidence, "
+                "evidence_json::jsonb->>'error_code' AS error_code "
                 "FROM monitor_feedback_events ORDER BY created_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()

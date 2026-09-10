@@ -16,9 +16,10 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from ..constants import PROCESS_CANCELED_EXIT_CODE, PROCESS_TIMEOUT_EXIT_CODE
 from ..coordination.contracts import DispatchKind
 from ..project_center import LinkedProject
-from ..toolchains import project_environment
+from ..toolchains import project_environment, unprivileged_process_environment
 from .types import (
     CommandRunCapture,
     ExecutionLeaseStatus,
@@ -36,7 +37,7 @@ def _decode_timeout_output(value: str | bytes | None) -> str:
     return value
 
 
-def _describe_command_timeout(value: str | bytes | None, timeout_seconds: int) -> str:
+def _describe_command_timeout(value: str | bytes | None, timeout_seconds: float) -> str:
     return f"{_decode_timeout_output(value)}Command timed out after {timeout_seconds}s"
 
 
@@ -46,7 +47,7 @@ def _run_reaped_process_group(
     *,
     shell: bool,
     environment: Mapping[str, str],
-    timeout_seconds: int,
+    timeout_seconds: float,
     display_command: str,
 ) -> CommandRunCapture:
     """Run the command as its own process group; on timeout, reap the whole group.
@@ -67,7 +68,7 @@ def _run_reaped_process_group(
             command,
             cwd=cwd,
             shell=shell,
-            env=environment,
+            env=unprivileged_process_environment(environment),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -100,7 +101,7 @@ def _run_reaped_process_group(
             cwd=str(cwd),
             stdout=stdout,
             stderr=_describe_command_timeout(stderr, timeout_seconds),
-            exit_code=124,
+            exit_code=PROCESS_TIMEOUT_EXIT_CODE,
         )
     return CommandRunCapture(
         command=display_command,
@@ -115,7 +116,7 @@ def run_captured_command(
     command: Sequence[str],
     cwd: Path,
     *,
-    timeout_seconds: int,
+    timeout_seconds: float,
     env: Mapping[str, str] | None = None,
     complete_environment: bool = False,
 ) -> CommandRunCapture:
@@ -236,7 +237,7 @@ def warrants_provider_swap(reason: FrontierFallbackReason | None) -> bool:
 
 
 def infer_frontier_fallback_reason(capture: CommandRunCapture) -> FrontierFallbackReason | None:
-    if capture.exit_code == 124:
+    if capture.exit_code == PROCESS_TIMEOUT_EXIT_CODE:
         return "timeout"
     combined = f"{capture.stdout}\n{capture.stderr}".lower()
     if any(pattern in combined for pattern in _USAGE_LIMIT_PATTERNS):
@@ -285,7 +286,9 @@ def build_command_capture_from_lease_result(
             stderr=str(payload.get("stderr") or payload.get("stderr_tail") or ""),
             exit_code=int(payload.get("exit_code") or 0),
         )
-    exit_code = 0 if status == "COMPLETED" else 124 if status == "TIMED_OUT" else 1
+    exit_code = (
+        0 if status == "COMPLETED" else PROCESS_TIMEOUT_EXIT_CODE if status == "TIMED_OUT" else 1
+    )
     return CommandRunCapture(
         command=shlex.join(str(part) for part in fallback_command),
         cwd=str(cwd),
@@ -299,7 +302,7 @@ def classify_execution_lease_status(capture: CommandRunCapture) -> ExecutionLeas
     fallback_reason = infer_frontier_fallback_reason(capture)
     if fallback_reason == "timeout":
         return "TIMED_OUT"
-    if capture.exit_code == 130:
+    if capture.exit_code == PROCESS_CANCELED_EXIT_CODE:
         combined = f"{capture.stdout}\n{capture.stderr}".lower()
         if "cancel" in combined:
             return "CANCELED"

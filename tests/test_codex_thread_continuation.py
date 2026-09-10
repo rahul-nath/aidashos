@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -272,6 +273,48 @@ def test_resume_refuses_an_unrecognized_source_permission_envelope(tmp_path: Pat
     )
 
     assert decision == StartFreshBounded("continuation source permission envelope mismatch")
+
+
+def test_ephemeral_reader_keeps_artifact_context_without_resume_lookup(tmp_path: Path) -> None:
+    target = _target(tmp_path / "repo")
+    source = _result("senior_read", PlanningPhase.SENIOR_INDEPENDENT_READING, "preserved reading")
+    artifacts = tuple(
+        replace(
+            artifact,
+            content={
+                **artifact.content,
+                "agent_session": {"transport": "codex_inspection", "resumable": False},
+            },
+        )
+        if artifact.artifact_type == CLI_AGENT_RUN_ARTIFACT_TYPE
+        else artifact
+        for artifact in source.artifacts
+    )
+    source = replace(source, artifacts=artifacts)
+
+    def forbidden_lookup(command):
+        pytest.fail("ephemeral inspection must not ask the ledger for a resumable thread")
+
+    executor = CliPowWowExecutor(
+        worktree_root=tmp_path / "worktrees",
+        coordination_command=forbidden_lookup,
+        bench=_codex_bench(),
+    )
+    decision = executor._frontier_launch_decision(
+        pow_wow_id="pow",
+        target_project=target,
+        task=_implementation_task(),
+        context=_context(target),
+        dependency_results=(source,),
+        harness=FrontierHarness.CODEX,
+        model="gpt-5.6-sol",
+        source_revision="a" * 40,
+    )
+    assert decision == StartFreshBounded(
+        "inspection session is ephemeral; preserve its bounded artifact context"
+    )
+    assert source.summary == "preserved reading"
+    assert any(artifact.persisted_artifact_id == "artifact-reader" for artifact in source.artifacts)
 
 
 def test_resume_command_keeps_reading_as_typed_disputable_evidence(tmp_path: Path) -> None:

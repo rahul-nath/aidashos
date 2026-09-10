@@ -37,7 +37,7 @@ from .coordination.outcomes import (
 )
 from .decomposition import DecompositionPlan, DecompositionPlanner, RuleBasedDecompositionPlanner
 from .dispatch_results import DispatchRunnerResult
-from .dispatcher import IntentResult
+from .dispatcher import IntentResult, TerminalIntentResult
 from .harness_availability import (
     DISPATCH_QUOTA_READ_TIMEOUT_SECONDS,
     collapsed_cross_checks,
@@ -121,7 +121,7 @@ class DispatchRunSummary:
             "interrupted_recovery": self.interrupted_recovery,
         }
 
-    def to_intent_result(self) -> IntentResult:
+    def to_intent_result(self) -> TerminalIntentResult:
         payload = json.dumps(self.to_payload(), sort_keys=True)
         if self.run_result.status == "COMPLETED":
             return DispatchTerminalStatus.DONE, payload, None
@@ -269,6 +269,8 @@ class DispatcherIntentRunner:
                 phase="dispatch_pairing_assigned",
                 intent_id=intent_id,
                 pairing_assignment_id=assignment.assignment_id,
+                pairing_resolution_id=assignment.resolution_id,
+                selection_policy=assignment.selection.to_payload(),
                 pairing_score=assignment.pairing.score,
                 quality_chart_hash=assignment.chart_hash,
             )
@@ -294,6 +296,14 @@ class DispatcherIntentRunner:
         return effective_bench(staffing)
 
     def __call__(self, intent: Mapping[str, Any]) -> IntentResult:
+        from .registered_verification_dispatch import (
+            registered_gate_dispatch,
+            run_registered_gate_dispatch,
+        )
+
+        gate = registered_gate_dispatch(str(intent["intent_id"]))
+        if gate is not None:
+            return run_registered_gate_dispatch(gate)
         if str(intent.get("intent_role") or "single") == "reducer":
             return self.run_reducer_intent(intent)
         summary = self.run_intent(intent)
@@ -311,7 +321,7 @@ class DispatcherIntentRunner:
             )
         return summary.to_intent_result()
 
-    def run_reducer_intent(self, intent: Mapping[str, Any]) -> IntentResult:
+    def run_reducer_intent(self, intent: Mapping[str, Any]) -> TerminalIntentResult:
         """Reduce a quorum's child answers into one result (vote or judge).
 
         The reducer intent is only claimable once every sibling child is
@@ -364,7 +374,7 @@ class DispatcherIntentRunner:
         intent: Mapping[str, Any],
         reduction: dict[str, Any],
         usable: list[dict[str, Any]],
-    ) -> IntentResult:
+    ) -> TerminalIntentResult:
         if not usable:
             reduction["outcome"] = "no_usable_answers"
             return (
@@ -655,7 +665,7 @@ class DispatcherIntentRunner:
                 target_project_id=target_project.id,
                 run_result=run_result.to_payload(),
                 target_project_path=target_project.expanded_path,
-                dispatch_result=DispatchRunnerResult(
+                dispatch_result=DispatchRunnerResult.from_run_payload(
                     result_origin,
                     DispatchResultState.COMPLETED,
                     DispatchPromotionState.MERGE_PENDING,
@@ -769,7 +779,7 @@ def _reduce_by_vote(
     usable: list[dict[str, Any]],
     *,
     fanout: int,
-) -> IntentResult:
+) -> TerminalIntentResult:
     """Deterministic strict-majority mode over normalized answers.
 
     Majority is measured against the full fanout, not just the answers that

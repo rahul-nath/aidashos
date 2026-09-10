@@ -23,6 +23,8 @@ from local_first_agent_os.access_posture import (
     ALWAYS_ENFORCED,
     AccessPosture,
     announce_posture,
+    flush_observed_refusal_summary,
+    observed_refusals,
     relaxable,
     resolve,
 )
@@ -194,6 +196,33 @@ def test_enforcing_records_nothing_because_nothing_was_let_through(
         )
 
     assert [r for r in caplog.records if r.message == "access_posture_observed_refusal"] == []
+
+
+def test_observing_emits_the_promised_end_of_run_summary(
+    work_unit_ledger: Path,
+    observing: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    flush_observed_refusal_summary()
+    caplog.clear()
+    check_capability(
+        agent_name="claude",
+        agent_role="implementer",
+        capability=DENIED_BY_THE_DOCUMENT,
+        pow_wow_id=_POW_WOW_ID,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="local_first_agent_os.access_posture"):
+        flushed = flush_observed_refusal_summary()
+
+    assert len(flushed) == 1
+    assert observed_refusals() == ()
+    (record,) = [
+        item for item in caplog.records if item.message == "access_posture_observed_refusal_summary"
+    ]
+    assert record.__dict__["refusal_count"] == 1
+    assert record.__dict__["refusals"][0]["capability"] == DENIED_BY_THE_DOCUMENT.value
+    assert "POLICIES.md" in record.__dict__["refusals"][0]["reason"]
 
 
 # Variable 4: whether the process says which posture it is in.

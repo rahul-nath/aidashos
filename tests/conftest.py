@@ -10,7 +10,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Iterator
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 
 import postgres_server
@@ -36,6 +36,8 @@ from local_first_agent_os.coordination import store
 from local_first_agent_os.runtime import AppRuntime, build_runtime
 from local_first_agent_os.settings import Settings, get_settings
 
+pytest_plugins = ("native_codex_srt_profile", "pytester")
+
 REPO_CONFIGS = Path(__file__).resolve().parent.parent / "configs"
 
 # The `postgres-test` service in docker-compose.yml, not the durable `postgres`
@@ -52,6 +54,37 @@ DEFAULT_TEST_POSTGRES = postgres_server.ManagedPostgres(
 # carries the answer and the sweep below reads it back.
 _SCHEMA_NAME_PATTERN = re.compile(r"^test_(?P<created_at>\d{10})_[0-9a-f]{12}$")
 _ORPHAN_MAX_AGE_SECONDS = 3600
+
+
+@pytest.fixture(autouse=True)
+def _isolate_project_registry(
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compilation may adopt a project, so its registry and target must be disposable."""
+
+    from work_unit_support import acceptance_target_project_id, write_test_project_registry
+
+    from local_first_agent_os import project_scaffold
+
+    source_configs = Path(os.environ.get("LOCAL_AGENT_CONFIG_DIR", REPO_CONFIGS)).expanduser()
+    root = tmp_path_factory.mktemp("project-registry")
+    config_dir = root / "configs"
+    config_dir.mkdir()
+    for source in source_configs.glob("*.toml"):
+        if source.name != "linked_projects.toml":
+            shutil.copyfile(source, config_dir / source.name)
+    target = root / "target"
+    target.mkdir()
+    write_test_project_registry(config_dir, acceptance_target_project_id(), target)
+    monkeypatch.setenv("LOCAL_AGENT_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LOCAL_AGENT_PROJECTS_ROOT", str(root / "adopted-projects"))
+    monkeypatch.setattr(
+        project_scaffold,
+        "adopt_unregistered_target",
+        partial(project_scaffold.adopt_unregistered_target, root=root / "adopted-projects"),
+    )
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)

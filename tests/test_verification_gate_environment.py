@@ -318,6 +318,7 @@ _FOREIGN_ENVIRONMENT_READS = {
     "NVM_DIR": "nvm's own variable, read to honor a target project's .nvmrc",
     "CLAUDE_BIN": "operator override for an external harness binary",
     "CODEX_BIN": "operator override for an external harness binary",
+    "CODEX_HOME": "Codex-owned subscription reference; inspection workers receive private state",
     "HERMES_BASE_URL": "external adapter endpoint",
     "HERMES_API_KEY": "external adapter credential",
     "OPENCODE_BASE_URL": "external adapter endpoint",
@@ -417,7 +418,12 @@ def test_the_suite_passes_as_a_verification_command_under_an_environment_that_fa
 
     monkeypatch.setenv("LOCAL_AGENT_USE_DBOS", "true")
     selection = "tests/test_work_unit_lifecycle.py::test_all_seven_phases_occur_in_the_fixed_order"
-    command = f"uv run pytest {selection} -q"
+    # Exercise environment isolation using this test runner's installed dependencies.
+    # Creating another project venv would test network/cache availability first.
+    command = (
+        f"uv run --no-project --python {shlex.quote(sys.executable)} "
+        f"python -m pytest {selection} -q"
+    )
 
     direct = run_captured_shell_command(command, REPO_ROOT, timeout_seconds=300)
     assert direct.exit_code != 0, (

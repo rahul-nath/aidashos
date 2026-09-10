@@ -156,13 +156,47 @@ The two frontier seats are declared together, as a named `[pairings.<name>]`, an
 Junior stays in `[bench]` because it is seated alone.
 The pairing was added later than the rest of this document, and the reason is in the seat's own history: senior and staff were two independent tables, so an operator could change the implementer and leave the reviewer pointing where it already pointed.
 Picking an implementer and picking its reviewer is one decision, and `FrontierPairing` is that decision as a type.
-It refuses a pairing that names one model for both seats, unconditionally: there is no acknowledgement flag, because every harness this system staffs offers more than one model (operator's ruling, 2026-08-23), and the flag's brief life proved that an escape hatch on an invariant decays into the thing the invariant guards against.
-The all-local seating satisfies this too: `configs/model_registry.toml` carries a `deliberator` alongside the fast `general` model, so an operator with no frontier subscription still seats two.
+The same model may occupy both seats, including at different reasoning efforts.
+Review independence is enforced through separate execution sessions, typed planning visibility, read-only review, and host-stamped review evidence, not inferred from model names.
+Different models or vendors may reduce correlated errors, but that is an evaluation hypothesis rather than an enforced validity rule.
 A pairing may name other pairings in `fallback`, in order.
 When any vendor the seated pairing depends on reports a spent quota, restaffing moves BOTH seats to the first fallback pairing that avoids every spent vendor - even the seat whose own vendor is fine, because "who reviews the implementer" changed the moment the implementer did.
-The landing is itself a constructed `FrontierPairing`, so implementer and reviewer arrive together, already proven distinct; the claim gate answers with the same pair shape, both seats claimable together or neither.
+The landing is itself a constructed `FrontierPairing`, so implementer and reviewer arrive together; the claim gate answers with the same pair shape, both seats claimable together or neither.
 `Staffing` is the loaded whole - pairings, the seated one, and the solo tiers - and `load_bench` stays beside `load_staffing` for the consumers that resolve tiers and never restaff.
 When nothing declared avoids the outage (both vendors out), both seats queue; the plan for that state is `docs/local_fallback_seating_gawd.md`, a local fallback pairing with the panel idea still parked behind operator decisions.
+
+### WorkUnit selection and immutable attempts
+
+`Staffing.selection_for(work_unit_id)` resolves `AutoRanked | StrictPair | PreferredPair`.
+The `[work_unit_pairing]` table sets the default; `[work_unit_pairing_overrides."<id>"]` overrides only that WorkUnit.
+An omitted policy preserves automatic ranking for existing installations.
+Automatic ranking uses the quality chart and its reviewer-score preference; fixed selection uses exactly the named models and effort levels, even if another pair ranks higher.
+Fixed models and efforts must match chart entries before availability is checked.
+A strict selection cannot follow a fallback chain or substitute a workload profile.
+Preferred selection first tries the exact named pair, then its `RankedAny | SameProviderOnly | ExplicitPairs` fallback space.
+Same-provider fallback preserves each seat's harness and vendor; explicit pairs preserve their declared order and exact model/effort pins.
+The strict policy retains `mode="fixed"` as its wire spelling for historical compatibility.
+
+```toml
+[work_unit_pairing]
+mode = "preferred"
+pairing = "codex-only"
+fallback = { mode = "explicit", pairings = ["claude-only"] }
+
+[work_unit_pairing_overrides."another-work-unit"]
+mode = "auto"
+```
+
+`DispatchBackedExecutorRuntime.submit` reads the incumbent assignment before consulting configuration.
+`pairing_resolution.resolve_assignment` serializes resolution for an attempt, committing requested policy, rejected candidates, fallback selection, and the actual resolved pair as ordered ledger events.
+An unavailable search records its refusal without creating a dispatch intent.
+Only a successful resolution can be attached to a new intent, and replay reuses that resolution even after a crash before enqueue.
+`bench_for_assignment` binds every judgment phase and revision to those exact model/effort pins.
+Changing configuration never rewrites a recorded attempt; a retry with a new attempt identity can use new policy.
+An unavailable strict pair raises `NoLivePairing`, without dispatching to a different provider.
+In-flight quota failures settle the current attempt without substituting either seat.
+Fallback-enabled policy permits the existing bounded WorkUnit auto-resume path to create a new attempt; strict or exhausted selection requires operator action.
+Legacy unassigned dispatches still use `seated_pairing` and its declared fallbacks; the configured Codex-only pair keeps that legacy chain empty.
 
 ## Keep / unify / defer from Ouroboros
 

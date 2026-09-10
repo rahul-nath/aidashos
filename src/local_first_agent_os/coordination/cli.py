@@ -25,7 +25,9 @@ from typing import Any, Final, Literal
 from local_first_agent_os.constants import (
     APPROVAL_REQUEST_TYPES,
     DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
+    DEFAULT_DELEGATED_TASK_MAX_TOKENS,
 )
+from local_first_agent_os.contracts import CheckpointStatus, ModelRole
 
 from ..refinery.loop import run_refinery, run_refinery_fleet
 from ..work_units import commands as work_unit_commands
@@ -105,7 +107,7 @@ from .milestones import (
     retry_saga_milestone,
     start_saga_milestone,
 )
-from .outcomes import TerminalOutcome
+from .outcomes import CheckpointReason, TerminalOutcome
 from .pow_wows import (
     claim_task,
     complete_pow_wow,
@@ -318,6 +320,15 @@ def build_agent_read_mcp_server():
     return mcp
 
 
+def run_refinery_fleet_tool(
+    target_project_ids: list[str],
+    interval_seconds: float | None = None,
+    max_polls: int | None = None,
+) -> dict[str, Any]:
+    """Poll the named projects; in-process test callbacks are not machine inputs."""
+    return run_refinery_fleet(target_project_ids, interval_seconds, max_polls)
+
+
 def build_mcp_server():
     try:
         from mcp.server.fastmcp import FastMCP
@@ -455,7 +466,7 @@ def build_mcp_server():
     mcp.tool(name="recover_unparsed_staff_review")(recover_unparsed_staff_review)
     mcp.tool(name="list_integration_requests")(list_integration_requests)
     mcp.tool(name="run_refinery")(run_refinery)
-    mcp.tool(name="run_refinery_fleet")(run_refinery_fleet)
+    mcp.tool(name="run_refinery_fleet")(run_refinery_fleet_tool)
     mcp.tool(name="submit_dispatch_intent")(submit_dispatch_intent)
     mcp.tool(name="claim_next_dispatch_intent")(claim_next_dispatch_intent)
     mcp.tool(name="complete_dispatch_intent")(complete_dispatch_intent)
@@ -845,13 +856,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     dt = sub.add_parser("delegate_task", parents=[sess])
     dt.add_argument("prompt")
-    dt.add_argument("--tier", choices=["weak", "strong", "special"], default="weak")
-    dt.add_argument("--adapter", default="local_llama")
-    dt.add_argument("--model-role", default="general")
-    dt.add_argument("--role", default="delegate")
+    dt.add_argument("--model-role", choices=[role.value for role in ModelRole], default="general")
     dt.add_argument("--pow-wow-id")
     dt.add_argument("--task-id")
-    dt.add_argument("--max-tokens", type=int, default=2048)
+    dt.add_argument(
+        "--task-max-tokens",
+        type=int,
+        default=DEFAULT_DELEGATED_TASK_MAX_TOKENS,
+    )
     dt.add_argument("--timeout-seconds", type=int, default=DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS)
     dt.add_argument("--no-submit-result", action="store_true")
 
@@ -1064,12 +1076,12 @@ def build_parser() -> argparse.ArgumentParser:
     cec.add_argument("lease_id")
     cec.add_argument(
         "--reason",
-        choices=["deadline", "operator_cancel", "supervisor_error"],
+        choices=[reason.value for reason in CheckpointReason],
         required=True,
     )
     cec.add_argument(
         "--status",
-        choices=["PENDING_JUNIOR", "DECIDED", "PAUSED", "FAILED"],
+        choices=[status.value for status in CheckpointStatus],
         required=True,
     )
     cec.add_argument("--saga-id")
@@ -1104,6 +1116,7 @@ def build_parser() -> argparse.ArgumentParser:
     rrsr.add_argument("--base-head-sha", required=True)
     rrsr.add_argument("--commit-sha", required=True)
     rrsr.add_argument("--milestone-id")
+    rrsr.add_argument("--retry-of", help="Preserve a failed recovery and enqueue its exact retry")
 
     cle = sub.add_parser("claim_next_ledger_event")
     cle.add_argument("--claimed-by", required=True)
@@ -1374,13 +1387,10 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     elif cmd == "delegate_task":
         out = delegate_task(
             prompt=args.prompt,
-            tier=args.tier,
-            adapter=args.adapter,
-            model_role=args.model_role,
-            role=args.role,
+            model_role=ModelRole(args.model_role),
             pow_wow_id=args.pow_wow_id,
             task_id=args.task_id,
-            max_tokens=args.max_tokens,
+            task_max_tokens=args.task_max_tokens,
             timeout_seconds=args.timeout_seconds,
             submit_result=not args.no_submit_result,
             session_id=args.session,
@@ -1612,8 +1622,8 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
     elif cmd == "create_execution_checkpoint":
         out = create_execution_checkpoint(
             args.lease_id,
-            reason=args.reason,
-            status=args.status,
+            reason=CheckpointReason(args.reason),
+            status=CheckpointStatus(args.status),
             saga_id=args.saga_id,
             pow_wow_id=args.pow_wow_id,
             worktree_path=args.worktree_path,
@@ -1646,6 +1656,7 @@ def dispatch(args: argparse.Namespace) -> dict[str, Any]:
             base_sha=args.base_head_sha,
             commit_sha=args.commit_sha,
             milestone_id=args.milestone_id,
+            retry_of=args.retry_of,
         )
     elif cmd == "claim_next_ledger_event":
         out = claim_next_ledger_event(

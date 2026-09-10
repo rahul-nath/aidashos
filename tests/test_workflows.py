@@ -2586,6 +2586,8 @@ def test_review_merge_hydrates_legacy_packet_without_approving(
     )
     run_result = {
         "schema_version": "dispatch_runner_result.v1",
+        "intent_id": intent["intent_id"],
+        "target_project_id": "target",
         "run_result": {
             "executor": "CliPowWowExecutor",
             "mode": "cli",

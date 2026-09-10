@@ -708,6 +708,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_milestone_executions_unique
 CREATE INDEX IF NOT EXISTS idx_milestone_executions_status
     ON milestone_executions(work_unit_id, status);
 
+-- Only the host registered-gate runner writes these records. Public result and
+-- artifact writers may reference their opaque IDs but cannot supply receipts.
+CREATE TABLE IF NOT EXISTS host_verification_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    intent_id TEXT NOT NULL REFERENCES dispatch_intents(intent_id),
+    payload_json TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    output_json TEXT NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_host_verification_receipts_intent
+    ON host_verification_receipts(intent_id);
+
 CREATE TABLE IF NOT EXISTS work_unit_events (
     event_id TEXT PRIMARY KEY,
     work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id),

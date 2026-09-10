@@ -8,7 +8,6 @@ import json
 
 import pytest
 
-from local_first_agent_os.agent_execution_supervisor import normalize_jsonl_line
 from local_first_agent_os.coordination.checkpoints import append_execution_event
 from local_first_agent_os.coordination.execution import (
     complete_execution_lease,
@@ -28,6 +27,7 @@ from local_first_agent_os.coordination.frontier_usage import (
 from local_first_agent_os.coordination.pow_wows import claim_task, create_pow_wow
 from local_first_agent_os.coordination.projects import create_saga
 from local_first_agent_os.coordination.store import connect
+from local_first_agent_os.execution_events import normalize_jsonl_line
 
 
 def _append(

@@ -156,6 +156,7 @@ if [ ! -f "$ROOT/.env" ]; then
   echo "Created .env from portable defaults. Review optional API and observability keys."
 fi
 mkdir -p "$HOME/.local-agent/artifacts" "$HOME/.local-agent/spool" "$HOME/models"
+"$ROOT/scripts/initialize-operator-identity.sh"
 
 install_docker
 if [ "$os" = "Darwin" ] && ! docker info >/dev/null 2>&1; then
@@ -172,6 +173,7 @@ docker info >/dev/null 2>&1 || {
 }
 "$ROOT/scripts/start-docker-compose-infra.sh" postgres
 uv run local-agent init-db
+"$ROOT/scripts/initialize-verification-resources.sh"
 
 if [ "$WITH_MODEL_RUNTIMES" = true ]; then
   "$ROOT/scripts/install-model-runtimes.sh"

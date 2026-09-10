@@ -23,8 +23,9 @@ from typing import Any
 import pytest
 from pytest_bdd import given, parsers, scenarios, then, when
 
-from local_first_agent_os.contracts import WorkflowType
+from local_first_agent_os.contracts import ModelRole, WorkflowType
 from local_first_agent_os.coordination import DispatchKind
+from local_first_agent_os.coordination.outcomes import TerminalOutcome
 from local_first_agent_os.local_delegate import (
     build_directive_local_delegate,
     build_resident_local_delegate,
@@ -340,7 +341,21 @@ def test_a_junior_task_with_a_delegate_runs_on_the_local_model(tmp_path: Path) -
     result = _route(executor, _target(tmp_path / "repo"), _junior_task())
     assert result.status == "completed"
     assert delegate.calls[0]["model"] == "gemma4"
-    assert delegate.calls[0]["tier"] == "junior"
+    assert "tier" not in delegate.calls[0]
+    assert "role" not in delegate.calls[0]
+
+
+def test_local_delegate_reports_model_not_loaded_as_a_typed_failure(tmp_path: Path) -> None:
+    def unloaded_delegate(**_kwargs: Any) -> dict[str, Any]:
+        return {"ok": False, "error": "model not loaded: gemma4"}
+
+    executor = _executor(tmp_path, delegate=unloaded_delegate)
+    result = _route(executor, _target(tmp_path / "repo"), _junior_task())
+
+    assert result.status == "failed"
+    assert result.failure is not None
+    assert result.failure.error_code == TerminalOutcome.LOCAL_MODEL_NOT_LOADED
+    assert result.failure.message == "model not loaded: gemma4"
 
 
 def test_a_junior_task_without_a_delegate_fails_instead_of_becoming_a_claude_command(
@@ -356,6 +371,8 @@ def test_a_junior_task_without_a_delegate_fails_instead_of_becoming_a_claude_com
     executor = _executor(tmp_path, delegate=None)
     result = _route(executor, _target(tmp_path / "repo"), _junior_task())
     assert result.status == "failed"
+    assert result.failure is not None
+    assert result.failure.error_code == TerminalOutcome.INTERNAL_ASSERTION
     assert any("'pi'" in risk for risk in result.risks)
     assert all("claude" not in risk for risk in result.risks)
 
@@ -397,11 +414,11 @@ def test_a_staffed_local_tier_is_reported_as_local(tmp_path: Path) -> None:
 
 
 # Variable 5: review versus implement (two values, per harness).
-def test_a_codex_review_gets_the_read_only_sandbox(tmp_path: Path) -> None:
+def test_a_codex_review_selects_the_native_inspection_transport(tmp_path: Path) -> None:
     command = _executor(tmp_path, codex_bin="codex")._build_agent_cli_command(
         FrontierHarness.CODEX, None, "review", ReadOnlyInspection()
     )
-    assert "-s" in command and "read-only" in command
+    assert command == ("codex", "app-server")
     assert "--dangerously-bypass-approvals-and-sandbox" not in command
 
 
@@ -485,6 +502,37 @@ def test_a_resident_delegate_registers_the_workflow_its_model_call_needs(runtime
     state = runtime.repository.get_workflow_run_state(workflow_id)
     assert state is not None
     assert state.workflow_type is WorkflowType.RESIDENT_LOCAL_DELEGATE
+
+
+def test_an_unpinned_resident_delegate_refreshes_the_durable_active_general(runtime) -> None:
+    runtime.repository.set_fallback_state(
+        name="active_general_role",
+        fallback_role=ModelRole.GENERAL_FALLBACK.value,
+        reason="operator selected qwen",
+    )
+    assert runtime.model_manager.active_general_role is ModelRole.GENERAL
+
+    payload = build_resident_local_delegate(runtime)(
+        prompt="say something",
+        task_name="t",
+        model=None,
+        pow_wow_id="pow-active-general",
+    )
+
+    assert payload["ok"] is True
+    assert payload["provenance"]["model_role"] == ModelRole.GENERAL_FALLBACK.value
+
+
+@pytest.mark.parametrize("model", ("", "unregistered-model"))
+def test_an_explicit_unregistered_local_model_is_refused_before_workflow_creation(
+    runtime, model: str
+) -> None:
+    delegate = build_resident_local_delegate(runtime)
+
+    with pytest.raises(ValueError, match="is not registered"):
+        delegate(prompt="q", task_name="invalid-model", model=model, pow_wow_id="pow-invalid")
+
+    assert not runtime.repository.workflow_run_exists(resident_delegate_workflow_id("pow-invalid"))
 
 
 def test_a_resident_delegate_registers_one_workflow_per_pow_wow(runtime) -> None:

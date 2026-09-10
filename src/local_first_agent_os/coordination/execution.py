@@ -723,7 +723,11 @@ def gc_ledger(
     no remaining lease, terminal ledger events, and old lines from events.jsonl.
     Work whose holder is still proving it is alive is never touched, however old
     the row is, so in-flight work is safe.
+    Pairing decisions and their dispatch links are WorkUnit replay authority,
+    not queue debris; queue retention cannot erase them.
     """
+    from ..pairing_assignment import PAIRING_ASSIGNMENT_EVENT
+
     t = now()
     deleted: dict[str, int] = {}
     with tx() as c:
@@ -780,12 +784,19 @@ def gc_ledger(
                 "  SELECT 1 FROM agent_execution_checkpoints cp "
                 "  WHERE cp.intent_id = dispatch_intents.intent_id "
                 "     OR cp.review_intent_id = dispatch_intents.intent_id"
+                ") "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM ledger_events e "
+                "  WHERE e.aggregate_type='dispatch_intent' "
+                "    AND e.aggregate_id=dispatch_intents.intent_id AND e.event_type=?"
                 ")",
-                (cutoff,),
+                (cutoff, PAIRING_ASSIGNMENT_EVENT),
             ).rowcount
             deleted["ledger_events"] = c.execute(
-                f"DELETE FROM ledger_events WHERE created_at < ? AND status IN ({_LEDGER_SETTLED})",
-                (cutoff,),
+                f"DELETE FROM ledger_events WHERE created_at < ? AND status IN ({_LEDGER_SETTLED}) "
+                "AND aggregate_type NOT IN ('pairing_resolution', 'pairing_assignment') "
+                "AND event_type != ?",
+                (cutoff, PAIRING_ASSIGNMENT_EVENT),
             ).rowcount
     if retention_seconds is not None:
         deleted["events"] = _prune_events_file(t - retention_seconds)

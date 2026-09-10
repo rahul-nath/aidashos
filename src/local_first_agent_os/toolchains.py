@@ -9,8 +9,30 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Final
+
+from .operator_identity import OPERATOR_TOKEN_ENV, OPERATOR_TOKEN_FILE_ENV
 
 _EXACT_NODE_VERSION = re.compile(r"(?:v)?(\d+\.\d+\.\d+)")
+
+# Every variable this control plane sets to configure itself lives under one of
+# these prefixes. Verification belongs to the target project, so these values
+# must never change what its gate proves.
+CONTROL_PLANE_ENV_PREFIXES: Final = ("LOCAL_AGENT_", "AGENT_COORDINATION_", "DBOS_")
+CONTROL_PLANE_ENV_NAMES: Final = frozenset({"VIRTUAL_ENV", "AGENT_SESSION_ID"})
+
+
+def unprivileged_process_environment(environment: Mapping[str, str]) -> dict[str, str]:
+    """Child commands cannot inherit the host credential for operator mutations.
+
+    Trusted coordination transports have their own authentication boundary and
+    do not use this function. Explicit child overrides cannot restore the secret.
+    """
+    return {
+        key: value
+        for key, value in environment.items()
+        if key not in {OPERATOR_TOKEN_ENV, OPERATOR_TOKEN_FILE_ENV}
+    }
 
 
 def project_environment(
@@ -42,4 +64,25 @@ def project_environment(
     return env
 
 
-__all__ = ["project_environment"]
+def verification_gate_environment(project_path: Path) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Return the target toolchain environment without control-plane state."""
+
+    environment = project_environment(project_path)
+    stripped = tuple(
+        sorted(
+            name
+            for name in environment
+            if name.startswith(CONTROL_PLANE_ENV_PREFIXES) or name in CONTROL_PLANE_ENV_NAMES
+        )
+    )
+    for name in stripped:
+        del environment[name]
+    return environment, stripped
+
+
+__all__ = [
+    "CONTROL_PLANE_ENV_NAMES",
+    "CONTROL_PLANE_ENV_PREFIXES",
+    "project_environment",
+    "verification_gate_environment",
+]

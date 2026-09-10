@@ -152,6 +152,17 @@ def test_a_judged_failure_is_never_re_driven_unattended(work_unit_ledger: Path) 
     assert _pending_resume_rows() == []
 
 
+def test_a_scheduling_condition_is_never_re_driven_unattended(
+    work_unit_ledger: Path,
+) -> None:
+    """An external quota window is not a transient retry timer."""
+
+    _blocked_unit("auto_resume_scheduling", failure_classes=(FailureClass.SCHEDULING,))
+
+    assert sweep_transient_blocked(max_transient_resumes=3) == ()
+    assert _pending_resume_rows() == []
+
+
 def test_a_mixed_block_is_left_for_the_operator(work_unit_ledger: Path) -> None:
     """One resume re-drives every BLOCKED milestone, so one judged failure
     among the transients disqualifies the whole unit."""

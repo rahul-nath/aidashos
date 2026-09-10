@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from work_unit_support import acceptance_target_project_id
 
 from local_first_agent_os.contracts import SourceType, WorkflowStatus, WorkspaceId
 from local_first_agent_os.coordination import DispatchKind, DispatchTerminalStatus
@@ -20,7 +21,13 @@ from local_first_agent_os.coordination.durable import (
     run_coordination_command_durably,
 )
 from local_first_agent_os.coordination.store import tx
-from local_first_agent_os.dispatcher import Dispatched, Idle, LedgerDispatcher
+from local_first_agent_os.dispatcher import (
+    DispatchDeferralReason,
+    Dispatched,
+    Idle,
+    IntentDeferred,
+    LedgerDispatcher,
+)
 from local_first_agent_os.dispatcher_runner import DispatcherIntentRunner
 from local_first_agent_os.engineering_doctrine import CURRENT_ENGINEERING_DOCTRINE
 from local_first_agent_os.ingress import normalize_scheduled_event
@@ -32,12 +39,84 @@ from local_first_agent_os.pow_wow import (
     run_coordination_command,
 )
 from local_first_agent_os.pow_wow.protocol import PlanningPhase
+from local_first_agent_os.settings import Settings
 from local_first_agent_os.tools_gate import ToolGate, shelly_plug
 from local_first_agent_os.workflow import WorkflowEngine
 
 
 def _coord(root: Path, args: list[str]) -> dict:
     return run_coordination_command(args, root=root)
+
+
+def test_deferred_owned_execution_frees_only_the_dispatchers_local_seat(tmp_path: Path) -> None:
+    submitted = _coord(
+        tmp_path,
+        ["submit_dispatch_intent", "senior", "existing execution", "--kind", "advisory"],
+    )
+    intent_id = submitted["intent_id"]
+    deferred = IntentDeferred(intent_id, "existing-lease", DispatchDeferralReason.EXECUTION_ACTIVE)
+    dispatcher = LedgerDispatcher(
+        settings=Settings(coordination_root=tmp_path), runner=lambda _: deferred
+    )
+    assert dispatcher.dispatch_pending_intents(interval_seconds=0, max_polls=1) == 0
+    assert dispatcher.last_outcomes == []
+    assert dispatcher.last_deferred == [deferred]
+    with tx() as connection:
+        row = connection.execute(
+            "SELECT status,result FROM dispatch_intents WHERE intent_id=?", (intent_id,)
+        ).fetchone()
+    assert row["status"] == "CLAIMED"
+    assert row["result"] is None
+
+
+def test_stale_runner_cannot_report_a_terminal_transition_the_owner_refused(tmp_path: Path) -> None:
+    from local_first_agent_os.coordination.dispatch import complete_dispatch_intent
+
+    submitted = _coord(tmp_path, ["submit_dispatch_intent", "senior", "stale runner"])
+
+    def runner(intent):
+        retained = complete_dispatch_intent(
+            intent["intent_id"], "FAILED", error="another supervisor settled this execution"
+        )
+        assert retained["ok"], retained
+        return DispatchTerminalStatus.DONE, "stale runner answer", None
+
+    dispatcher = LedgerDispatcher(runner, settings=Settings(coordination_root=tmp_path))
+    result = dispatcher.poll_once()
+    assert isinstance(result, IntentDeferred)
+    assert result.reason is DispatchDeferralReason.COMPLETION_REFUSED
+    with tx() as connection:
+        row = connection.execute(
+            "SELECT status FROM dispatch_intents WHERE intent_id=?", (submitted["intent_id"],)
+        ).fetchone()
+    assert row["status"] == "FAILED"
+
+
+@pytest.mark.parametrize(
+    ("response", "reason"),
+    [
+        (
+            {"ok": True, "intent_id": "i", "status": "PAUSED", "completion_skipped": True},
+            DispatchDeferralReason.RECOVERY_OWNS_STATE,
+        ),
+        (
+            {"ok": True, "intent_id": "another", "status": "DONE"},
+            DispatchDeferralReason.OWNER_RESPONSE_MISMATCH,
+        ),
+        (
+            {"ok": True, "intent_id": "i", "status": "FAILED"},
+            DispatchDeferralReason.OWNER_RESPONSE_MISMATCH,
+        ),
+    ],
+)
+def test_terminal_report_requires_matching_owner_acknowledgement(
+    monkeypatch: pytest.MonkeyPatch, response: dict[str, object], reason: DispatchDeferralReason
+) -> None:
+    dispatcher = LedgerDispatcher(lambda _: (DispatchTerminalStatus.DONE, "answer", None))
+    monkeypatch.setattr(dispatcher, "_coord", lambda _: response)
+    result = dispatcher._settle({"intent_id": "i", "tier": "senior"})
+    assert isinstance(result, IntentDeferred)
+    assert result.reason is reason
 
 
 def _run_git_command(command: list[str], cwd: Path) -> None:
@@ -525,9 +604,25 @@ def test_reactor_poll_runs_and_records(tmp_path: Path) -> None:
     assert done[0]["result"] == "ran: do the thing"
 
 
-def test_reactor_runner_crash_fails_intent_not_reactor(tmp_path: Path) -> None:
+@pytest.mark.parametrize("subject", ["advisory", "code", "work_unit"])
+def test_reactor_runner_crash_fails_intent_not_reactor(tmp_path: Path, subject: str) -> None:
     root = tmp_path / "coord"
-    _coord(root, ["submit_dispatch_intent", "senior", "boom"])
+    created = _coord(
+        root,
+        [
+            "submit_dispatch_intent",
+            "senior",
+            "boom",
+            "--kind",
+            "advisory" if subject == "advisory" else "code",
+            "--target-project-id",
+            acceptance_target_project_id(),
+        ],
+    )
+    if subject == "work_unit":
+        from test_settled_dispatch_adoption import _wait_elapsed_milestone
+
+        _wait_elapsed_milestone(created["intent_id"])
     from local_first_agent_os.settings import Settings
 
     def runner(intent):
@@ -979,7 +1074,7 @@ capacity = 4
 
     def fake_delegate(**kwargs):
         delegate_calls.append(kwargs)
-        return {"ok": True, "output": f"junior context for {kwargs['task_name']}", "metadata": {}}
+        return {"ok": True, "output": f"junior context for {kwargs['task_name']}"}
 
     runner = DispatcherIntentRunner(
         runtime,
@@ -1025,16 +1120,39 @@ capacity = 4
     assert "APPROVE" in review_run_capture["verdict"]
 
 
+@pytest.mark.parametrize("verification_passed", [True, False])
 def test_recovery_staff_review_reuses_exact_commit_and_stamps_host_provenance(
     tmp_path: Path,
     runtime,
+    monkeypatch: pytest.MonkeyPatch,
+    verification_passed: bool,
 ) -> None:
+    from contextlib import contextmanager
+
+    from local_first_agent_os.pow_wow import executor as executor_module
+    from local_first_agent_os.process_containment import ContainedProcess
+
+    @contextmanager
+    def fixture_inspection(request):
+        assert verification_passed, "a failing exact-commit gate must prevent model startup"
+        assert "verification passed" in request.prompt
+        assert (request.repository / "FEATURE.md").exists()
+        yield ContainedProcess((str(request.codex_bin),), {}, request.repository, "fixture")
+
+    # This fixture proves recovery/provenance, not installed native containment.
+    # The explicit native profile tests the real launcher independently.
+    monkeypatch.setattr(executor_module, "prepare_configured_codex_review", fixture_inspection)
+    monkeypatch.setattr(executor_module, "preflight_configured_codex_review", lambda *_: None)
     root = tmp_path / "coordination-root"
     target = tmp_path / "target"
     runtime.settings.coordination_root = root
     runtime.settings.saga_worktree_root = tmp_path / "worktrees"
     _init_git_repo(target)
-    _write_linked_projects(runtime.settings.config_dir, target)
+    _write_linked_projects(
+        runtime.settings.config_dir,
+        target,
+        verification_commands=("test -f FEATURE.md" if verification_passed else "false",),
+    )
     (runtime.settings.config_dir / "staffing.toml").write_text(
         """
 seated_pairing = "two-vendor"
@@ -1092,6 +1210,10 @@ capacity = 4
             "submit_dispatch_intent",
             "senior",
             "Implement the retained change",
+            "--permitted-capability",
+            "read_repository",
+            "--permitted-capability",
+            "invoke_model",
             "--kind",
             "code",
             "--target-project-id",
@@ -1178,7 +1300,7 @@ capacity = 4
 
     runner = DispatcherIntentRunner(
         runtime,
-        delegate_fn=lambda **_kwargs: {"ok": True, "output": "unused", "metadata": {}},
+        delegate_fn=lambda **_kwargs: {"ok": True, "output": "unused"},
         claude_bin=str(claude),
         codex_bin=str(codex),
     )
@@ -1187,6 +1309,16 @@ capacity = 4
     outcome = dispatcher.poll_once()
 
     assert isinstance(outcome, Dispatched)
+    if not verification_passed:
+        assert outcome.status == "FAILED"
+        assert not claude_marker.exists()
+        assert not _coord(root, ["list_approval_requests", "--status", "PENDING"])["requests"]
+        failed = _coord(root, ["list_dispatch_intents", "--status", "FAILED"])["intents"]
+        record = next(row for row in failed if row["intent_id"] == outcome.intent_id)
+        anchor = json.loads(record["result"])["run_result"]["tasks"][0]
+        assert anchor["failure"]["operation"] == "verify_recovery_checkpoint"
+        assert "false -> 1" in "\n".join(anchor["verification_output"])
+        return
     assert outcome.status == "DONE"
     assert not claude_marker.exists()
     assert (
@@ -1455,7 +1587,9 @@ def _run_reducer(root: Path, runtime) -> tuple[dict, tuple]:
     runner = DispatcherIntentRunner(runtime)
     reducer = _coord(root, ["claim_next_dispatch_intent", "--claimed-by", "reducer"])["intent"]
     assert reducer is not None and reducer["intent_role"] == "reducer"
-    return reducer, runner(reducer)
+    terminal = runner(reducer)
+    assert not isinstance(terminal, IntentDeferred)
+    return reducer, terminal
 
 
 def test_vote_reduce_majority_wins(tmp_path: Path, runtime) -> None:

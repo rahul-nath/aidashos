@@ -320,6 +320,18 @@ def test_codex_sandbox_modes_are_real_values(tmp_path: Path, posture: Any, expec
     command = _executor(tmp_path)._build_agent_cli_command(
         FrontierHarness.CODEX, None, "prompt", posture
     )
+    if isinstance(posture, ReadOnlyInspection):
+        from local_first_agent_os.codex_review_client import LocalFixtureModel, _client_command
+
+        native = _client_command(
+            "codex",
+            LocalFixtureModel("fixture", "http://127.0.0.1:1"),
+            code_host_url="ws://127.0.0.1:1/fixture",
+        )
+        assert command[-1] == "app-server"
+        assert f'sandbox_mode="{expected}"' in native
+        assert "--code-mode-host" in native
+        return
     assert command[command.index("-s") + 1] == expected
 
 
@@ -351,6 +363,9 @@ def test_the_prompt_stays_the_last_argument_under_every_posture(tmp_path: Path) 
     for harness in FrontierHarness:
         for posture in (ReadOnlyInspection(), SupervisedCommands(), UnattendedImplementation()):
             command = executor._build_agent_cli_command(harness, None, "THE PROMPT", posture)
+            if harness is FrontierHarness.CODEX and isinstance(posture, ReadOnlyInspection):
+                assert command == (executor.codex_bin, "app-server")
+                continue  # Typed inspection prompt preservation has its own launch contract test.
             assert command[-1] == "THE PROMPT"
 
 

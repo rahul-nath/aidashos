@@ -1,16 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Rahul Nath <https://github.com/rahul-nath>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Streaming, durable supervision for one Claude or Codex CLI process."""
+"""Durably supervise one frontier process, its lease, and recovery evidence."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import json
 import os
-import re
 import shlex
 import signal
 import subprocess
@@ -19,15 +17,30 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
+from typing import TYPE_CHECKING, Final, TypeVar
 
 from .constants import (
+    AGENT_ACTIVITY_MINIMUM_POLL_SECONDS,
+    AGENT_CHECKPOINT_TASK_CONTRACT_LIMIT,
+    AGENT_EVENT_STREAM_READER_LIMIT_BYTES,
+    AGENT_EVENT_SUMMARY_TAIL_SIZE,
+    AGENT_PROCESS_EXIT_POLL_SECONDS,
+    AGENT_PROGRESS_EVIDENCE_TASK_CONTRACT_LIMIT,
+    AGENT_PROGRESS_SIGNATURE_WINDOW_SIZE,
+    DEFAULT_AGENT_SUPERVISOR_HEARTBEAT_SECONDS,
+    DEFAULT_AGENT_SUPERVISOR_QUIET_SECONDS,
+    DEFAULT_AGENT_SUPERVISOR_STALLED_SECONDS,
+    DEFAULT_AGENT_SUPERVISOR_TERMINATION_GRACE_SECONDS,
+    DEFAULT_AGENT_SUPERVISOR_WARNING_SECONDS,
     DEFAULT_ARTIFACT_WRITE_TIMEOUT_SECONDS,
     DEFAULT_COORDINATION_COMMAND_TIMEOUT_SECONDS,
     DEFAULT_GIT_OPERATION_TIMEOUT_SECONDS,
     DEFAULT_PROGRESS_ASSESSMENT_TIMEOUT_SECONDS,
     DEFAULT_STREAM_DRAIN_TIMEOUT_SECONDS,
+    PROCESS_CANCELED_EXIT_CODE,
+    PROCESS_TIMEOUT_EXIT_CODE,
 )
+from .contracts import ArtifactRef, CheckpointStatus
 from .coordination.contracts import (
     AppendExecutionEvent,
     AttachExecutionArtifact,
@@ -40,28 +53,38 @@ from .coordination.contracts import (
 )
 from .coordination.outcomes import (
     AgentStatus,
+    CheckpointReason,
+    ExecutionActivityStatus,
     InfrastructureFailure,
     PersistenceStatus,
+    ProgressRecommendation,
     SupervisorStatus,
     TerminalOutcome,
     classify_failure,
     classify_persistence_failure,
     failure_category,
 )
+from .execution_events import (
+    ExecutionArtifactStore,
+    ExecutionStreamEvent,
+    ProcessEventSource,
+    execution_payload_hash,
+    has_meaningful_agent_progress,
+    normalize_jsonl_line,
+    redact_execution_text,
+)
 from .lifecycle_failure_harness import (
     LifecycleTransitionPoint,
     reach_lifecycle_transition,
 )
-from .staffing import FrontierHarness
-from .toolchains import project_environment
+from .runtime_metrics import SupervisionMetrics
+from .toolchains import project_environment, unprivileged_process_environment
+from .worktree_observation import WorktreeLost, WorktreeObservation, observe_worktree
 
 if TYPE_CHECKING:
     from .pow_wow.types import CommandRunCapture, ExecutionAttemptLease
 
-type EventSource = Literal["stdout", "stderr", "lifecycle"]
-type CheckpointReason = Literal[
-    "deadline", "operator_cancel", "supervisor_error", "stalled_progress"
-]
+_ResultT = TypeVar("_ResultT")
 
 _PROVIDER_UNAVAILABLE_OUTCOMES: Final = frozenset(
     {
@@ -85,44 +108,21 @@ again, so preserving those would accumulate trees nobody resumes.
 """
 type ProgressAssessor = Callable[[Mapping[str, object]], Mapping[str, object]]
 
-_MAX_EVENT_LINE_BYTES = 256 * 1024
-_MAX_EVENT_PAYLOAD_BYTES = 64 * 1024
-# asyncio's subprocess default is 64 KiB. Frontier JSONL events can contain a
-# single command result larger than that, so the default would terminate the
-# reader before later agent messages and the final verdict are observed. Keep
-# the transport limit above our own bounded event-line limit; normalization
-# still truncates persisted payloads to the limits above.
-_STREAM_READER_LIMIT_BYTES = _MAX_EVENT_LINE_BYTES * 4
-_SENSITIVE_KEY = re.compile(
-    r"(^|_)(thinking|reasoning|chain_of_thought|secret|password|token|credential|api_key)($|_)",
-    re.IGNORECASE,
-)
-_SENSITIVE_TEXT = re.compile(r"(?i)(api[_-]?key|password|secret|bearer)\s*[:=]\s*[^\s,;]+")
 
-
-class ArtifactWriter(Protocol):
-    def write_text(
-        self,
-        *,
-        role: str,
-        text: str,
-        workflow_id: str | None,
-        schema_version: str,
-        mime_type: str = "text/plain",
-    ) -> Any: ...
-
-    def read_text(self, artifact_id: str) -> str: ...
-
-
-@dataclass(frozen=True)
-class AgentStreamEvent:
-    lease_id: str
-    sequence: int
-    occurred_at: float
-    source: EventSource
-    kind: str
-    payload: dict[str, object]
-    payload_sha256: str
+def require_checkpoint_identity(
+    command: CreateExecutionCheckpoint, result: CoordinationResult
+) -> str:
+    """A checkpoint exists for this command only after its owner acknowledges its identity."""
+    if (
+        not isinstance(result, EntityResult)
+        or result.command is not command.name
+        or result.field != "checkpoint"
+    ):
+        raise TypeError("CreateExecutionCheckpoint requires a checkpoint entity")
+    checkpoint_id = result.entity.require_str("checkpoint_id")
+    if not checkpoint_id.strip():
+        raise ValueError("checkpoint identity cannot be whitespace")
+    return checkpoint_id
 
 
 @dataclass(frozen=True)
@@ -144,137 +144,45 @@ class SupervisedCommandResult:
     supervisor_failure: str | None = None
     persistence_status: PersistenceStatus = PersistenceStatus.PENDING
     persistence_failure: str | None = None
-    activity_status: str = "STARTING"
-    progress_recommendation: str | None = None
+    activity_status: ExecutionActivityStatus = ExecutionActivityStatus.STARTING
+    progress_recommendation: ProgressRecommendation | None = None
+    worktree_observation: WorktreeObservation | None = None
 
-
-def _redact_text(value: str, *, limit: int = 16_000) -> str:
-    clean = _SENSITIVE_TEXT.sub(r"\1=[REDACTED]", value)
-    return clean if len(clean) <= limit else f"{clean[:limit]}…[truncated]"
-
-
-def _safe_value(value: Any, *, depth: int = 0) -> Any:
-    if depth > 8:
-        return "[depth-limited]"
-    if isinstance(value, Mapping):
-        safe: dict[str, Any] = {}
-        for raw_key, item in value.items():
-            key = str(raw_key)
-            if _SENSITIVE_KEY.search(key):
-                safe[key] = "[REDACTED]"
-            elif key == "content" and isinstance(item, list):
-                safe[key] = [
-                    _safe_value(block, depth=depth + 1)
-                    for block in item
-                    if not (
-                        isinstance(block, Mapping)
-                        and str(block.get("type") or "").lower()
-                        in {"thinking", "reasoning", "analysis"}
-                    )
-                ]
-            else:
-                safe[key] = _safe_value(item, depth=depth + 1)
-        return safe
-    if isinstance(value, list):
-        return [_safe_value(item, depth=depth + 1) for item in value[:1000]]
-    if isinstance(value, str):
-        return _redact_text(value)
-    if isinstance(value, (int, float, bool)) or value is None:
-        return value
-    return _redact_text(str(value))
-
-
-def _event_kind(harness: str, payload: Mapping[str, Any]) -> str:
-    """Name one streamed event, refining it where the harness makes it possible.
-
-    The harness arrives as a string because it is read back off stored lease
-    rows as well as passed in live, so an unrecognised value is a stale row and
-    not a programmer error. It names the two frontier harnesses through the enum
-    rather than as literals, so renaming one is a find-references away rather
-    than a grep.
-
-    Unrecognised falls through to the raw kind, which is the honest answer:
-    unlike the command builder's old fall-through, no wrong thing is executed by
-    declining to refine a label.
-    """
-
-    raw = payload.get("type") or payload.get("event") or payload.get("kind")
-    kind = str(raw or "unknown")
-    if harness == FrontierHarness.CODEX.value and kind.startswith("item."):
-        item = payload.get("item")
-        if isinstance(item, Mapping) and item.get("type"):
-            return f"{kind}:{item['type']}"
-    if harness == FrontierHarness.CLAUDE.value and kind == "assistant":
-        return "assistant.message"
-    return kind
-
-
-def normalize_jsonl_line(
-    *,
-    harness: str,
-    source: EventSource,
-    line: bytes,
-) -> tuple[str, dict[str, object]]:
-    """Normalize one harness line without retaining private reasoning."""
-
-    raw_hash = hashlib.sha256(line).hexdigest()
-    if len(line) > _MAX_EVENT_LINE_BYTES:
-        return "oversized", {
-            "raw_sha256": raw_hash,
-            "size_bytes": len(line),
-            "omitted": True,
-        }
-    text = line.decode("utf-8", errors="replace").rstrip("\r\n")
-    if source == "stderr":
-        return "stderr", {"text": _redact_text(text), "raw_sha256": raw_hash}
-    try:
-        decoded = json.loads(text)
-    except json.JSONDecodeError:
-        return "unknown", {
-            "raw_sha256": raw_hash,
-            "text": _redact_text(text, limit=2000),
-            "malformed_json": True,
-        }
-    if not isinstance(decoded, Mapping):
-        return "unknown", {
-            "raw_sha256": raw_hash,
-            "value": _safe_value(decoded),
-        }
-    payload = _safe_value(decoded)
-    assert isinstance(payload, dict)
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    if len(canonical.encode("utf-8")) > _MAX_EVENT_PAYLOAD_BYTES:
-        return "oversized", {
-            "raw_sha256": raw_hash,
-            "normalized_sha256": hashlib.sha256(canonical.encode()).hexdigest(),
-            "size_bytes": len(canonical.encode("utf-8")),
-            "omitted": True,
-        }
-    return _event_kind(harness, decoded), payload
-
-
-def _payload_hash(payload: Mapping[str, object]) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def has_meaningful_agent_progress(source: EventSource, kind: str) -> bool:
-    """Classify visible agent output; liveness noise is deliberately excluded."""
-
-    if source != "stdout":
-        return False
-    normalized = kind.casefold()
-    return not any(
-        marker in normalized
-        for marker in (
-            "heartbeat",
-            "warning",
-            "keepalive",
-            "rate_limit",
-            "oversized",
-            "unknown",
+    @property
+    def allows_task_completion(self) -> bool:
+        """A successful process cannot discharge failed supervision or persistence."""
+        return (
+            self.capture.exit_code == 0
+            and self.agent_status is AgentStatus.COMPLETED
+            and self.agent_failure is None
+            and self.supervisor_status is SupervisorStatus.COMPLETED
+            and self.supervisor_failure is None
+            and self.supervisor_error is None
+            and self.persistence_status is PersistenceStatus.COMPLETED
+            and self.persistence_failure is None
+            and self.checkpoint_reason is None
+            and not self.deadline_reached
+            and not self.cancel_requested
         )
-    )
+
+
+@dataclass
+class _SupervisionState:
+    """Mutable facts shared by the supervisor's concurrent coroutines."""
+
+    started_monotonic: float
+    sequence: int = 0
+    fatal_error: str | None = None
+    last_progress_monotonic: float = 0.0
+    last_progress_sequence: int = 0
+    activity_status: ExecutionActivityStatus = ExecutionActivityStatus.STARTING
+    assessment_started: bool = False
+    progress_recommendation: ProgressRecommendation | None = None
+    requested_checkpoint_reason: CheckpointReason | None = None
+    persistence_failure: str | None = None
+
+    def __post_init__(self) -> None:
+        self.last_progress_monotonic = self.started_monotonic
 
 
 def _git_capture(
@@ -297,59 +205,101 @@ def _git_capture(
     return completed.stdout
 
 
-async def _execute_bounded_blocking_call(
-    func: Callable[..., Any],
-    *args: Any,
-    timeout_seconds: float,
-    **kwargs: Any,
-) -> Any:
-    """Run non-preemptible library code without letting it own the event loop.
+@dataclass(frozen=True)
+class _BoundedSupervisorIO:
+    """The three blocking ports the async supervisor is allowed to invoke."""
 
-    A raw daemon thread is intentional. ``asyncio.to_thread`` uses the loop's
-    default executor, and ``asyncio.run`` waits for canceled executor jobs at
-    shutdown. A wedged filesystem or in-process test transport would therefore
-    defeat an outer ``wait_for``. The operation should still carry its own
-    lower-level timeout when possible; this is the supervisor's final boundary.
-    """
+    coordination_command: Callable[[CoordinationCommand], CoordinationResult]
+    artifact_store: ExecutionArtifactStore
+    progress_assessor: ProgressAssessor | None
+    coordination_timeout_seconds: float
+    artifact_timeout_seconds: float
+    progress_timeout_seconds: float
 
-    loop = asyncio.get_running_loop()
-    future: asyncio.Future[Any] = loop.create_future()
+    async def coordination(self, command: CoordinationCommand) -> CoordinationResult:
+        result = await self._invoke(
+            lambda: self.coordination_command(command),
+            timeout_seconds=self.coordination_timeout_seconds,
+        )
+        return result
 
-    def settle(result: Any, error: BaseException | None) -> None:
-        if future.done():
-            return
-        if error is not None:
-            future.set_exception(error)
-        else:
+    async def write_text(
+        self,
+        *,
+        role: str,
+        text: str,
+        workflow_id: str | None,
+        schema_version: str,
+        mime_type: str,
+    ) -> ArtifactRef:
+        return await self._invoke(
+            lambda: self.artifact_store.write_text(
+                role=role,
+                text=text,
+                workflow_id=workflow_id,
+                schema_version=schema_version,
+                mime_type=mime_type,
+            ),
+            timeout_seconds=self.artifact_timeout_seconds,
+        )
+
+    async def assess_progress(self, evidence: Mapping[str, object]) -> Mapping[str, object]:
+        assessor = self.progress_assessor
+        if assessor is None:
+            raise RuntimeError("progress assessment was not configured")
+        result = await self._invoke(
+            lambda: assessor(evidence),
+            timeout_seconds=self.progress_timeout_seconds,
+        )
+        return result
+
+    @staticmethod
+    async def _invoke(
+        operation: Callable[[], _ResultT],
+        *,
+        timeout_seconds: float,
+    ) -> _ResultT:
+        """Bound a non-preemptible port without putting it on the loop executor."""
+
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[_ResultT] = loop.create_future()
+
+        def settle_result(result: _ResultT) -> None:
+            if future.done():
+                return
             future.set_result(result)
 
-    def invoke() -> None:
-        try:
-            result = func(*args, **kwargs)
-        except BaseException as exc:  # propagate into the supervising task
-            if not loop.is_closed():
-                loop.call_soon_threadsafe(settle, None, exc)
-        else:
-            if not loop.is_closed():
-                loop.call_soon_threadsafe(settle, result, None)
+        def settle_error(error: BaseException) -> None:
+            if not future.done():
+                future.set_exception(error)
 
-    threading.Thread(target=invoke, daemon=True, name="agent-supervisor-blocking-call").start()
-    return await asyncio.wait_for(future, timeout=timeout_seconds)
+        def invoke() -> None:
+            try:
+                result = operation()
+            except BaseException as exc:
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(settle_error, exc)
+            else:
+                if not loop.is_closed():
+                    loop.call_soon_threadsafe(settle_result, result)
+
+        threading.Thread(target=invoke, daemon=True, name="agent-supervisor-io").start()
+        return await asyncio.wait_for(future, timeout=timeout_seconds)
 
 
 class StreamingCommandSupervisor:
-    """Own one process group, its stream, heartbeats, and recovery checkpoint."""
+    """Own one frontier process group, lease, event stream, and recovery checkpoint."""
 
     def __init__(
         self,
         *,
         coordination_command: Callable[[CoordinationCommand], CoordinationResult],
-        artifact_writer: ArtifactWriter,
-        heartbeat_seconds: float = 30.0,
-        warning_seconds: float = 300.0,
-        termination_grace_seconds: float = 30.0,
-        quiet_seconds: float = 300.0,
-        stalled_seconds: float = 600.0,
+        artifact_writer: ExecutionArtifactStore,
+        heartbeat_seconds: float = DEFAULT_AGENT_SUPERVISOR_HEARTBEAT_SECONDS,
+        warning_seconds: float = DEFAULT_AGENT_SUPERVISOR_WARNING_SECONDS,
+        termination_grace_seconds: float = DEFAULT_AGENT_SUPERVISOR_TERMINATION_GRACE_SECONDS,
+        quiet_seconds: float = DEFAULT_AGENT_SUPERVISOR_QUIET_SECONDS,
+        stalled_seconds: float = DEFAULT_AGENT_SUPERVISOR_STALLED_SECONDS,
         progress_assessor: ProgressAssessor | None = None,
         coordination_timeout_seconds: float = DEFAULT_COORDINATION_COMMAND_TIMEOUT_SECONDS,
         git_timeout_seconds: float = DEFAULT_GIT_OPERATION_TIMEOUT_SECONDS,
@@ -357,8 +307,14 @@ class StreamingCommandSupervisor:
         artifact_write_timeout_seconds: float = DEFAULT_ARTIFACT_WRITE_TIMEOUT_SECONDS,
         stream_drain_timeout_seconds: float = DEFAULT_STREAM_DRAIN_TIMEOUT_SECONDS,
     ) -> None:
-        self.coordination_command = coordination_command
-        self.artifact_writer = artifact_writer
+        self.io = _BoundedSupervisorIO(
+            coordination_command=coordination_command,
+            artifact_store=artifact_writer,
+            progress_assessor=progress_assessor,
+            coordination_timeout_seconds=coordination_timeout_seconds,
+            artifact_timeout_seconds=artifact_write_timeout_seconds,
+            progress_timeout_seconds=progress_assessment_timeout_seconds,
+        )
         self.heartbeat_seconds = heartbeat_seconds
         self.warning_seconds = warning_seconds
         self.termination_grace_seconds = termination_grace_seconds
@@ -366,19 +322,11 @@ class StreamingCommandSupervisor:
             raise ValueError("stalled_seconds must be greater than quiet_seconds > 0")
         self.quiet_seconds = quiet_seconds
         self.stalled_seconds = stalled_seconds
-        self.progress_assessor = progress_assessor
-        self.coordination_timeout_seconds = coordination_timeout_seconds
         self.git_timeout_seconds = git_timeout_seconds
-        self.progress_assessment_timeout_seconds = progress_assessment_timeout_seconds
-        self.artifact_write_timeout_seconds = artifact_write_timeout_seconds
         self.stream_drain_timeout_seconds = stream_drain_timeout_seconds
 
     async def _coord(self, command: CoordinationCommand) -> CoordinationResult:
-        return await _execute_bounded_blocking_call(
-            self.coordination_command,
-            command,
-            timeout_seconds=self.coordination_timeout_seconds,
-        )
+        return await self.io.coordination(command)
 
     async def run(
         self,
@@ -400,36 +348,42 @@ class StreamingCommandSupervisor:
             raise ValueError("streaming supervision requires an opened execution lease")
         lease_id = lease.lease_id
         started = time.monotonic()
-        sequence = 0
+        state = _SupervisionState(started_monotonic=started)
+        measurements = SupervisionMetrics(harness)
         sequence_lock = asyncio.Lock()
         transcript: list[str] = []
         safe_stdout: list[str] = []
         safe_stderr: list[str] = []
         event_tail: list[str] = []
-        fatal_error: str | None = None
         cancel_event = asyncio.Event()
         stop_heartbeat = asyncio.Event()
         stop_activity = asyncio.Event()
-        last_progress_monotonic = started
-        last_progress_sequence = 0
-        activity_status = "STARTING"
-        assessment_started = False
-        progress_recommendation: str | None = None
-        requested_checkpoint_reason: CheckpointReason | None = None
         recent_progress_signatures: list[str] = []
 
-        async def persist(source: EventSource, kind: str, payload: dict[str, object]) -> int:
-            nonlocal sequence, fatal_error
+        async def persist(
+            source: ProcessEventSource | str,
+            kind: str,
+            payload: dict[str, object],
+        ) -> int:
+            source = ProcessEventSource(source)
+            with measurements.pending(source):
+                return await persist_sequenced(source, kind, payload)
+
+        async def persist_sequenced(
+            source: ProcessEventSource,
+            kind: str,
+            payload: dict[str, object],
+        ) -> int:
             async with sequence_lock:
-                sequence += 1
-                event = AgentStreamEvent(
+                state.sequence += 1
+                event = ExecutionStreamEvent(
                     lease_id=lease_id,
-                    sequence=sequence,
+                    sequence=state.sequence,
                     occurred_at=time.time(),
                     source=source,
                     kind=kind,
                     payload=payload,
-                    payload_sha256=_payload_hash(payload),
+                    payload_sha256=execution_payload_hash(payload),
                 )
                 transcript_line = json.dumps(
                     {
@@ -444,7 +398,7 @@ class StreamingCommandSupervisor:
                 )
                 transcript.append(transcript_line)
                 event_tail.append(f"{event.sequence}:{source}:{kind}")
-                del event_tail[:-30]
+                del event_tail[:-AGENT_EVENT_SUMMARY_TAIL_SIZE]
                 try:
                     await self._coord(
                         AppendExecutionEvent(
@@ -458,14 +412,13 @@ class StreamingCommandSupervisor:
                         )
                     )
                 except Exception as exc:  # fail closed; preserve the worktree
-                    fatal_error = f"event persistence failed: {type(exc).__name__}: {exc}"
+                    state.fatal_error = f"event persistence failed: {type(exc).__name__}: {exc}"
                     cancel_event.set()
                 return event.sequence
 
         async def mark_progress(observed_sequence: int, observed_kind: str) -> None:
-            nonlocal last_progress_monotonic, last_progress_sequence, activity_status
-            last_progress_monotonic = time.monotonic()
-            activity_status = "PROGRESSING"
+            state.last_progress_monotonic = time.monotonic()
+            state.activity_status = ExecutionActivityStatus.PROGRESSING
             progress_sequence = await persist(
                 "lifecycle",
                 "activity.progress",
@@ -474,7 +427,7 @@ class StreamingCommandSupervisor:
                     "observed_kind": observed_kind,
                 },
             )
-            last_progress_sequence = progress_sequence
+            state.last_progress_sequence = progress_sequence
 
         await persist(
             "lifecycle",
@@ -489,18 +442,22 @@ class StreamingCommandSupervisor:
         process = await asyncio.create_subprocess_exec(
             *command,
             cwd=cwd,
-            env=(dict(env or {}) if complete_environment else project_environment(cwd, env)),
+            env=unprivileged_process_environment(
+                dict(env or {}) if complete_environment else project_environment(cwd, env)
+            ),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
-            limit=_STREAM_READER_LIMIT_BYTES,
+            limit=AGENT_EVENT_STREAM_READER_LIMIT_BYTES,
         )
         started_sequence = await persist("lifecycle", "process.started", {"pid": process.pid})
         await mark_progress(started_sequence, "process.started")
 
-        async def read_stream(stream: asyncio.StreamReader, source: EventSource) -> None:
-            nonlocal fatal_error
+        async def read_stream(
+            stream: asyncio.StreamReader,
+            source: ProcessEventSource,
+        ) -> None:
             while True:
                 line = await stream.readline()
                 if not line:
@@ -523,14 +480,16 @@ class StreamingCommandSupervisor:
                         sequence=observed_sequence,
                     )
                 except Exception as exc:
-                    fatal_error = f"injected lifecycle stream failure: {type(exc).__name__}: {exc}"
+                    state.fatal_error = (
+                        f"injected lifecycle stream failure: {type(exc).__name__}: {exc}"
+                    )
                     cancel_event.set()
                     return
                 if has_meaningful_agent_progress(source, kind):
-                    signature = f"{kind}:{_payload_hash(payload)}"
+                    signature = f"{kind}:{execution_payload_hash(payload)}"
                     if signature not in recent_progress_signatures:
                         recent_progress_signatures.append(signature)
-                        del recent_progress_signatures[:-128]
+                        del recent_progress_signatures[:-AGENT_PROGRESS_SIGNATURE_WINDOW_SIZE]
                         await mark_progress(observed_sequence, kind)
 
         async def heartbeat() -> None:
@@ -545,6 +504,10 @@ class StreamingCommandSupervisor:
                             bool(result.metadata.values.get("cancel_requested"))
                             or result.entity.values.get("status") == "CANCEL_REQUESTED"
                         )
+                        if cancel_requested:
+                            measurements.cancel_observed(
+                                result.entity.values.get("cancel_requested_at"),
+                            )
                     await persist(
                         "lifecycle",
                         "lease.heartbeat",
@@ -554,32 +517,32 @@ class StreamingCommandSupervisor:
                         cancel_event.set()
                         return
                 except Exception as exc:
-                    nonlocal fatal_error
-                    fatal_error = f"lease heartbeat failed: {type(exc).__name__}: {exc}"
+                    state.fatal_error = f"lease heartbeat failed: {type(exc).__name__}: {exc}"
                     cancel_event.set()
                     return
                 with contextlib.suppress(TimeoutError):
                     await asyncio.wait_for(stop_heartbeat.wait(), timeout=self.heartbeat_seconds)
 
         async def activity_monitor() -> None:
-            nonlocal activity_status, assessment_started, progress_recommendation
-            nonlocal requested_checkpoint_reason
-            poll_seconds = max(0.01, min(self.heartbeat_seconds, self.quiet_seconds / 4))
+            poll_seconds = max(
+                AGENT_ACTIVITY_MINIMUM_POLL_SECONDS,
+                min(self.heartbeat_seconds, self.quiet_seconds / 4),
+            )
             while not stop_activity.is_set():
-                silent_seconds = time.monotonic() - last_progress_monotonic
-                if silent_seconds >= self.stalled_seconds and not assessment_started:
-                    activity_status = "STALLED_SUSPECTED"
+                silent_seconds = time.monotonic() - state.last_progress_monotonic
+                if silent_seconds >= self.stalled_seconds and not state.assessment_started:
+                    state.activity_status = ExecutionActivityStatus.STALLED_SUSPECTED
                     await persist(
                         "lifecycle",
                         "activity.stalled_suspected",
                         {
                             "silent_seconds": round(silent_seconds, 3),
-                            "last_meaningful_progress_sequence": last_progress_sequence,
+                            "last_meaningful_progress_sequence": state.last_progress_sequence,
                             "heartbeat_is_progress": False,
                         },
                     )
-                    assessment_started = True
-                    if self.progress_assessor is not None:
+                    state.assessment_started = True
+                    if self.io.progress_assessor is not None:
                         evidence: dict[str, object] = {
                             "schema_version": "execution_progress_evidence.v1",
                             "lease_id": lease_id,
@@ -587,9 +550,11 @@ class StreamingCommandSupervisor:
                             "pid": process.pid,
                             "elapsed_seconds": round(time.monotonic() - started, 3),
                             "silent_seconds": round(silent_seconds, 3),
-                            "last_meaningful_progress_sequence": last_progress_sequence,
+                            "last_meaningful_progress_sequence": state.last_progress_sequence,
                             "recent_events": list(event_tail),
-                            "task_contract": task_contract[:12_000],
+                            "task_contract": task_contract[
+                                :AGENT_PROGRESS_EVIDENCE_TASK_CONTRACT_LIMIT
+                            ],
                         }
                         with contextlib.suppress(Exception):
                             evidence["git_status"] = await asyncio.to_thread(
@@ -606,25 +571,17 @@ class StreamingCommandSupervisor:
                             )
                         await persist("lifecycle", "progress_assessment.started", evidence)
                         try:
-                            decision = dict(
-                                await _execute_bounded_blocking_call(
-                                    self.progress_assessor,
-                                    evidence,
-                                    timeout_seconds=self.progress_assessment_timeout_seconds,
+                            decision = dict(await self.io.assess_progress(evidence))
+                            try:
+                                recommendation = ProgressRecommendation(
+                                    str(decision.get("recommendation") or "").upper()
                                 )
-                            )
-                            recommendation = str(decision.get("recommendation") or "").upper()
-                            if recommendation not in {
-                                "CONTINUE",
-                                "CHECKPOINT",
-                                "SPLIT",
-                                "PAUSE_OPERATOR",
-                            }:
+                            except ValueError:
                                 raise ValueError(
                                     "junior recommendation must be CONTINUE, CHECKPOINT, "
                                     "SPLIT, or PAUSE_OPERATOR"
-                                )
-                            progress_recommendation = recommendation
+                                ) from None
+                            state.progress_recommendation = recommendation
                             raw_continuations = decision.get("continuations")
                             continuations = (
                                 list(raw_continuations)
@@ -633,34 +590,36 @@ class StreamingCommandSupervisor:
                             )
                             decision_payload: dict[str, object] = {
                                 "schema_version": "execution_progress_assessment.v1",
-                                "recommendation": recommendation,
+                                "recommendation": recommendation.value,
                                 "rationale": str(decision.get("rationale") or ""),
                                 "continuations": continuations,
                             }
                             await persist(
                                 "lifecycle", "progress_assessment.completed", decision_payload
                             )
-                            if recommendation != "CONTINUE":
-                                requested_checkpoint_reason = "stalled_progress"
+                            if recommendation is not ProgressRecommendation.CONTINUE:
+                                state.requested_checkpoint_reason = (
+                                    CheckpointReason.STALLED_PROGRESS
+                                )
                                 cancel_event.set()
                                 return
                         except Exception as exc:  # advisory failure never owns the process
                             await persist(
                                 "lifecycle",
                                 "progress_assessment.failed",
-                                {"error": _redact_text(f"{type(exc).__name__}: {exc}")},
+                                {"error": redact_execution_text(f"{type(exc).__name__}: {exc}")},
                             )
-                elif silent_seconds >= self.quiet_seconds and activity_status not in {
-                    "QUIET",
-                    "STALLED_SUSPECTED",
+                elif silent_seconds >= self.quiet_seconds and state.activity_status not in {
+                    ExecutionActivityStatus.QUIET,
+                    ExecutionActivityStatus.STALLED_SUSPECTED,
                 }:
-                    activity_status = "QUIET"
+                    state.activity_status = ExecutionActivityStatus.QUIET
                     await persist(
                         "lifecycle",
                         "activity.quiet",
                         {
                             "silent_seconds": round(silent_seconds, 3),
-                            "last_meaningful_progress_sequence": last_progress_sequence,
+                            "last_meaningful_progress_sequence": state.last_progress_sequence,
                             "heartbeat_is_progress": False,
                         },
                     )
@@ -669,11 +628,23 @@ class StreamingCommandSupervisor:
 
         if process.stdout is None or process.stderr is None:
             raise RuntimeError("supervised process pipes were not created")
-        stdout_task = asyncio.create_task(read_stream(process.stdout, "stdout"))
-        stderr_task = asyncio.create_task(read_stream(process.stderr, "stderr"))
+        stdout_stream, stderr_stream = process.stdout, process.stderr
+        stdout_task = asyncio.create_task(read_stream(stdout_stream, ProcessEventSource.STDOUT))
+        stderr_task = asyncio.create_task(read_stream(stderr_stream, ProcessEventSource.STDERR))
         heartbeat_task = asyncio.create_task(heartbeat())
         activity_task = asyncio.create_task(activity_monitor())
         process_task = asyncio.create_task(process.wait())
+
+        async def sample_stream_buffers() -> None:
+            try:
+                while True:
+                    measurements.sample_buffer("stdout", stdout_stream)
+                    measurements.sample_buffer("stderr", stderr_stream)
+                    await asyncio.sleep(AGENT_PROCESS_EXIT_POLL_SECONDS)
+            finally:
+                measurements.close_buffers()
+
+        buffer_task = asyncio.create_task(sample_stream_buffers())
 
         async def observe_process_exit() -> None:
             # asyncio's subprocess wait future can remain pending after the
@@ -682,7 +653,8 @@ class StreamingCommandSupervisor:
             # soon as the direct child exits, so observe that independently
             # and let the bounded stream-drain path close orphaned pipes.
             while process.returncode is None:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(AGENT_PROCESS_EXIT_POLL_SECONDS)
+            measurements.exit_observed()
 
         process_exit_task = asyncio.create_task(observe_process_exit())
         deadline_task = asyncio.create_task(asyncio.sleep(timeout_seconds))
@@ -708,22 +680,23 @@ class StreamingCommandSupervisor:
         deadline_reached = deadline_task in done
         cancel_requested = cancel_task in done and not deadline_reached
         checkpoint_reason: CheckpointReason | None = None
-        if requested_checkpoint_reason is not None:
-            checkpoint_reason = requested_checkpoint_reason
-        elif fatal_error:
-            checkpoint_reason = "supervisor_error"
+        if state.requested_checkpoint_reason is not None:
+            checkpoint_reason = state.requested_checkpoint_reason
+        elif state.fatal_error:
+            checkpoint_reason = CheckpointReason.SUPERVISOR_ERROR
         elif deadline_reached:
-            checkpoint_reason = "deadline"
+            checkpoint_reason = CheckpointReason.DEADLINE
         elif cancel_requested:
-            checkpoint_reason = "operator_cancel"
+            checkpoint_reason = CheckpointReason.OPERATOR_CANCEL
 
-        if checkpoint_reason is not None and process.returncode is None:
+        termination_reason = checkpoint_reason if process.returncode is None else None
+        if termination_reason is not None:
             await persist(
                 "lifecycle",
                 f"{checkpoint_reason}.reached",
                 {"elapsed_seconds": round(time.monotonic() - started, 3)},
             )
-            if checkpoint_reason == "deadline":
+            if checkpoint_reason is CheckpointReason.DEADLINE:
                 with contextlib.suppress(Exception):
                     await self._coord(
                         RequestExecutionCancel(
@@ -733,6 +706,7 @@ class StreamingCommandSupervisor:
                         )
                     )
             with contextlib.suppress(ProcessLookupError):
+                measurements.signal_sent()
                 os.killpg(process.pid, signal.SIGTERM)
             try:
                 await asyncio.wait_for(
@@ -776,6 +750,8 @@ class StreamingCommandSupervisor:
                         process_task.cancel()
                     await asyncio.gather(process_task, return_exceptions=True)
 
+        if process.returncode is not None:
+            measurements.exit_observed()
         stop_heartbeat.set()
         stop_activity.set()
         for task in (deadline_task, cancel_task, warning_task, process_exit_task):
@@ -802,6 +778,8 @@ class StreamingCommandSupervisor:
         if not process_task.done():
             process_task.cancel()
         await asyncio.gather(process_task, return_exceptions=True)
+        buffer_task.cancel()
+        await asyncio.gather(buffer_task, return_exceptions=True)
         await asyncio.gather(heartbeat_task, return_exceptions=True)
         if not activity_task.done():
             activity_task.cancel()
@@ -813,11 +791,29 @@ class StreamingCommandSupervisor:
             {
                 "returncode": returncode,
                 "elapsed_seconds": round(time.monotonic() - started, 3),
+                "exit_observed_elapsed_seconds": (
+                    measurements.exit_observed_at - started
+                    if measurements.exit_observed_at is not None
+                    else None
+                ),
             },
         )
 
         combined_output = "\n".join((*safe_stdout, *safe_stderr))
         agent_outcome = classify_failure(combined_output) if returncode else None
+        worktree_observation = None
+        if returncode and source_repo_path is not None and base_head_sha is not None:
+            worktree_observation = await asyncio.to_thread(observe_worktree, cwd)
+            if isinstance(worktree_observation, WorktreeLost):
+                agent_outcome = TerminalOutcome.EXECUTION_ENVIRONMENT_LOST
+            await persist(
+                "lifecycle",
+                "worktree.observed",
+                {
+                    "observation": type(worktree_observation).__name__,
+                    "path": str(worktree_observation.path),
+                },
+            )
         agent_status = AgentStatus.COMPLETED if returncode == 0 else AgentStatus.FAILED
         agent_failure = agent_outcome.value if agent_outcome is not None else None
         category = failure_category(agent_outcome)
@@ -837,7 +833,6 @@ class StreamingCommandSupervisor:
         # the coordination ledger's append-only execution-artifact relation.
         artifact_workflow_id: str | None = None
         persistence_errors: list[str] = []
-        persistence_failure: str | None = None
 
         async def write_and_attach_artifact(
             *,
@@ -846,16 +841,13 @@ class StreamingCommandSupervisor:
             schema_version: str,
             mime_type: str = "text/plain",
         ) -> str | None:
-            nonlocal persistence_failure
             try:
-                ref = await _execute_bounded_blocking_call(
-                    self.artifact_writer.write_text,
+                ref = await self.io.write_text(
                     role=role,
                     text=text,
                     workflow_id=artifact_workflow_id,
                     schema_version=schema_version,
                     mime_type=mime_type,
-                    timeout_seconds=self.artifact_write_timeout_seconds,
                 )
                 artifact_id = str(ref.artifact_id)
                 await self._coord(
@@ -869,13 +861,17 @@ class StreamingCommandSupervisor:
                 return artifact_id
             except Exception as exc:  # preserve the primary agent outcome
                 classified = classify_persistence_failure(exc)
-                persistence_failure = classified.value
+                state.persistence_failure = classified.value
                 detail = f"{role}: {type(exc).__name__}: {exc}"
                 persistence_errors.append(detail)
                 await persist(
                     "lifecycle",
                     "artifact.persist.failed",
-                    {"role": role, "failure": classified.value, "error": _redact_text(detail)},
+                    {
+                        "role": role,
+                        "failure": classified.value,
+                        "error": redact_execution_text(detail),
+                    },
                 )
                 return None
 
@@ -905,7 +901,7 @@ class StreamingCommandSupervisor:
         )
         capture_snapshot = checkpoint_reason is not None or provider_unavailable
         preserve_worktree = capture_snapshot
-        checkpoint_error = fatal_error
+        checkpoint_error = state.fatal_error
         status_artifact_id: str | None = None
         patch_artifact_id: str | None = None
         test_summary_artifact_id: str | None = None
@@ -963,54 +959,75 @@ class StreamingCommandSupervisor:
 
         if checkpoint_reason is not None:
             checkpoint_status = (
-                "FAILED"
+                CheckpointStatus.FAILED
                 if checkpoint_error
                 else (
-                    "PAUSED"
-                    if checkpoint_reason in {"operator_cancel", "stalled_progress"}
-                    else "PENDING_JUNIOR"
+                    CheckpointStatus.PAUSED
+                    if checkpoint_reason
+                    in {CheckpointReason.OPERATOR_CANCEL, CheckpointReason.STALLED_PROGRESS}
+                    else CheckpointStatus.PENDING_JUNIOR
                 )
             )
             reach_lifecycle_transition(
                 LifecycleTransitionPoint.BEFORE_CHECKPOINT_PERSISTED,
                 lease_id=lease_id,
                 reason=checkpoint_reason,
-                status=checkpoint_status,
+                status=checkpoint_status.value,
                 worktree_path=str(cwd),
                 base_head_sha=base_head_sha,
             )
-            result = await self._coord(
-                CreateExecutionCheckpoint(
-                    lease_id=lease_id,
-                    reason=checkpoint_reason,
-                    status=checkpoint_status,
-                    saga_id=saga_id,
-                    pow_wow_id=pow_wow_id,
-                    worktree_path=str(cwd),
-                    source_repo_path=str(source_repo_path) if source_repo_path else None,
-                    base_head_sha=base_head_sha,
-                    transcript_artifact_id=transcript_artifact_id,
-                    patch_artifact_id=patch_artifact_id,
-                    git_status_artifact_id=status_artifact_id,
-                    test_summary_artifact_id=test_summary_artifact_id,
-                    task_contract=task_contract[:50_000],
-                    event_summary="\n".join(event_tail),
-                    submit_review=checkpoint_status == "PENDING_JUNIOR",
-                    error=checkpoint_error,
+            checkpoint_command = CreateExecutionCheckpoint(
+                lease_id=lease_id,
+                reason=checkpoint_reason,
+                status=checkpoint_status,
+                saga_id=saga_id,
+                pow_wow_id=pow_wow_id,
+                worktree_path=str(cwd),
+                source_repo_path=str(source_repo_path) if source_repo_path else None,
+                base_head_sha=base_head_sha,
+                transcript_artifact_id=transcript_artifact_id,
+                patch_artifact_id=patch_artifact_id,
+                git_status_artifact_id=status_artifact_id,
+                test_summary_artifact_id=test_summary_artifact_id,
+                task_contract=task_contract[:AGENT_CHECKPOINT_TASK_CONTRACT_LIMIT],
+                event_summary="\n".join(event_tail),
+                submit_review=checkpoint_status is CheckpointStatus.PENDING_JUNIOR,
+                error=checkpoint_error,
+            )
+            try:
+                result = await self._coord(checkpoint_command)
+            except (TypeError, ValueError, AssertionError):
+                # A malformed coordination contract is not a storage outage.
+                raise
+            except Exception as exc:
+                state.persistence_failure = InfrastructureFailure.CHECKPOINT_WRITE_FAILED.value
+                detail = redact_execution_text(
+                    f"checkpoint persistence failed: {type(exc).__name__}: {exc}"
                 )
-            )
-            if isinstance(result, EntityResult):
-                checkpoint_id = str(result.entity.values.get("checkpoint_id") or "") or None
-            await persist(
-                "lifecycle",
-                "checkpoint.created",
-                {
-                    "checkpoint_id": checkpoint_id,
-                    "reason": checkpoint_reason,
-                    "status": checkpoint_status,
-                    "artifact_ids": checkpoint_artifact_ids,
-                },
-            )
+                persistence_errors.append(detail)
+                checkpoint_error = f"{checkpoint_error}; {detail}" if checkpoint_error else detail
+                await persist(
+                    "lifecycle",
+                    "checkpoint.persist.failed",
+                    {
+                        "failure": InfrastructureFailure.CHECKPOINT_WRITE_FAILED.value,
+                        "reason": checkpoint_reason.value,
+                        "artifact_ids": checkpoint_artifact_ids,
+                        "error": detail,
+                    },
+                )
+            else:
+                checkpoint_id = require_checkpoint_identity(checkpoint_command, result)
+                await persist(
+                    "lifecycle",
+                    "checkpoint.created",
+                    {
+                        "checkpoint_id": checkpoint_id,
+                        "reason": checkpoint_reason.value,
+                        "status": checkpoint_status.value,
+                        "artifact_ids": checkpoint_artifact_ids,
+                    },
+                )
 
         if provider_unavailable:
             # Named in the stream so the worktree is findable later. Without it
@@ -1028,15 +1045,23 @@ class StreamingCommandSupervisor:
                 },
             )
 
-        if checkpoint_reason == "deadline":
-            exit_code = 124
-            stderr = "process timed out; checkpoint preserved"
-        elif checkpoint_reason is not None:
-            exit_code = 130
-            stderr = f"process canceled; checkpoint preserved ({checkpoint_reason})"
+        termination_notice: str | None = None
+        if termination_reason is CheckpointReason.DEADLINE:
+            exit_code = PROCESS_TIMEOUT_EXIT_CODE
+            termination_notice = "process timed out"
+        elif termination_reason is not None:
+            exit_code = PROCESS_CANCELED_EXIT_CODE
+            termination_notice = f"process canceled ({termination_reason.value})"
         else:
             exit_code = returncode
-            stderr = "\n".join(safe_stderr)
+        stderr_parts = list(safe_stderr)
+        if termination_notice is not None:
+            stderr_parts.append(termination_notice)
+        if checkpoint_reason is not None:
+            stderr_parts.append(
+                "checkpoint recorded" if checkpoint_id else "checkpoint persistence failed"
+            )
+        stderr = "\n".join(stderr_parts)
         from .pow_wow.types import CommandRunCapture
 
         capture = CommandRunCapture(
@@ -1046,13 +1071,19 @@ class StreamingCommandSupervisor:
             stderr=stderr,
             exit_code=exit_code,
         )
-        if checkpoint_reason == "deadline":
+        if termination_reason is CheckpointReason.DEADLINE and not isinstance(
+            worktree_observation, WorktreeLost
+        ):
             agent_failure = InfrastructureFailure.DEADLINE_EXCEEDED.value
             category = failure_category(agent_failure)
-        if fatal_error and fatal_error.startswith("event persistence failed"):
-            persistence_failure = InfrastructureFailure.EVENT_WRITE_FAILED.value
-            persistence_errors.append(fatal_error)
-        supervisor_failure = fatal_error if checkpoint_reason == "supervisor_error" else None
+        if state.fatal_error and state.fatal_error.startswith("event persistence failed"):
+            state.persistence_failure = (
+                state.persistence_failure or InfrastructureFailure.EVENT_WRITE_FAILED.value
+            )
+            persistence_errors.append(state.fatal_error)
+        supervisor_failure = (
+            state.fatal_error if checkpoint_reason is CheckpointReason.SUPERVISOR_ERROR else None
+        )
         return SupervisedCommandResult(
             capture=capture,
             deadline_reached=deadline_reached,
@@ -1062,7 +1093,7 @@ class StreamingCommandSupervisor:
             checkpoint_artifact_ids=tuple(checkpoint_artifact_ids),
             checkpoint_reason=checkpoint_reason,
             preserve_worktree=preserve_worktree,
-            event_count=sequence,
+            event_count=state.sequence,
             supervisor_error=checkpoint_error,
             agent_status=agent_status,
             agent_failure=agent_failure,
@@ -1074,16 +1105,17 @@ class StreamingCommandSupervisor:
             persistence_status=(
                 PersistenceStatus.FAILED if persistence_errors else PersistenceStatus.COMPLETED
             ),
-            persistence_failure=persistence_failure,
-            activity_status="TERMINAL",
-            progress_recommendation=progress_recommendation,
+            persistence_failure=state.persistence_failure,
+            activity_status=ExecutionActivityStatus.TERMINAL,
+            progress_recommendation=state.progress_recommendation,
+            worktree_observation=worktree_observation,
         )
 
 
 __all__ = [
-    "AgentStreamEvent",
     "StreamingCommandSupervisor",
     "SupervisedCommandResult",
+    "require_checkpoint_identity",
     "has_meaningful_agent_progress",
     "normalize_jsonl_line",
 ]

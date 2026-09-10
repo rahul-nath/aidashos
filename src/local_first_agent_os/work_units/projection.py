@@ -22,7 +22,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..contracts import DispatchIntentStatus
-from ..coordination.dispatch import dispatch_intent_statuses
+from ..coordination.dispatch import dispatch_intent_observations
 from ..coordination.store import iso
 from . import repository as repo
 from .cancellation import (
@@ -43,6 +43,7 @@ from .lifecycle import (
     WorkUnitStatus,
 )
 from .plan import CompiledWorkPlan
+from .review_evidence import StaffReviewEvidence, latest_dispatch_reviews
 
 SCHEMA_VERSION_WORK_UNIT_VIEW = "work_unit_view.v1"
 
@@ -95,6 +96,9 @@ class MilestoneView(OperatorContract):
     # one morning read "parked" as "stuck". None when no intent exists yet, and
     # on event-log rebuilds, which cannot know live queue state.
     dispatch_status: DispatchIntentStatus | None = None
+    # Later settlement is evidence, not a rewrite of an earlier milestone timeout.
+    dispatch_failure_summary: str | None = None
+    staff_review: StaffReviewEvidence | None = None
     failure_code: str | None = None
     failure_summary: str | None = None
     result_summary: str | None = None
@@ -250,12 +254,13 @@ def build_work_unit_view(work_unit_id: str, *, recent_event_limit: int = 25) -> 
             artifact.artifact_type.value
         )
 
-    intent_statuses = dispatch_intent_statuses(
-        [item.dispatch_intent_id for item in executions if item.dispatch_intent_id]
-    )
+    intent_ids = [item.dispatch_intent_id for item in executions if item.dispatch_intent_id]
+    observations = dispatch_intent_observations(intent_ids)
+    reviews = latest_dispatch_reviews(intent_ids)
     milestone_views: list[MilestoneView] = []
     for execution in executions:
         compiled = plan.milestone(execution.stable_key)
+        observation = observations.get(execution.dispatch_intent_id or "")
         milestone_views.append(
             MilestoneView(
                 stable_key=execution.stable_key,
@@ -276,11 +281,9 @@ def build_work_unit_view(work_unit_id: str, *, recent_event_limit: int = 25) -> 
                 ),
                 child_workflow_id=execution.child_workflow_id,
                 dispatch_intent_id=execution.dispatch_intent_id,
-                dispatch_status=(
-                    intent_statuses.get(execution.dispatch_intent_id)
-                    if execution.dispatch_intent_id
-                    else None
-                ),
+                dispatch_status=observation.status if observation else None,
+                dispatch_failure_summary=observation.failure_summary if observation else None,
+                staff_review=reviews.get(execution.dispatch_intent_id or ""),
                 failure_code=execution.failure_code,
                 failure_summary=execution.failure_summary,
                 result_summary=execution.result_summary,
@@ -392,6 +395,8 @@ class WorkUnitSummary(OperatorContract):
 
     work_unit_id: str
     title: str
+    design_doc_name: str | None = None
+    target_project_id: str | None = None
     status: WorkUnitStatus
     current_phase: str
     root_workflow_id: str

@@ -7,6 +7,7 @@ import asyncio
 import os
 from pathlib import Path
 
+from local_first_agent_os import agent_adapters
 from local_first_agent_os.agent_adapters import AgentTask, ClaudeCodeAdapter
 
 # Real wall-clock time, spent in full on every run, and it has to cover
@@ -32,14 +33,15 @@ def test_claude_adapter_timeout_terminates_child(tmp_path: Path) -> None:
     executable.chmod(0o755)
     task = AgentTask(
         task_id="timeout-test",
-        pow_wow_id="pow-wow",
-        saga_id="saga",
-        role="staff",
         prompt="wait",
         timeout_seconds=TIMEOUT_SECONDS,  # type: ignore[arg-type]
     )
-
-    result = asyncio.run(ClaudeCodeAdapter(claude_bin=str(executable)).run(task))
+    original_executable = agent_adapters.CLAUDE_CLI_EXECUTABLE
+    agent_adapters.CLAUDE_CLI_EXECUTABLE = str(executable)
+    try:
+        result = asyncio.run(ClaudeCodeAdapter(model="test-model").run(task))
+    finally:
+        agent_adapters.CLAUDE_CLI_EXECUTABLE = original_executable
 
     assert not result.success
     # Derived rather than written out, so the budget and the message it produces

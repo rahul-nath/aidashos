@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import pytest
 from work_unit_support import compile_acceptance_doc
 
 from local_first_agent_os.coordination.approvals import submit_approval_request
@@ -306,3 +307,120 @@ def test_the_manual_adopt_verb_routes_through_the_shared_core() -> None:
 
     settle_source = inspect.getsource(integration_settlement.settle_landed_integration)
     assert "record_integrated_completion(" in settle_source
+
+
+def _running_landing(design_doc_id: str) -> tuple[str, str]:
+    work_unit_id = _blocked_unit(design_doc_id)
+    intent_id = _milestone_intent(work_unit_id)
+    for status in (MilestoneExecutionStatus.READY, MilestoneExecutionStatus.RUNNING):
+        repo.record_fact(
+            work_unit_id,
+            MilestoneTransition(
+                phase=LifecyclePhase.IMPLEMENT,
+                milestone_key=MILESTONE,
+                status=status,
+                attempt=2,
+                child_workflow_id="live-integration-wait",
+                dispatch_intent_id=intent_id,
+            ),
+        )
+    _land(intent_id, request_id=f"ir_{design_doc_id}")
+    return work_unit_id, intent_id
+
+
+def _expire_integration_wait(work_unit_id: str) -> dict:
+    from local_first_agent_os.work_units.execution import DispatchBackedExecutorRuntime
+    from local_first_agent_os.work_units.root_workflow import WorkUnitEngine
+
+    return WorkUnitEngine(runtime=DispatchBackedExecutorRuntime())._block_on_halted_dispatch(
+        work_unit_id=work_unit_id,
+        phase=LifecyclePhase.IMPLEMENT,
+        milestone_key=MILESTONE,
+        attempt=2,
+        child_workflow_id="live-integration-wait",
+        failure_code="integration_wait_elapsed",
+        failure_summary="test deadline elapsed",
+    )
+
+
+@pytest.mark.parametrize("timeout_first", [True, False])
+def test_timeout_and_landing_converge_without_duplicate_success(monkeypatch, timeout_first) -> None:
+    from local_first_agent_os.work_units import integration_settlement
+
+    work_unit_id, intent_id = _running_landing(f"landing_race_{timeout_first}")
+    original = integration_settlement.record_integrated_completion
+
+    def interleave(*args, **kwargs):
+        # The consumer has already observed RUNNING and prepared its context.
+        if timeout_first:
+            assert _expire_integration_wait(work_unit_id)["status"] == "BLOCKED"
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(integration_settlement, "record_integrated_completion", interleave)
+    outcomes = settle_landed_integrations()
+    settled = outcomes[0]
+    assert isinstance(settled, MilestoneSettled)
+    if not timeout_first:
+        assert _expire_integration_wait(work_unit_id)["status"] == "SUCCEEDED"
+    milestone = next(
+        m for m in repo.list_milestone_executions(work_unit_id) if m.stable_key == MILESTONE
+    )
+    assert milestone.status is MilestoneExecutionStatus.SUCCEEDED
+    assert milestone.attempt == settled.attempt == (3 if timeout_first else 2)
+    assert settled.resume_enqueued is timeout_first
+    successes = [
+        e
+        for e in repo.list_work_unit_events(work_unit_id)
+        if e.payload.get("milestone_key") == MILESTONE and e.payload.get("status") == "SUCCEEDED"
+    ]
+    assert len(successes) == 1
+    assert len(_landed_events("PROCESSED")) == 1
+    assert not _landed_events("FAILED")
+    assert isinstance(
+        settle_landed_integration({"intent_id": intent_id, "milestone_key": MILESTONE}),
+        SettlementSkipped,
+    )
+
+
+def test_integration_recovery_facts_roll_back_together(monkeypatch) -> None:
+    work_unit_id = _blocked_unit("landing_atomic_rollback")
+    intent_id = _milestone_intent(work_unit_id)
+    _land(intent_id, request_id="ir_atomic_rollback")
+    before = repo.list_work_unit_events(work_unit_id)
+    original = repo._record_fact_on_connection
+
+    def fail_between_facts(connection, unit_id, fact, **kwargs):
+        if (
+            isinstance(fact, MilestoneTransition)
+            and fact.status is MilestoneExecutionStatus.RUNNING
+        ):
+            raise RuntimeError("injected failure between recovery facts")
+        return original(connection, unit_id, fact, **kwargs)
+
+    monkeypatch.setattr(repo, "_record_fact_on_connection", fail_between_facts)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        settle_landed_integration({"intent_id": intent_id, "milestone_key": MILESTONE})
+    assert repo.list_work_unit_events(work_unit_id) == before
+    milestone = next(
+        m for m in repo.list_milestone_executions(work_unit_id) if m.stable_key == MILESTONE
+    )
+    assert milestone.status is MilestoneExecutionStatus.BLOCKED
+    assert milestone.attempt == 1
+    assert not repo.list_work_unit_artifacts(work_unit_id)
+
+
+def test_a_stale_timeout_cannot_park_a_replacement_attempt() -> None:
+    work_unit_id, _ = _running_landing("landing_stale_timeout")
+    before = repo.list_work_unit_events(work_unit_id)
+    current = repo.record_dispatch_wait_halt(
+        work_unit_id,
+        phase=LifecyclePhase.IMPLEMENT,
+        milestone_key=MILESTONE,
+        attempt=1,
+        child_workflow_id="obsolete-wait",
+        failure_code="integration_wait_elapsed",
+        failure_summary="old deadline",
+    )
+    assert current.status is MilestoneExecutionStatus.RUNNING
+    assert current.attempt == 2
+    assert repo.list_work_unit_events(work_unit_id) == before

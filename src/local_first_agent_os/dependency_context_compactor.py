@@ -22,7 +22,7 @@ import threading
 from typing import TYPE_CHECKING
 
 from .contracts import ModelRole, WorkflowStatus, WorkflowType, WorkspaceId
-from .delegation import agent_result_payload, delegate_agent_task
+from .delegation import agent_result_payload, delegate_local_model_task
 from .pow_wow.views import ViewCompactionRequest, ViewCompactor
 from .workflow.saga_support import run_coroutine_blocking
 
@@ -139,25 +139,17 @@ def build_dependency_context_compactor(runtime: AppRuntime) -> ViewCompactor:
         workflow_id = ensure_workflow_registered()
 
         async def run_compaction() -> str:
-            result = await delegate_agent_task(
+            result = await delegate_local_model_task(
                 runtime,
                 prompt=prompt,
-                tier="weak",
-                adapter="local_llama",
-                model_role=ModelRole.COMPACTOR.value,
-                role="dependency_context_compactor",
-                max_tokens=min(
+                model_role=ModelRole.COMPACTOR,
+                task_max_tokens=min(
                     _COMPACTION_MAX_TOKENS,
                     max(1, request.char_limit // _CHARS_PER_TOKEN),
                 ),
                 timeout_seconds=DEPENDENCY_COMPACTION_TIMEOUT_SECONDS,
                 model_params={"temperature": 0},
-                metadata={
-                    "workflow_id": workflow_id,
-                    "view_source": request.source,
-                    "char_limit": request.char_limit,
-                    "prompt_schema_version": prompt_spec.version,
-                },
+                workflow_id=workflow_id,
             )
             payload = agent_result_payload(result)
             # The local adapter reports a failed model call as a payload rather

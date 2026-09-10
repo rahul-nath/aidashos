@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .project_center import resolve_registered_project_path
 from .settings import Settings
 
 DEFAULT_PYTHON_VERSION = "3.13"
@@ -226,7 +227,10 @@ def _register_linked_project(registry_path: Path, spec: TargetProjectScaffold) -
         None,
     )
     if existing is not None:
-        if Path(str(existing.get("path") or "")).expanduser().resolve() != spec.expanded_path:
+        existing_path = resolve_registered_project_path(
+            Path(str(existing.get("path") or "")), registry_path
+        )
+        if existing_path.resolve() != spec.expanded_path:
             raise ValueError(f"Linked project id already points elsewhere: {spec.project_id}")
         return
     commands = ", ".join(json.dumps(command) for command in spec.verification_commands)

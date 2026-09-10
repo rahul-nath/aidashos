@@ -18,6 +18,20 @@ scrape_configs:
         labels:
           service: pi-daemon
 
+  - job_name: ledger-dispatcher
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8767"]
+        labels:
+          service: ledger-dispatcher
+
+  - job_name: ledger-dispatcher-tier
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8768", "host.docker.internal:8769", "host.docker.internal:8770"]
+        labels:
+          service: ledger-dispatcher-tier
+
   - job_name: alloy
     static_configs:
       - targets: ["alloy:12345"]

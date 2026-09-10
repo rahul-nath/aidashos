@@ -564,6 +564,29 @@ def test_pi_client_forwards_directive_specific_flags(monkeypatch) -> None:
     assert captured["text"] == "/saga --executor cli --worktree-root '/tmp/work trees' build"
 
 
+def test_pi_client_preserves_one_argument_directive_text(monkeypatch) -> None:
+    """A shell-quoted complete directive remains a directive, not model text."""
+
+    captured: dict[str, Any] = {}
+
+    def fake_run_daemon_query(text, **kwargs):
+        captured["text"] = text
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["pi", "--no-stream", "/approve-merge approval-1"],
+    )
+    monkeypatch.setattr(pi_command, "_run_daemon_query", fake_run_daemon_query)
+
+    pi_command.main()
+
+    assert captured["text"] == "/approve-merge approval-1"
+    assert captured["streaming"] is False
+
+
 def test_pi_main_keeps_walkthru_in_one_foreground_process(monkeypatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -610,6 +633,30 @@ def test_asr_directive_bypasses_daemon(monkeypatch) -> None:
 
     assert code == 0
     assert calls == ["/start /asr"]
+
+
+def test_approve_merge_directive_keeps_operator_authority_in_foreground(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        pi_command,
+        "_run_direct_query",
+        lambda text, **_kwargs: calls.append(text) or 0,
+    )
+
+    code = pi_command._run_daemon_query(
+        "/approve-merge approval-1",
+        workspace_id="general",
+        context_file=None,
+        max_window_tokens=None,
+        session_id=None,
+        json_output=False,
+        streaming=False,
+    )
+
+    assert code == 0
+    assert calls == ["/approve-merge approval-1"]
 
 
 def test_ocr_capture_bypasses_daemon_and_announces_foreground(

@@ -3,8 +3,9 @@
 
 """Bounded automatic re-drive of transient-blocked WorkUnits.
 
-A TRANSIENT failure means the request died in flight and the work was never
-judged: `attempt_charge` leaves it uncharged, and `decide_retry` grants such a
+A TRANSIENT failure means no correctness judgment was reached, including a
+quota refusal under a fallback-enabled pairing policy.
+`attempt_charge` leaves it uncharged, and `decide_retry` grants such a
 milestone a fresh execution ordinal without consuming its budget. The
 boundedness of that grant used to rest on inaction - nothing re-drove a BLOCKED
 milestone on its own - which also meant a dropped provider stream parked the

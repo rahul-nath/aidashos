@@ -204,7 +204,10 @@ def normalize_paths(paths: Iterable[str]) -> list[str]:
 # is what lets a row ask for a continuation ('RESUME') instead of a first start
 # ('START', the default every existing row gets).
 # docs/decision_triggered_resume_gawd.md is the spec.
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
+# This conversion belongs only to the version that introduced these columns.
+# Later schema upgrades must preserve unresolved agent/outcome observations.
+_STRUCTURED_OUTCOME_SCHEMA_VERSION = 8
 
 # The DDL that `SCHEMA_VERSION` names, pinned by content.
 #
@@ -224,8 +227,8 @@ SCHEMA_VERSION = 22
 #   then update this hash.
 # - The edit changed only comments or whitespace. Update this hash alone.
 #
-# Recomputed with `shasum -a 256 agent_coordination_postgres_schema.sql`.
-SCHEMA_CONTENT_HASH = "30495927625c4d1ab7aacb98525b0dd31476090d347cd76df980be2c461ee1ee"
+# Recomputed from the packaged SQL file beside this module.
+SCHEMA_CONTENT_HASH = "6037f9c4e66678b35ff538c9f30e6286f418784949a3804e99593caafa71028c"
 
 # The two ways a runtime and a database can disagree about the schema, as stable
 # `failure.v1` codes. Both are operator conditions: the ledger is reachable and
@@ -236,8 +239,7 @@ SCHEMA_NEWER_THAN_RUNTIME = "COORDINATION_SCHEMA_NEWER_THAN_RUNTIME"
 POSTGRES_SCHEMA_COMPONENT = "agent_coordination"
 # Stable, signed 64-bit key reserved for this component's schema migration.
 POSTGRES_SCHEMA_ADVISORY_LOCK_KEY = 5_861_874_679_801_903_697
-_REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-POSTGRES_SCHEMA_PATH = _REPOSITORY_ROOT / "agent_coordination_postgres_schema.sql"
+POSTGRES_SCHEMA_PATH = Path(__file__).with_name("agent_coordination_postgres_schema.sql")
 _POSTGRES_SCHEMA_SQL: str | None = None
 _SCHEMA_READY: set[str] = set()
 
@@ -674,7 +676,8 @@ def _ensure_postgres_schema(c: ConnectionLike, *, allow_migration: bool) -> None
     _assert_migration_was_asked_for(applied_version, allow_migration=allow_migration)
     if applied_version != SCHEMA_VERSION:
         c.executescript(load_postgres_schema_sql())
-        _backfill_structured_outcomes(c)
+        if applied_version is not None and applied_version < _STRUCTURED_OUTCOME_SCHEMA_VERSION:
+            _backfill_structured_outcomes(c)
         c.execute(
             """
             INSERT INTO coordination_schema_versions(component, version, applied_at)
@@ -1210,7 +1213,10 @@ def tx():
     _connections.depth = _transaction_depth() + 1
     try:
         yield connection
-        connection.commit()
+        from ..runtime_metrics import event_commit
+
+        with event_commit():
+            connection.commit()
     except Exception:
         with contextlib.suppress(Exception):
             connection.rollback()

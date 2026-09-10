@@ -1,31 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Rahul Nath <https://github.com/rahul-nath>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Every legal frontier pairing, ordered by quality, walked by a live probe.
+"""Rank model/effort pairs and check eligibility through an injected probe.
 
-This replaces "which pairing did someone write down, and is its vendor inside a
-five-hour timer" with "which of every pairing the declared models admit is
-actually answering right now". Two independent changes, and both were forced by
-the same day's evidence:
-
-The ordering is derived rather than declared. `configs/staffing.toml` carried a
-hand-maintained `fallback = [...]` chain that could only name pairings a person
-had thought of, went stale twice in August 2026, and grew one entry per vendor
-combination. Here every (senior, staff) pair the quality chart admits is
-generated, filtered by the rule that a reviewer may not be weaker than the
-implementer it reviews, and scored.
-
-Availability is measured rather than remembered. The flat usage-limit cooldown
-is a guess about a provider's internal state; on 2026-08-30 it benched both
-vendors for hours while a one-line nonce to each answered `ok`. So there is no
-belief to keep here: the walk asks, and the first pairing whose two models both
-answer is the one that runs. A short TTL is the only memory, and it exists to
-stop re-asking within one scheduling pass rather than to model a quota.
-
-Deliberately no per-model availability bookkeeping. Tracking which model is
-spent would be a second source of truth beside the probe, and the operator's
-ruling on 2026-08-30 was that exceptions to "just ask" are how a simple rule
-becomes a pile of minutiae. The probe is the availability check.
+Scores and the diversity bonus are operator preferences, not calibrated review
+accuracy. The probe's caller owns its evidence: WorkUnit selection uses recent
+real dispatch outcomes without making a paid model call. Fixed selection
+bypasses ranking, not eligibility, and supplies exactly one candidate.
 """
 
 from __future__ import annotations
@@ -34,33 +15,29 @@ import tomllib
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import assert_never
 
-from .staffing import Harness
+from .staffing import (
+    AutoRanked,
+    ExplicitPairs,
+    FrontierPairing,
+    Harness,
+    PairingSelection,
+    PreferredPair,
+    RankedAny,
+    SameProviderOnly,
+    StrictPair,
+)
 from .vocabulary import DispatchTier
 
 
 @dataclass(frozen=True)
 class ScoredModel:
-    """One model AT ONE EFFORT LEVEL, and how good the operator rates it.
+    """One model at one effort level with its operator-declared quality score.
 
-    Keyed on the pair because effort moves quality as much as the model choice
-    does. `claude-opus-5` at low effort and `qwen3.8-27b-mtp` at xhigh both
-    score 52 on the leaderboard the operator read on 2026-08-30, and
-    `gpt-5.6-sol` at low scores 51 - so a local 27B running hard outranks two
-    frontier models running lazily. A chart keyed on the model alone cannot say
-    that, and staffing that cannot say it will pay frontier prices for a lazy
-    turn.
-
-    `harness` is how this model is spawned; `vendor` is whose training run it
-    came from. Diversity keys on the vendor, because independent error modes are
-    a property of the training run rather than of the process that launches it -
-    Gemma and Qwen are both `pi` here and are Google and Alibaba models, so an
-    all-local pairing of the two is genuinely cross-vendor.
-
-    `effort` is passed to the harness verbatim (`--effort` for claude,
-    `-c model_reasoning_effort=` for codex). ``None`` is a local model, which by
-    the operator's ruling always runs at its top setting: there is no per-token
-    bill to economise against.
+    Harness controls launching; vendor tags control the diversity bonus.
+    Neither tag establishes independent errors. Effort is passed verbatim to
+    the harness; None means no effort override, not a measured quality level.
     """
 
     harness: Harness
@@ -78,12 +55,7 @@ class ScoredModel:
 
     @property
     def seat(self) -> tuple[Harness, str]:
-        """What makes two rows the same model, ignoring effort.
-
-        A pairing may not seat one model twice even at two different efforts:
-        the author would be re-reading its own work with a bigger thinking
-        budget, which is not the independent second opinion a review is.
-        """
+        """The model identity shared by availability checks across effort levels."""
 
         return (self.harness, self.model)
 
@@ -142,7 +114,13 @@ class Pairing:
 def load_quality_chart(path: Path) -> QualityChart:
     """Read the operator's declared scores, refusing a chart that cannot rank."""
 
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    return parse_quality_chart(path.read_text(encoding="utf-8"), source=str(path))
+
+
+def parse_quality_chart(text: str, *, source: str = "quality chart") -> QualityChart:
+    """Parse the same snapshot whose hash identifies the selection evidence."""
+
+    data = tomllib.loads(text)
     models: list[ScoredModel] = []
     for entry in data.get("models", []):
         harness = Harness(str(entry["harness"]))
@@ -159,11 +137,11 @@ def load_quality_chart(path: Path) -> QualityChart:
             )
         )
     if not models:
-        raise ValueError(f"{path} declares no models, so no pairing can be ranked")
+        raise ValueError(f"{source} declares no models, so no pairing can be ranked")
     seen = {(item.harness, item.model, item.reasoning_effort) for item in models}
     if len(seen) != len(models):
         raise ValueError(
-            f"{path} scores the same model at the same effort twice, so its ranking is ambiguous"
+            f"{source} scores the same model at the same effort twice, so its ranking is ambiguous"
         )
     scoring = data.get("scoring", {})
     bonus = int(scoring.get("diversity_bonus", 0))
@@ -177,40 +155,87 @@ def load_quality_chart(path: Path) -> QualityChart:
 
 
 def ordered_pairings(chart: QualityChart) -> tuple[Pairing, ...]:
-    """Every legal pairing, best first.
+    """Rank pairs whose reviewer scores at least as highly as the implementer.
 
-    Legal means two distinct models whose staff seat is not weaker than its
-    senior seat. Both halves are load-bearing. A pairing naming one model twice
-    is not a review at all - the author re-reads itself - which
-    `FrontierPairing` already refuses at load. A staff seat weaker than its
-    senior is the failure the 2026-08-09 assessment named: the better critic
-    reviews, or the review is theatre.
-
-    Equal quality is permitted. Two different models rated the same still give
-    the independent second opinion the review exists for.
-
-    Ties in score are broken by the cross-vendor pairing first and then by label,
-    so the order is total and stable across runs. An unstable order would make
-    the probe walk ask different models on identical inputs, which is the kind of
-    nondeterminism this system exists to remove.
+    Scores and the diversity bonus are operator heuristics, not measured bug
+    detection rates. Same-model pairs are valid; session isolation is enforced
+    by the executor. Fixed selection bypasses these ranking preferences.
+    Ties favor cross-vendor pairs, then label, for a total stable order.
     """
 
     candidates: list[Pairing] = []
     for senior in chart.models:
         for staff in chart.models:
-            # Same model at two efforts is still one model, and one model cannot
-            # review itself however hard the second pass thinks.
-            if senior.seat == staff.seat:
-                continue
             if staff.quality < senior.quality:
                 continue
-            cross_vendor = senior.vendor != staff.vendor
-            score = senior.quality + staff.quality + (chart.diversity_bonus if cross_vendor else 0)
-            candidates.append(
-                Pairing(senior=senior, staff=staff, score=score, cross_vendor=cross_vendor)
-            )
+            candidates.append(_score_pair(chart, senior, staff))
     candidates.sort(key=lambda item: (-item.score, not item.cross_vendor, item.label))
     return tuple(candidates)
+
+
+def _score_pair(chart: QualityChart, senior: ScoredModel, staff: ScoredModel) -> Pairing:
+    cross_vendor = senior.vendor != staff.vendor
+    return Pairing(
+        senior=senior,
+        staff=staff,
+        score=senior.quality + staff.quality + (chart.diversity_bonus if cross_vendor else 0),
+        cross_vendor=cross_vendor,
+    )
+
+
+def fixed_pair(chart: QualityChart, declaration: FrontierPairing) -> Pairing:
+    """Resolve exact model/effort pins; a typo cannot fall through to another row."""
+
+    def resolve(tier: DispatchTier) -> ScoredModel:
+        slot = declaration.seats()[tier]
+        for model in chart.models:
+            if (model.harness, model.model, model.reasoning_effort) == (
+                slot.harness,
+                slot.model,
+                slot.reasoning_effort,
+            ):
+                return model
+        raise ValueError(
+            f"fixed pairing {declaration.name!r} {tier.value} has no exact quality chart "
+            f"entry for {slot.harness.value}:{slot.model}@{slot.reasoning_effort}"
+        )
+
+    return _score_pair(chart, resolve(DispatchTier.SENIOR), resolve(DispatchTier.STAFF))
+
+
+def policy_candidates(
+    chart: QualityChart, selection: PairingSelection, declarations: Mapping[str, FrontierPairing]
+) -> tuple[Pairing, ...]:
+    """Policy defines the search space; availability cannot expand it."""
+
+    match selection:
+        case AutoRanked():
+            return ordered_pairings(chart)
+        case StrictPair(pairing=name):
+            return (fixed_pair(chart, declarations[name]),)
+        case PreferredPair(pairing=name, fallback=fallback):
+            preferred = fixed_pair(chart, declarations[name])
+            match fallback:
+                case ExplicitPairs(pairings=names):
+                    alternatives = tuple(fixed_pair(chart, declarations[item]) for item in names)
+                case RankedAny():
+                    alternatives = ordered_pairings(chart)
+                case SameProviderOnly():
+                    alternatives = tuple(
+                        pair
+                        for pair in ordered_pairings(chart)
+                        if all(
+                            (actual.harness, actual.vendor) == (requested.harness, requested.vendor)
+                            for actual, requested in zip(
+                                pair.models(), preferred.models(), strict=True
+                            )
+                        )
+                    )
+                case _:
+                    assert_never(fallback)
+            return tuple(dict.fromkeys((preferred, *alternatives)))
+        case _:
+            assert_never(selection)
 
 
 @dataclass(frozen=True)
@@ -310,6 +335,7 @@ def select_live_pairing(
     cache: ProbeCache,
     now: float,
     candidates: Sequence[Pairing] | None = None,
+    on_rejection: Callable[[ScoredModel, ProbeResult], None] | None = None,
 ) -> PairingOutcome:
     """Walk the quality order and take the first pairing that answers.
 
@@ -322,6 +348,7 @@ def select_live_pairing(
     ordered = tuple(candidates) if candidates is not None else ordered_pairings(chart)
     probed: list[str] = []
     refusals: dict[str, str] = {}
+    rejected: set[tuple[Harness, str]] = set()
 
     def alive(model: ScoredModel) -> bool:
         cached = cache.get(model.harness, model.model, now=now)
@@ -337,6 +364,10 @@ def select_live_pairing(
             probed.append(model.label)
         if not cached.alive:
             refusals.setdefault(model.label, cached.detail or "did not answer")
+            if model.seat not in rejected:
+                rejected.add(model.seat)
+                if on_rejection is not None:
+                    on_rejection(model, cached)
         return cached.alive
 
     for pairing in ordered:
@@ -391,8 +422,11 @@ __all__ = [
     "QualityChart",
     "ScoredModel",
     "describe",
+    "fixed_pair",
     "iter_model_labels",
     "load_quality_chart",
+    "parse_quality_chart",
+    "policy_candidates",
     "ordered_pairings",
     "select_live_pairing",
 ]

@@ -20,7 +20,6 @@ from staffing_support import repo_bench
 
 from local_first_agent_os.agent_execution_supervisor import (
     StreamingCommandSupervisor,
-    _execute_bounded_blocking_call,
     has_meaningful_agent_progress,
     normalize_jsonl_line,
 )
@@ -50,6 +49,7 @@ from local_first_agent_os.coordination.execution import (
     open_execution_lease,
     request_execution_cancel,
 )
+from local_first_agent_os.coordination.outcomes import CheckpointReason
 from local_first_agent_os.coordination.store import set_root
 from local_first_agent_os.pow_wow import (
     CliPowWowExecutor,
@@ -430,6 +430,12 @@ def test_normal_exit_does_not_hang_when_escaped_descendant_holds_output_pipes(
     kinds = [event["kind"] for event in events]
     assert kinds.count("stream.drain_abandoned") == 1
     assert kinds.index("stream.drain_abandoned") < kinds.index("process.exited")
+    exited = next(
+        event
+        for event in list_execution_events(lease.lease_id or "")["events"]
+        if event["kind"] == "process.exited"
+    )["payload"]
+    assert exited["exit_observed_elapsed_seconds"] < exited["elapsed_seconds"]
     assert kinds.index("process.exited") < kinds.index("agent.finished")
 
 
@@ -506,22 +512,18 @@ def test_executor_preserves_worktree_when_checkpoint_persistence_fails(
 
     claude = tmp_path / "term-resistant-claude"
     claude.write_text(
-        "#!/usr/bin/env python3\n"
-        "import signal, sys, time\n"
-        "from pathlib import Path\n"
+        "#!/bin/sh\n"
         # This fake stands in for whichever vendor the bench seats as senior, and
         # a codex-seated spawn is preceded by `codex login status`.
-        "if 'login' in sys.argv:\n"
-        "    print('logged in')\n"
-        "    raise SystemExit(0)\n"
-        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "Path('SURVIVED.txt').write_text('preserve me\\n', encoding='utf-8')\n"
+        "case \"$*\" in *login*) printf 'logged in\\n'; exit 0;; esac\n"
+        "trap '' TERM\n"
+        "printf 'preserve me\\n' > SURVIVED.txt\n"
         # The readiness sentinel stays in the leased worktree. The process
         # boundary correctly forbids the old test from writing it beside the
         # source repository. Observing it means the
         # SIGTERM guard and SURVIVED.txt are already in place.
-        "Path('READY').write_text('ready\\n', encoding='utf-8')\n"
-        "time.sleep(30)\n",
+        "printf 'ready\\n' > READY\n"
+        "while :; do :; done\n",
         encoding="utf-8",
     )
     claude.chmod(0o755)
@@ -580,7 +582,7 @@ def test_executor_preserves_worktree_when_checkpoint_persistence_fails(
     worktree_path = Path(run_artifact["worktree"]["worktree_path"])
     try:
         supervisor_payload = run_artifact["streaming_supervisor"]
-        assert supervisor_payload["checkpoint_reason"] == "supervisor_error"
+        assert supervisor_payload["checkpoint_reason"] == CheckpointReason.DEADLINE
         assert supervisor_payload["checkpoint_id"] is None
         assert supervisor_payload["preserve_worktree"] is True
         assert "checkpoint persistence unavailable" in supervisor_payload["supervisor_error"]
@@ -592,6 +594,8 @@ def test_executor_preserves_worktree_when_checkpoint_persistence_fails(
         kinds = [event["kind"] for event in list_execution_events(lease_id, limit=1000)["events"]]
         assert "deadline.reached" in kinds
         assert kinds.count("process.sigkill") == 1
+        assert "checkpoint.persist.failed" in kinds
+        assert "checkpoint.created" not in kinds
     finally:
         subprocess.run(
             ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree_path)],
@@ -727,20 +731,6 @@ def test_heartbeats_do_not_mask_stall_and_junior_can_continue(tmp_path: Path, mo
     assert current["progress_assessment_status"] == "COMPLETED"
     assert current["progress_assessment_decision"]["recommendation"] == "CONTINUE"
     assert current["last_meaningful_progress_sequence"] is not None
-
-
-def test_blocking_call_timeout_does_not_wait_for_daemon_thread() -> None:
-    started = time.monotonic()
-
-    async def call() -> None:
-        try:
-            await _execute_bounded_blocking_call(time.sleep, 2, timeout_seconds=0.05)
-        except TimeoutError:
-            return
-        raise AssertionError("blocking call unexpectedly completed")
-
-    asyncio.run(call())
-    assert time.monotonic() - started < 0.5
 
 
 def test_blocked_artifact_write_cannot_prevent_terminal_result(tmp_path: Path, monkeypatch) -> None:
