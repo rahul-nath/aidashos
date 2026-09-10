@@ -6,7 +6,4 @@
 [build.environment]
   NODE_VERSION = "22.19.0"
 
-[[headers]]
-  for = "/assets/*"
-  [headers.values]
-    Cache-Control = "public, max-age=31536000, immutable"
+# public/_headers travels with dist for repository builds and manual deploys.

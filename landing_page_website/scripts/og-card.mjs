@@ -39,7 +39,7 @@ const GREEN = "#46d17c";
 const MONO = "Menlo, 'SF Mono', SFMono-Regular, Consolas, monospace";
 const SANS = "'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif";
 
-const HEADLINE = "Plans, not prompts.";
+const HEADLINE = "Make Plans, Not Prompts";
 const SUBLINE = "Durable agent work. Local evidence. Your approval.";
 
 const WIDTH = 1200;

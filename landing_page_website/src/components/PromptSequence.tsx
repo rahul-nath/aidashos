@@ -1,9 +1,8 @@
 import { PROMPTS } from "../content";
 import { CopyButton } from "./CopyButton";
 
-// The prompt cards sit directly under the terminal on purpose: the clone
-// command is the human's step, and these are the agent's. Each copy button is
-// a funnel event, which is the only measurement this page takes.
+// Both the homepage and quickstart render this canonical prompt sequence.
+// Copy controls use the same source text as the expandable preview.
 export function PromptSequence() {
   return (
     <div className="prompt-sequence">

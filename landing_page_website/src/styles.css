@@ -622,7 +622,14 @@ section h2 {
   }
 
   .prompt-head {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .prompt-head > .copy {
+    grid-column: 2;
+    justify-self: start;
+    min-height: 44px;
   }
 
   .stack table {
@@ -817,5 +824,44 @@ section h2 {
   .routing-rule-head {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+/* About keeps personal context readable without competing with the product. */
+.about-copy {
+  padding-top: 2rem;
+}
+
+.about-copy p {
+  color: var(--muted);
+  max-width: 46rem;
+  font-size: 1.06rem;
+  margin: 0 0 1.25rem;
+}
+
+.about-portrait {
+  width: 80px;
+  height: 80px;
+  object-fit: cover;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 560px) {
+  .site-header {
+    flex-wrap: wrap;
+  }
+
+  .site-header nav {
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.4rem 1rem;
+  }
+
+  .site-header nav a {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
   }
 }

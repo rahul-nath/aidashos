@@ -9,7 +9,7 @@ import {
 } from "./content";
 import { track } from "./telemetry";
 
-export type PagePath = "/" | "/quickstart/" | "/docs/";
+export type PagePath = "/" | "/quickstart/" | "/docs/" | "/about/";
 
 export interface PageMetadata {
   path: PagePath;
@@ -20,7 +20,7 @@ export interface PageMetadata {
 export const STATIC_ROUTES: readonly PageMetadata[] = [
   {
     path: "/",
-    title: "aidashos - plans, not prompts",
+    title: "Make Plans, Not Prompts - aidashos",
     description:
       "Give your coding agent a local path from design document to independently reviewed, approval-gated change.",
   },
@@ -36,6 +36,12 @@ export const STATIC_ROUTES: readonly PageMetadata[] = [
     description:
       "Start, operate, and understand aidashos through its focused guides and architecture references.",
   },
+  {
+    path: "/about/",
+    title: "About Rahul Nath - aidashos",
+    description:
+      "Why Rahul Nath is building aidashos: local models, durable human supervision, and useful personal interaction history.",
+  },
 ] as const;
 
 export function normalizePagePath(pathname: string): PagePath {
@@ -45,6 +51,9 @@ export function normalizePagePath(pathname: string): PagePath {
   }
   if (barePath === "/docs" || barePath === "/docs/") {
     return "/docs/";
+  }
+  if (barePath === "/about" || barePath === "/about/") {
+    return "/about/";
   }
   return "/";
 }
@@ -123,8 +132,9 @@ function SiteHeader({ path }: { path: PagePath }) {
         aidash<span className="wordmark-accent">os</span>
       </a>
       <nav aria-label="Site">
-        <a href="/" aria-current={current("/")}>Home</a>
-        <a href="/quickstart/" aria-current={current("/quickstart/")}>Quickstart</a>
+        <a href="/about/" aria-current={current("/about/")}>About</a>
+        <a href="/#how">How it works</a>
+        <a href="/#faq">FAQ</a>
         <a href="/docs/" aria-current={current("/docs/")}>Docs</a>
         <a
           className="github-link"
@@ -155,24 +165,47 @@ function HomePage() {
   return (
     <>
       <section className="hero">
-        <p className="kicker">Local-first delivery for coding agents</p>
-        <h1>Plans, not prompts.</h1>
+        <p className="kicker">A local-first agent OS</p>
+        <h1>Make Plans, Not Prompts</h1>
         <p className="lede">
-          When work needs more than a chat, give your current AI a local path from design
-          document to independently reviewed, approval-gated change.
+          aidashos turns a design document into governed agent work on your own machine:
+          compiled plans, isolated worktrees, your project's own test commands, cross-vendor
+          review, and an approval gate before anything merges. Closing your laptop never
+          loses aidashos system state.
         </p>
         <ul className="badges" aria-label="Properties">
-          <li>Local control state</li>
-          <li>Durable plans</li>
-          <li>Subscription agents</li>
-          <li>Local models</li>
-          <li>Human gates</li>
+          <li>Local-first</li>
+          <li>Durable</li>
+          <li>No cloud backend</li>
+          <li>AGPL-3.0</li>
         </ul>
         <div className="hero-actions">
-          <a className="cta" href="/quickstart/">Install with your agent</a>
-          <a className="secondary-cta" href="/docs/">Read the docs</a>
+          <a
+            className="cta"
+            href={GITHUB_URL}
+            rel="noopener"
+            onClick={() => track("click_github", { where: "hero" })}
+          >
+            View Source
+          </a>
         </div>
-        <p className="release-note">Public developer preview. macOS is the supported platform today.</p>
+        <p className="release-note">
+          Public developer preview. No signup and no hosted account. The repository is the product.
+        </p>
+      </section>
+
+      <section className="agent-install" aria-labelledby="agent-install-title">
+        {/*
+          <h2>Install: one lane, end to end</h2>
+          <Terminal />
+        */}
+        <h2 id="agent-install-title">Hand your local agent these prompts to install aidashos</h2>
+        <p className="section-lede">
+          Three prompts, in order, for any AI tool with shell access (Claude Code, Codex, or
+          anything else). They drive the same scripts and leave the sign-ins and big-download
+          confirmations to you.
+        </p>
+        <PromptSequence />
       </section>
 
       <section className="proofs" aria-labelledby="proofs-title">
@@ -188,7 +221,7 @@ function HomePage() {
         </div>
       </section>
 
-      <section className="plan-path" aria-labelledby="plan-path-title">
+      <section id="how" className="plan-path" aria-labelledby="plan-path-title">
         <p className="kicker">Design to decision</p>
         <h2 id="plan-path-title">Four steps, one durable record</h2>
         <ol className="lane-steps plan-steps">
@@ -217,9 +250,46 @@ function HomePage() {
         </p>
       </section>
 
+      <section id="faq" className="faq" aria-labelledby="faq-title">
+        <h2 id="faq-title">Questions with real answers</h2>
+        <details>
+          <summary>Does it run in the cloud?</summary>
+          <p>
+            The control plane runs on your machine with a local Postgres ledger.
+            Local models run on your hardware. Configured frontier agents connect to
+            their providers through your installed CLIs and accounts.
+          </p>
+        </details>
+        <details>
+          <summary>What happens if I close the laptop?</summary>
+          <p>
+            Plans, attempts, artifacts, reviews, and approvals are stored in Postgres.
+            A sleeping laptop pauses local computation. When you return, the system can
+            use its retained state to recover work; an interrupted agent may need a new attempt.
+          </p>
+        </details>
+        <details>
+          <summary>What do I need to run it?</summary>
+          <p>
+            macOS is the supported platform today. The <a href="/quickstart/">quickstart</a>
+            {" "}covers the local runtime, model setup, and attaching your AI tool.
+            Large downloads and interactive sign-ins stay under your control.
+          </p>
+        </details>
+        <details>
+          <summary>Is aidashos finished?</summary>
+          <p>
+            No. This is a public developer preview, and bugs and incomplete features remain.
+            Your coding agent can help inspect failures and debug setup or milestones.
+            Read the <a href={`${GITHUB_URL}/issues`}>open issues</a> or
+            {" "}<a href="/about/">get involved</a>.
+          </p>
+        </details>
+      </section>
+
       <section className="closing compact-closing">
         <h2>Give the next hard task a plan.</h2>
-        <a className="cta" href="/quickstart/">Open the quickstart</a>
+        <a className="cta" href={GITHUB_URL}>View Source</a>
       </section>
     </>
   );
@@ -230,7 +300,7 @@ function QuickstartPage() {
     <>
       <section className="page-intro">
         <p className="kicker">Quickstart</p>
-        <h1>Install it yourself, or hand the lane to your agent.</h1>
+        <h1>Set up aidashos on your Mac.</h1>
         <p className="lede">
           Both paths run the same checked-in scripts. Large model downloads and interactive
           subscription sign-ins stay under your control.
@@ -243,7 +313,7 @@ function QuickstartPage() {
       </section>
 
       <section className="agent-install" aria-labelledby="agent-install-title">
-        <h2 id="agent-install-title">Or give the setup to your coding agent</h2>
+        <h2 id="agent-install-title">Hand your local agent these prompts to install aidashos</h2>
         <p className="section-lede">
           Copy these prompts in order. They inspect first, ask before large downloads, and
           hand interactive sign-ins back to you.
@@ -315,8 +385,46 @@ function DocsPage() {
       </section>
 
       <section className="closing compact-closing">
-        <h2>Ready to run the lane?</h2>
+        <h2>Ready to get started?</h2>
         <a className="cta" href="/quickstart/">Open the quickstart</a>
+      </section>
+    </>
+  );
+}
+
+function AboutPage() {
+  return (
+    <>
+      <section className="page-intro about-intro">
+        <p className="kicker">About</p>
+        <img className="about-portrait" src="/rahul-nath-linkedin.jpg" width="80" height="80" alt="Rahul Nath" />
+        <h1>I'm Rahul Nath.</h1>
+        <p className="lede">
+          I worked on identity and authentication infrastructure at Meta and founded a
+          profitable livestreaming startup. Now I'm building aidashos around a bet on local intelligence.
+        </p>
+      </section>
+
+      <section className="about-copy" aria-labelledby="about-bet-title">
+        <h2 id="about-bet-title">My bet: local models will dominate.</h2>
+        <p>
+          I think local models will eventually dominate, even at the level of AGI.
+          As more intelligence runs on our own machines, we'll need a durable way for
+          humans to interact with it, supervise it, and decide what it can do.
+        </p>
+        <p>
+          That's the direction behind aidashos: plans, decisions, work, and feedback that
+          outlive any one agent session. The history of those interactions could become
+          useful in many ways to each person running the system, from remembering why a
+          decision was made to learning from past work and shaping how their agents help them.
+        </p>
+        <p>
+          There's a lot of work to do on this. If you're interested, DM me on
+          {" "}<a href="https://www.instagram.com/rah_juul/" rel="noopener">Instagram (@rah_juul)</a>,
+          {" "}<a href="https://twitter.com/rahulkindarules" rel="noopener">Twitter (@rahulkindarules)</a>,
+          {" "}or <a href="https://www.linkedin.com/in/rahul-nath-753a3052/" rel="noopener">LinkedIn</a>.
+        </p>
+        <a className="cta" href={GITHUB_URL}>View Source</a>
       </section>
     </>
   );
@@ -341,7 +449,7 @@ function SiteFooter() {
 
 export function App({ pathname = "/" }: { pathname?: string }) {
   const path = normalizePagePath(pathname);
-  const page = path === "/quickstart/" ? <QuickstartPage /> : path === "/docs/" ? <DocsPage /> : <HomePage />;
+  const page = path === "/quickstart/" ? <QuickstartPage /> : path === "/docs/" ? <DocsPage /> : path === "/about/" ? <AboutPage /> : <HomePage />;
 
   return (
     <>

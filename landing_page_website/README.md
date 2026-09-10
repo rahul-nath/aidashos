@@ -1,7 +1,8 @@
 # aidashos.com
 
 This package builds the public aidashos website.
-The homepage carries the short product promise, while `/quickstart/` and `/docs/` own setup and reference links.
+The homepage carries the product promise and agent setup prompts.
+`/quickstart/` and `/docs/` provide setup and reference links; `/about/` describes Rahul Nath's reason for building aidashos.
 
 ## Single-source onboarding
 
@@ -18,12 +19,13 @@ npm run build
 npm run preview
 ```
 
-The build emits three prerendered static routes:
+The build emits four prerendered static routes:
 
 ```text
 dist/index.html
 dist/quickstart/index.html
 dist/docs/index.html
+dist/about/index.html
 ```
 
 `src/App.tsx` owns the route table, visible content, and metadata.
@@ -31,12 +33,18 @@ dist/docs/index.html
 
 ## Deploying to aidashos.com
 
-The production site is served by GitHub Pages from the derived `gh-pages` branch.
+The static output is configured for Netlify by `netlify.toml`.
+For a repository-connected deployment, the base directory is `landing_page_website`, the build command is `npm run build`, and the publish directory is `dist` relative to the base.
+A manual deployment uploads the contents of `dist/`.
+`public/_headers` is copied into that output, so the same security and cache headers apply to both deployment paths.
 
-- Build from this directory.
-- Publish the contents of `dist/` at the branch root without editing generated files.
-- Keep the Pages custom domain and every canonical URL under `https://www.aidashos.com/`.
-- Treat hosting, DNS, and deployment changes as separate operator decisions.
+Keep the primary custom domain and canonical URLs under `https://www.aidashos.com/`.
+Configure `aidashos.com` as an alias of the primary domain and enable Netlify's managed TLS certificate and HTTPS redirect.
+Verify the exact candidate on its Netlify URL before replacing the old DNS records.
+Verify both custom hostnames over HTTPS before disabling the previous GitHub Pages deployment.
+
+Every public route is a prerendered directory index, so no single-page-app catch-all rewrite is needed.
+Hashed assets have long immutable cache lifetimes; HTML must revalidate to receive new releases.
 
 ## Telemetry
 

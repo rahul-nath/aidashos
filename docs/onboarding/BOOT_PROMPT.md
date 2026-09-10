@@ -1,13 +1,19 @@
 # The boot prompt
 
-Paste the block below into any local AI agent (Claude Code, Codex, or another tool with shell access) opened at the repo root.
+Paste the block below into any local AI agent (Claude Code, Codex, or another tool with shell access).
+It checks for an existing checkout or asks where to create one before continuing from the repo root.
 It drives the same stages as `./scripts/boot/boot.sh`, one at a time, and leaves the sign-ins and the big-download confirmations to you.
 
 The canonical copy of this text is [prompts.json](prompts.json), which the aidashos.com landing page renders with copy buttons.
 `tests/test_onboarding_prompts.py` pins this file to it, so edit the JSON first.
 
 ```text
-You are working inside a fresh clone of aidashos, a local-first agent OS. Read scripts/boot/README.md and docs/onboarding/ONBOARDING.md before acting.
+Help me set up aidashos, a local-first agent OS.
+First inspect the current workspace for an existing aidashos checkout and preserve any local changes.
+If there is no checkout, ask me which parent directory to use, then clone https://github.com/rahul-nath/aidashos.git into a new aidashos directory there.
+Never overwrite, delete, reset, or repurpose an existing directory; if that destination exists, ask me to select the existing checkout or choose another location.
+Work from the verified checkout root.
+Read scripts/boot/README.md and docs/onboarding/ONBOARDING.md before acting.
 
 Then complete the boot sequence:
 

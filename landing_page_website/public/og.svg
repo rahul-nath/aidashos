@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="aidashos: Plans, not prompts.">
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-label="aidashos: Make Plans, Not Prompts">
   <defs>
     <radialGradient id="glow" cx="0.82" cy="0.12" r="0.62">
       <stop offset="0%" stop-color="#ff7a1a" stop-opacity="0.20" />
@@ -14,7 +14,7 @@
     >aidash<tspan fill="#ff7a1a">os</tspan></text>
 
   <text x="80" y="286" font-family="'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif" font-size="76" font-weight="700" fill="#e7eaf0" letter-spacing="-2"
-    >Plans, not prompts.</text>
+    >Make Plans, Not Prompts</text>
 
   <text x="80" y="346" font-family="'Helvetica Neue', Helvetica, Arial, system-ui, sans-serif" font-size="30" fill="#9aa4b3"
     >Durable agent work. Local evidence. Your approval.</text>
