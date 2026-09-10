@@ -38,8 +38,8 @@ For a repository-connected deployment, the base directory is `landing_page_websi
 A manual deployment uploads the contents of `dist/`.
 `public/_headers` is copied into that output, so the same security and cache headers apply to both deployment paths.
 
-Keep the primary custom domain and canonical URLs under `https://www.aidashos.com/`.
-Configure `aidashos.com` as an alias of the primary domain and enable Netlify's managed TLS certificate and HTTPS redirect.
+Keep the primary custom domain and canonical URLs under `https://aidashos.com/`.
+Configure `www.aidashos.com` as an alias of the primary domain and enable Netlify's managed TLS certificate and HTTPS redirect.
 Verify the exact candidate on its Netlify URL before replacing the old DNS records.
 Verify both custom hostnames over HTTPS before disabling the previous GitHub Pages deployment.
 

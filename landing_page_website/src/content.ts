@@ -13,7 +13,7 @@ export interface PromptEntry {
 export const CLONE_COMMAND: string = promptsDocument.clone_command;
 export const PROMPTS: PromptEntry[] = promptsDocument.prompts;
 
-export const SITE_URL = "https://www.aidashos.com";
+export const SITE_URL = "https://aidashos.com";
 export const GITHUB_URL = "https://github.com/rahul-nath/aidashos";
 export const BOOT_COMMAND = "./scripts/boot/boot.sh";
 
