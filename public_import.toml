@@ -76,10 +76,9 @@ path = "agent_coordination_mcp.py"
 kind = "file"
 overwrite = true
 
-[[allow]]
-path = "agent_coordination_postgres_schema.sql"
-kind = "file"
-overwrite = true
+# The coordination schema now travels inside the src directory rule below.
+# Existing public snapshots retain their root schema until their runtime moves
+# to the package-local schema; importer planning never deletes an existing file.
 
 [[allow]]
 path = "dbos-config.yaml"
