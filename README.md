@@ -70,7 +70,7 @@ Claude Code can discover the connection through the included `.mcp.json` file; t
 
 ## Which models does it use?
 
-The default configuration uses Codex to make changes and a separate Codex session to review them.
+In the default setup, that is Codex implementing and Codex reviewing in separate sessions.
 Claude Code is available as a fallback.
 These use your existing provider sign-ins and subscription limits.
 Local models handle smaller decisions.
