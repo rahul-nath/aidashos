@@ -127,6 +127,7 @@ def test_gated_permission_policy_requires_approval_of_the_exact_plan_hash(
 Autonomous permissions:
 - read_repo_context
 - write_ledger_artifacts
+- run_local_model_delegates
 
 Requested permissions:
 - test_command_execution: needed to verify the change
@@ -143,6 +144,9 @@ Denied without explicit approval:
     assert compiled.compiled_plan_revision_id is not None
     assert compiled.plan_hash is not None
 
+    revision = repo.get_compiled_plan_revision(compiled.compiled_plan_revision_id)
+    assert revision.execution_blockers == ()
+
     with pytest.raises(repo.WorkUnitError, match="approve its exact compiled hash"):
         service.start_work_unit(
             compiled.compiled_plan_revision_id,
@@ -155,6 +159,56 @@ Denied without explicit approval:
         delivery=None,
     )
     assert started["created"] is True
+
+
+@pytest.mark.parametrize("wrong_hash", ["0" * 64, ""])
+def test_start_refuses_a_mismatched_hash_even_without_gated_capabilities(
+    authoring_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    wrong_hash: str,
+) -> None:
+    compiled = service.compile_design_doc_text(
+        ACCEPTANCE_DESIGN_DOC,
+        design_doc_id="exact-start-identity",
+    )
+    assert compiled.compiled_plan_revision_id is not None
+    revision = repo.get_compiled_plan_revision(compiled.compiled_plan_revision_id)
+    assert revision.plan.permission_policy is not None
+    assert not revision.plan.permission_policy.requires_start_approval
+    monkeypatch.setattr(service, "drain_enqueue_outbox", lambda **_: ())
+
+    response = authoring_client.post(
+        "/work-units",
+        json={
+            "compiled_plan_revision_id": compiled.compiled_plan_revision_id,
+            "approved_plan_hash": wrong_hash,
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert "exact compiled hash" in response.json()["detail"]
+    assert repo.list_work_units() == ()
+    assert repo.list_pending_enqueues() == ()
+
+    accepted = authoring_client.post(
+        "/work-units",
+        json={
+            "compiled_plan_revision_id": compiled.compiled_plan_revision_id,
+            "approved_plan_hash": compiled.plan_hash,
+        },
+    )
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["created"] is True
+    replay = authoring_client.post(
+        "/work-units",
+        json={
+            "compiled_plan_revision_id": compiled.compiled_plan_revision_id,
+            "approved_plan_hash": wrong_hash,
+        },
+    )
+    assert replay.status_code == 409, replay.text
+    assert len(repo.list_work_units()) == 1
+    assert len(repo.list_pending_enqueues()) == 1
 
 
 def test_cli_decision_surface_launches_dbos_before_recording(

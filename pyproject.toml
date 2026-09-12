@@ -59,6 +59,8 @@ dependencies = [
     "typer>=0.25.0",
     "watchdog>=6.0.0",
     "webrtcvad-wheels>=2.0.14",
+    # Native Codex tool-worker relay; already present in the locked environment.
+    "websockets==16.0",
     "networkx>=3.3",
     # Security floors for runtime transitives that parse network or identity
     # input. Keeping them here makes an old vulnerable resolution impossible
@@ -167,6 +169,7 @@ markers = [
     "idempotency: graph idempotency behavior",
     "idempotent-recovery: retry-safe graph recovery",
     "integration: exercises real external infrastructure such as Postgres",
+    "native_codex_srt: installed macOS Codex/SRT proof required by --run-native-codex-srt",
     "isolation: per-artifact failure isolation",
     "lifecycle: durable workflow lifecycle",
     "logging: graph structured logging guarantee",
@@ -210,6 +213,10 @@ target-version = "py313"
 # left behind, and it makes the format gate fail on every future attachment.
 extend-exclude = ["potential_directions", "docs/handoffs/attachments"]
 
+[tool.ruff.per-file-target-version]
+# Privileged code uses the installed isolated system Python, never the project venv.
+"scripts/verifier_uid/*.py" = "py39"
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
@@ -218,6 +225,7 @@ include = ["src", "tests"]
 # `scripts/` is not a package, so tests that pin a script against its library
 # counterpart reach it through a sys.path insert. Pyright cannot follow that at
 # type-check time; this is the static half of the same statement.
-extraPaths = ["scripts"]
+# Resolve this checkout before an installed editable copy in a shared toolchain.
+extraPaths = ["src", "scripts"]
 pythonVersion = "3.13"
 typeCheckingMode = "basic"

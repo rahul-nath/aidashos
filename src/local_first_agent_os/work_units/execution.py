@@ -19,7 +19,7 @@ import json
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Protocol, assert_never, runtime_checkable
 
 from ..contracts import (
     DispatchIntentStatus,
@@ -27,9 +27,23 @@ from ..contracts import (
     classify_dispatch_progress,
 )
 from ..coordination.contracts import DispatchKind
+from ..coordination.dispatch_diagnostics import (
+    DispatchDiagnosticPersistenceError,
+    record_dispatch_contract_violation,
+)
 from ..coordination.failures import DurableFailureError, expected_failure
-from ..coordination.outcomes import DispatchPromotionState, FailureCategory, TerminalOutcome
+from ..coordination.outcomes import DispatchResultState, FailureCategory, TerminalOutcome
 from ..coordination.store import rowdict, tx
+from ..dispatch_contracts import DispatchContractViolation, DispatchIngressFailureCode
+from ..dispatch_results import DispatchEvidenceSubject, normalize_dispatch_runner_result
+from ..execution_admission import (
+    AuthorizedExecution,
+    ExecutionAdmissionError,
+    ExecutionAdmissionRefusal,
+    ExecutionContract,
+    admit_execution,
+    require_authorized_execution,
+)
 from ..ids import sha256_text
 from .events import (
     ArtifactKind,
@@ -40,9 +54,24 @@ from .events import (
     DispatchIntentCreated,
     RequirableArtifact,
 )
-from .executors import EXECUTOR_REGISTRY, ExecutorKind
+from .executors import (
+    EXECUTOR_REGISTRY,
+    ExecutionDriver,
+    ExecutorKind,
+    execution_driver_for,
+)
 from .lifecycle import FailureClass
 from .plan import CompiledMilestone, DocumentContext
+from .plan_evidence import (
+    PLAN_REPORT_INSTRUCTION,
+    PlanEvidenceCause,
+    PlanEvidenceUnavailable,
+    resolve_implementation_plan,
+)
+
+if TYPE_CHECKING:
+    from ..interrupted_recovery import RetainedWorktree
+    from ..pairing_assignment import PairingAssignment
 
 
 @dataclass(frozen=True)
@@ -285,6 +314,9 @@ def _dispatch_failure_causes(run_result: Mapping[str, Any] | None) -> tuple[str,
             if not isinstance(task, Mapping) or task.get("status") != "failed":
                 continue
             name = str(task.get("task_name") or "task")
+            failure = task.get("failure")
+            if isinstance(failure, Mapping) and failure.get("message"):
+                causes.append(f"{name}: {failure['message']}")
             for risk in task.get("risks") or ():
                 causes.append(f"{name}: {risk}")
     for risk in run_result.get("risks") or ():
@@ -349,9 +381,13 @@ _NO_FAULT_OUTCOMES: Final = frozenset(
     {
         TerminalOutcome.TRANSPORT_INTERRUPTED.value,
         TerminalOutcome.PROVIDER_OVERLOADED.value,
+        TerminalOutcome.EXECUTION_ENVIRONMENT_LOST.value,
     }
 )
-"""Dispatch outcomes where the provider failed and the milestone's work did not.
+"""Proven provider or execution-environment failures that do not charge work.
+
+Worktree loss comes from the supervisor's direct observation before cleanup.
+The settled-outcome consumer parks consecutive losses using immutable attempts.
 
 Deliberately narrow rather than every `InfrastructureFailure`. The budget
 exists to stop a milestone retrying forever, and most infrastructure outcomes
@@ -367,10 +403,10 @@ rather than one that re-earns the same answer. It was added after an
 `API Error: 529 Overloaded` was read as `DEPENDENCY_FAILED` and spent a
 milestone attempt on 2026-08-12.
 
-`USAGE_LIMIT` is not here on purpose, though it is equally not the milestone's
-fault. Staffing already refuses a usage-limited harness for five hours, so a
-milestone that did not spend an attempt on it would retry into the same refusal;
-that one wants the bench to answer first, and is its own change.
+`USAGE_LIMIT` depends on the recorded selection policy rather than the failure
+alone. `_dispatch_failure_class` permits bounded transient resume only when the
+assignment declared fallback. Otherwise it remains a scheduling condition that
+an operator may re-drive after the quota window without charging the work.
 """
 
 
@@ -383,7 +419,33 @@ def _failure_class_for_outcome(outcome: str) -> FailureClass:
     to run, because the milestone was then billed for the provider's outage.
     """
 
+    if outcome in (
+        TerminalOutcome.LOCAL_MODEL_NOT_LOADED.value,
+        TerminalOutcome.REVIEW_UNAVAILABLE.value,
+    ):
+        # Model/reviewer readiness needs repair before a correctness judgment exists.
+        return FailureClass.SCHEDULING
     return FailureClass.TRANSIENT if outcome in _NO_FAULT_OUTCOMES else FailureClass.CORRECTABLE
+
+
+def _dispatch_failure_class(outcome: str, intent_id: str) -> FailureClass:
+    """Only declared fallback authorizes a bounded quota-triggered re-resolution."""
+
+    if outcome == TerminalOutcome.VERIFICATION_UNAVAILABLE.value:
+        # No qualifying verification judgment exists. Infrastructure repair or
+        # evidence recovery must precede another operator-authorized attempt.
+        return FailureClass.SCHEDULING
+    if outcome == TerminalOutcome.VERIFICATION_CANCELED.value:
+        return FailureClass.REQUIRES_OPERATOR
+    if outcome == TerminalOutcome.USAGE_LIMIT.value:
+        from ..pairing_assignment import assignment_for_intent
+        from ..staffing import StrictPair
+
+        assignment = assignment_for_intent(intent_id)
+        if assignment is None or isinstance(assignment.selection, StrictPair):
+            return FailureClass.SCHEDULING
+        return FailureClass.TRANSIENT
+    return _failure_class_for_outcome(outcome)
 
 
 def _agent_run_result(result_text: str) -> Mapping[str, Any] | None:
@@ -439,8 +501,6 @@ def _agent_evidence(kind: ArtifactKind, run_result: Mapping[str, Any]) -> str | 
 
     summary = str(run_result.get("output_summary") or "").strip()
     changed = [str(item) for item in run_result.get("changed_files") or ()]
-    commands = [str(item) for item in run_result.get("verification_commands") or ()]
-    output = [str(item) for item in run_result.get("verification_output") or ()]
 
     match kind:
         case ArtifactKind.SOURCE_PATCH:
@@ -450,10 +510,15 @@ def _agent_evidence(kind: ArtifactKind, run_result: Mapping[str, Any]) -> str | 
             if not changed:
                 return None
             return "changed files:\n" + "\n".join(sorted(changed))
+        case ArtifactKind.IMPLEMENTATION_PLAN:
+            # Only the exact produced task report, resolved through its retained
+            # artifact and execution subject, can satisfy implementation planning.
+            return None
         case ArtifactKind.TEST_RESULT | ArtifactKind.ACCEPTANCE_REPORT:
-            if not commands and not output:
-                return None
-            return "commands:\n" + "\n".join(commands) + "\n\noutput:\n" + "\n".join(output)
+            # Observations remain readable, but only a separately resolved host
+            # receipt can discharge verification. A result writer cannot certify
+            # a process by putting commands or success prose in its own payload.
+            return None
         case ArtifactKind.OPERATOR_APPROVAL:
             # Never derivable from a run. An approval is an operator's decision,
             # recorded by the engine when a REVIEW_OPERATOR milestone is approved;
@@ -461,6 +526,77 @@ def _agent_evidence(kind: ArtifactKind, run_result: Mapping[str, Any]) -> str | 
             return None
         case _:
             return summary or None
+
+
+@dataclass(frozen=True)
+class _AcceptedVerification:
+    content: str
+    receipt_ids: tuple[str, ...]
+
+
+def _verification_evidence(
+    context: MilestoneContext, intent_id: str, run_result: Mapping[str, Any]
+) -> _AcceptedVerification | None:
+    from ..host_verification import (
+        REFERENCE_KIND,
+        VerifiedReceiptReference,
+        resolve_verification_receipt,
+        verification_subject_for_dispatch,
+    )
+
+    subject = verification_subject_for_dispatch(intent_id)
+    if subject is None or (
+        subject.work_unit_id != context.work_unit_id
+        or subject.milestone_key != context.milestone.stable_key
+        or subject.compiled_plan_hash != context.compiled_plan_hash
+        or subject.target_project_id != context.target_project_id
+    ):
+        return None
+    # A recovery may record a successor lifecycle attempt while adopting the
+    # original dispatch. Its evidence stays bound to that dispatch's durable link.
+    candidates = list(run_result.get("artifacts") or [])
+    for task in run_result.get("tasks") or []:
+        if isinstance(task, Mapping):
+            candidates.extend(task.get("artifacts") or [])
+    references: set[str] = set()
+    for artifact in candidates:
+        if not isinstance(artifact, Mapping) or artifact.get("artifact_type") != REFERENCE_KIND:
+            continue
+        content = artifact.get("content")
+        if isinstance(content, Mapping) and set(content) == {"receipt_id"}:
+            receipt_id = content["receipt_id"]
+            if isinstance(receipt_id, str) and receipt_id:
+                references.add(receipt_id)
+    if not references:
+        return None
+    advertised_sources = set()
+    for artifact in candidates:
+        if (
+            isinstance(artifact, Mapping)
+            and artifact.get("artifact_type") == "worktree_commit_checkpoint"
+        ):
+            content = artifact.get("content")
+            if isinstance(content, Mapping):
+                commit, base = content.get("commit_sha"), content.get("base_head_sha")
+                if isinstance(commit, str) and isinstance(base, str):
+                    advertised_sources.add((commit, base))
+    if len(advertised_sources) != 1:
+        return None
+    evidence = []
+    for receipt_id in sorted(references):
+        resolved = resolve_verification_receipt(receipt_id, subject)
+        if not isinstance(resolved, VerifiedReceiptReference):
+            return None
+        if advertised_sources != {(resolved.receipt.source.commit, resolved.receipt.source.base)}:
+            return None
+        evidence.append(json.loads(resolved.evidence_content()))
+    return _AcceptedVerification(
+        content=json.dumps(
+            {"schema_version": "accepted_verification_receipts.v1", "evidence": evidence},
+            sort_keys=True,
+        ),
+        receipt_ids=tuple(sorted(references)),
+    )
 
 
 @dataclass(frozen=True)
@@ -580,6 +716,19 @@ class DispatchStillActive:
             f"dispatch intent {self.intent_id!r} was still {status} after "
             f"{self.waited_seconds:.0f}s"
         )
+
+
+DISPATCH_WAIT_FAILURE_CODE: Final = TerminalOutcome.DEADLINE_EXCEEDED.value
+_LEGACY_DISPATCH_WAIT_FAILURE_CODE: Final = "dispatch_wait_elapsed"
+
+
+def is_dispatch_wait_failure_code(failure_code: str | None) -> bool:
+    """Recognize the typed wait outcome and immutable historical rows."""
+
+    return failure_code in {
+        DISPATCH_WAIT_FAILURE_CODE,
+        _LEGACY_DISPATCH_WAIT_FAILURE_CODE,
+    }
 
 
 # What one bounded wait on a dispatch intent can have found. Three variants and
@@ -715,6 +864,11 @@ def resolve_dependency_base_commit(context: MilestoneContext) -> str | None:
     that never contained the other dependency's work.
     """
 
+    if execution_driver_for(context.executor_kind) is ExecutionDriver.REGISTERED_VERIFICATION:
+        from .verification_sources import resolve_registered_verification_source
+
+        return resolve_registered_verification_source(context)
+
     produced: dict[str, str] = {}
     with tx() as c:
         for dependency_key in sorted(context.milestone.dependencies):
@@ -739,6 +893,39 @@ def resolve_dependency_base_commit(context: MilestoneContext) -> str | None:
             )
         )
     return distinct[0] if distinct else None
+
+
+@dataclass(frozen=True)
+class PlannedDispatchPreparation:
+    authorization: AuthorizedExecution
+    pairing_assignment: PairingAssignment | None
+    interrupted_recovery: RetainedWorktree | None
+
+
+@dataclass(frozen=True)
+class RegisteredVerificationPreparation:
+    """A registered gate has no model pairing or mutable implementation worktree."""
+
+    authorization: AuthorizedExecution
+
+
+type DispatchPreparation = PlannedDispatchPreparation | RegisteredVerificationPreparation
+
+
+def _authorize_dispatch(context: MilestoneContext) -> AuthorizedExecution:
+    from ..spawn_authority import SpawnAuthority
+
+    admission = admit_execution(
+        ExecutionContract(execution_driver_for(context.executor_kind)),
+        SpawnAuthority.from_names(context.permitted_tools),
+    )
+    match admission:
+        case AuthorizedExecution():
+            return admission
+        case ExecutionAdmissionRefusal():
+            raise ExecutionAdmissionError(admission)
+        case _:
+            assert_never(admission)
 
 
 @dataclass(frozen=True)
@@ -789,8 +976,10 @@ class DispatchBackedExecutorRuntime:
             f":attempt:{context.attempt}"
         )
 
-    def submit(self, context: MilestoneContext) -> str:
-        from ..coordination.dispatch import submit_dispatch_intent
+    def _prepare_dispatch(self, context: MilestoneContext) -> DispatchPreparation:
+        authorization = require_authorized_execution(
+            _authorize_dispatch(context), ExecutionDriver.PLANNED_DISPATCH
+        )
         from ..interrupted_recovery import (
             InterruptedEffectsConflict,
             RetainedWorktree,
@@ -798,24 +987,23 @@ class DispatchBackedExecutorRuntime:
         )
         from ..pairing_assignment import (
             assignment_for_idempotency_key,
-            select_assignment,
         )
+        from ..pairing_resolution import resolve_assignment
         from ..settings import get_settings
-        from ..spawn_authority import SpawnAuthority
 
-        submitter = self.intent_submitter or submit_dispatch_intent
         assignment = None
         interrupted_recovery = None
         if self.intent_submitter is None or self.pairing_selector is not None:
             assignment = assignment_for_idempotency_key(self.idempotency_key(context))
             if assignment is None:
-                selector = self.pairing_selector or select_assignment
+                selector = self.pairing_selector or resolve_assignment
                 settings = get_settings()
                 assignment = selector(
                     work_unit_id=context.work_unit_id,
                     milestone_key=context.milestone.stable_key,
                     attempt=context.attempt,
                     chart_path=settings.config_dir / "model_quality.toml",
+                    staffing_path=settings.config_dir / "staffing.toml",
                 )
         if self.intent_submitter is None:
             inspected = inspect_interrupted_attempt(
@@ -829,6 +1017,22 @@ class DispatchBackedExecutorRuntime:
                 raise InterruptedRecoveryRefused(inspected)
             if isinstance(inspected, RetainedWorktree):
                 interrupted_recovery = inspected
+        return PlannedDispatchPreparation(authorization, assignment, interrupted_recovery)
+
+    def submit(self, context: MilestoneContext) -> str:
+        from ..coordination.dispatch import submit_dispatch_intent
+
+        submitter = self.intent_submitter or submit_dispatch_intent
+        preparation = self._prepare_dispatch(context)
+        match preparation:
+            case PlannedDispatchPreparation(authorization, assignment, interrupted):
+                pairing_payload = assignment.to_payload() if assignment is not None else None
+                interrupted_payload = interrupted.to_payload() if interrupted is not None else None
+            case RegisteredVerificationPreparation(authorization):
+                pairing_payload = None
+                interrupted_payload = None
+            case _:
+                assert_never(preparation)
         base_commit_sha = resolve_dependency_base_commit(context)
         result = submitter(
             self.tier,
@@ -841,12 +1045,10 @@ class DispatchBackedExecutorRuntime:
             # The compiled plan is the authority. The executor declaration has
             # already been intersected with the plan-level permission envelope,
             # and parsing the names here refuses an unknown persisted capability.
-            permitted_capabilities=SpawnAuthority.from_names(context.permitted_tools).to_names(),
+            permitted_capabilities=authorization.authority.to_names(),
             base_commit_sha=base_commit_sha,
-            pairing_assignment=(assignment.to_payload() if assignment is not None else None),
-            interrupted_recovery=(
-                interrupted_recovery.to_payload() if interrupted_recovery is not None else None
-            ),
+            pairing_assignment=pairing_payload,
+            interrupted_recovery=interrupted_payload,
         )
         if not result.get("ok"):
             raise RuntimeError(f"dispatch intent submission rejected: {result}")
@@ -924,6 +1126,11 @@ class DispatchBackedExecutorRuntime:
             f"Required evidence:\n{artifacts}\n\n"
             f"Permitted tools: {', '.join(context.permitted_tools)}\n"
             f"Compiled plan hash: {context.compiled_plan_hash}\n"
+            + (
+                f"\n{PLAN_REPORT_INSTRUCTION}"
+                if ArtifactKind.IMPLEMENTATION_PLAN.value in context.milestone.required_artifacts
+                else ""
+            )
         )
 
     def poll_until_stopped(
@@ -986,12 +1193,25 @@ class DispatchBackedExecutorRuntime:
 
         from ..interrupted_recovery import InterruptedRecoveryRefused
         from ..pairing_assignment import NoLivePairing
+        from .verification_sources import VerificationSourceRefused
 
         try:
             intent_id = self.submit(context)
+        except ExecutionAdmissionError as exc:
+            return MilestoneFailed(
+                failure_class=FailureClass.SCHEDULING,
+                failure_code=exc.refusal.code.value,
+                failure_summary=str(exc),
+            )
+        except VerificationSourceRefused as exc:
+            return MilestoneFailed(
+                failure_class=FailureClass.REQUIRES_OPERATOR,
+                failure_code=exc.code.value,
+                failure_summary=str(exc),
+            )
         except NoLivePairing as exc:
             return MilestoneFailed(
-                failure_class=FailureClass.CORRECTABLE,
+                failure_class=FailureClass.REQUIRES_OPERATOR,
                 failure_code="no_live_pairing",
                 failure_summary=str(exc),
             )
@@ -1069,18 +1289,79 @@ class DispatchBackedExecutorRuntime:
         result_text = str(settled.get("result") or "")
         if status != _DISPATCH_SUCCESS:
             outcome = str(settled.get("outcome") or "DISPATCH_FAILED")
+            failure_class = _dispatch_failure_class(outcome, intent_id)
+            summary = str(settled.get("error") or f"dispatch intent {intent_id} {status}")
+            if outcome == TerminalOutcome.EXECUTION_ENVIRONMENT_LOST.value:
+                from .repository import list_milestone_failure_attempts
+
+                # The runner's summary need not mention the allocated path.
+                # Keep the typed producer's diagnostics in the recovery prompt.
+                causes = _dispatch_failure_causes(_agent_run_result(result_text))
+                summary = "\n".join((summary, *(cause for cause in causes if cause not in summary)))
+                previous = next(
+                    (
+                        attempt
+                        for attempt in list_milestone_failure_attempts(context.work_unit_id)
+                        if attempt.stable_key == context.milestone.stable_key
+                        and attempt.execution_ordinal == context.attempt - 1
+                    ),
+                    None,
+                )
+                if previous is not None and previous.failure_code == outcome:
+                    failure_class = FailureClass.REQUIRES_OPERATOR
+                    summary = (
+                        f"Milestone {context.milestone.stable_key} lost its execution worktree "
+                        f"on consecutive attempts {previous.execution_ordinal} and "
+                        f"{context.attempt}. Restore the execution environment before "
+                        f"resuming. {summary}"
+                    )
             return MilestoneFailed(
-                failure_class=_failure_class_for_outcome(outcome),
+                failure_class=failure_class,
                 failure_code=outcome,
-                failure_summary=str(
-                    settled.get("error") or f"dispatch intent {intent_id} {status}"
-                ),
+                failure_summary=summary,
                 artifacts=_dispatch_failure_evidence(context, intent_id, status, result_text),
             )
 
         dispatch_payload = _dispatch_runner_payload(result_text)
-        run_result = _agent_run_result(result_text)
-        if dispatch_payload is None or run_result is None:
+        try:
+            normalized = normalize_dispatch_runner_result(
+                intent_result=result_text,
+                approval_payload={},
+                expected_subject=DispatchEvidenceSubject(
+                    intent_id=intent_id,
+                    target_project_id=self._target_project_id(context) or "",
+                ),
+            )
+        except DispatchContractViolation as violation:
+            try:
+                with tx() as connection:
+                    diagnostic_event_id = record_dispatch_contract_violation(
+                        connection, intent_id=intent_id, diagnostic=violation.diagnostic
+                    )
+            except DispatchDiagnosticPersistenceError:
+                return MilestoneFailed(
+                    failure_class=FailureClass.TRANSIENT,
+                    failure_code=DispatchIngressFailureCode.DIAGNOSTIC_PERSISTENCE_UNAVAILABLE,
+                    failure_summary=(
+                        "The dispatch report violates its contract, and its diagnostic "
+                        "could not be retained; no completion evidence was accepted."
+                    ),
+                )
+            return MilestoneFailed(
+                failure_class=FailureClass.REQUIRES_OPERATOR,
+                failure_code=DispatchIngressFailureCode.REPORT_CONTRACT_VIOLATION,
+                failure_summary=(
+                    f"dispatch report refused: {violation.diagnostic.code.value}; "
+                    f"diagnostic_event_id={diagnostic_event_id}"
+                ),
+            )
+        except ValueError:
+            normalized = None
+        if (
+            dispatch_payload is None
+            or normalized is None
+            or normalized.state is not DispatchResultState.COMPLETED
+        ):
             # A DONE intent whose result is not a `dispatch_runner_result.v1`
             # payload was settled by something other than the runner, most often
             # an operator completing it by hand. It may well be finished; what it
@@ -1091,16 +1372,68 @@ class DispatchBackedExecutorRuntime:
                 failure_code="unverifiable_dispatch_result",
                 failure_summary=(
                     f"dispatch intent {intent_id} completed with a result carrying no "
-                    "dispatch_runner_result.v1 payload, so the evidence it claims cannot "
-                    "be read"
+                    "valid completed dispatch_runner_result.v1 payload, so the evidence "
+                    "it claims cannot be credited"
                 ),
             )
 
+        run_result = normalized.run_result
         artifacts: list[ArtifactRecord] = []
         missing: list[str] = []
+        dispatch_metadata = {
+            "dispatch_intent_id": intent_id,
+            "pairing_assignment_id": (dispatch_payload.get("pairing_assignment") or {}).get(
+                "assignment_id"
+            ),
+            "quality_chart_hash": (dispatch_payload.get("pairing_assignment") or {}).get(
+                "chart_hash"
+            ),
+            "interrupted_recovery_effect_id": (
+                dispatch_payload.get("interrupted_recovery") or {}
+            ).get("effect_id"),
+            "interrupted_recovery_source_intent_id": (
+                dispatch_payload.get("interrupted_recovery") or {}
+            ).get("previous_intent_id"),
+        }
         for artifact_type in context.milestone.required_artifacts:
             kind = ArtifactKind(artifact_type)
-            content = _agent_evidence(kind, run_result)
+            if kind is ArtifactKind.IMPLEMENTATION_PLAN:
+                try:
+                    plan_evidence = resolve_implementation_plan(
+                        intent_id=intent_id,
+                        target_project_id=self._target_project_id(context) or "",
+                        dispatch_payload=dispatch_payload,
+                        run_result=run_result,
+                    )
+                except PlanEvidenceUnavailable as exc:
+                    return MilestoneFailed(
+                        failure_class=(
+                            FailureClass.CORRECTABLE
+                            if exc.cause is PlanEvidenceCause.REPORT_INVALID
+                            else FailureClass.REQUIRES_OPERATOR
+                        ),
+                        failure_code=exc.cause,
+                        failure_summary=str(exc),
+                    )
+                artifacts.append(
+                    json_evidence_artifact(
+                        context,
+                        RequirableArtifact(kind),
+                        payload=plan_evidence,
+                        step_name=f"dispatch:{intent_id}",
+                        metadata={
+                            **dispatch_metadata,
+                            "implementation_plan": plan_evidence,
+                        },
+                    )
+                )
+                continue
+            verification = (
+                _verification_evidence(context, intent_id, run_result)
+                if kind in {ArtifactKind.TEST_RESULT, ArtifactKind.ACCEPTANCE_REPORT}
+                else None
+            )
+            content = verification.content if verification else _agent_evidence(kind, run_result)
             if content is None:
                 missing.append(artifact_type)
                 continue
@@ -1111,19 +1444,12 @@ class DispatchBackedExecutorRuntime:
                     content=content,
                     step_name=f"dispatch:{intent_id}",
                     metadata={
-                        "dispatch_intent_id": intent_id,
-                        "pairing_assignment_id": (
-                            dispatch_payload.get("pairing_assignment") or {}
-                        ).get("assignment_id"),
-                        "quality_chart_hash": (
-                            dispatch_payload.get("pairing_assignment") or {}
-                        ).get("chart_hash"),
-                        "interrupted_recovery_effect_id": (
-                            dispatch_payload.get("interrupted_recovery") or {}
-                        ).get("effect_id"),
-                        "interrupted_recovery_source_intent_id": (
-                            dispatch_payload.get("interrupted_recovery") or {}
-                        ).get("previous_intent_id"),
+                        **dispatch_metadata,
+                        **(
+                            {"host_verification_receipt_ids": list(verification.receipt_ids)}
+                            if verification
+                            else {}
+                        ),
                     },
                 )
             )
@@ -1135,11 +1461,9 @@ class DispatchBackedExecutorRuntime:
                     f"dispatch intent {intent_id} completed without producing " + ", ".join(missing)
                 ),
             )
-        if (
-            ArtifactKind.SOURCE_PATCH.value in context.milestone.required_artifacts
-            and dispatch_payload.get("promotion_state")
-            == DispatchPromotionState.MERGE_PENDING.value
-        ):
+        # Neither a legacy omitted promotion nor a claimed promotion can prove
+        # landing. Only the durable integration owner may credit a source patch.
+        if ArtifactKind.SOURCE_PATCH.value in context.milestone.required_artifacts:
             return MilestoneAwaitingIntegration(
                 dispatch_intent_id=intent_id,
                 timeout_seconds=context.milestone.timeout_seconds,
@@ -1147,6 +1471,23 @@ class DispatchBackedExecutorRuntime:
         return MilestoneSucceeded(
             result_summary=f"dispatch intent {intent_id} completed",
             artifacts=tuple(artifacts),
+        )
+
+
+@dataclass(frozen=True)
+class RegisteredVerificationRuntime(DispatchBackedExecutorRuntime):
+    """Dispatch a registered gate without model selection or code-task planning.
+
+    The dispatcher re-reads the linked compiled executor before selecting its
+    host runner. Settlement still resolves protected receipts through the same
+    authoritative evidence consumer as every other dispatch-backed milestone.
+    """
+
+    def _prepare_dispatch(self, context: MilestoneContext) -> DispatchPreparation:
+        return RegisteredVerificationPreparation(
+            require_authorized_execution(
+                _authorize_dispatch(context), ExecutionDriver.REGISTERED_VERIFICATION
+            )
         )
 
 
@@ -1239,6 +1580,9 @@ class DeliveryRecordRuntime:
                 RequirableArtifact(ArtifactKind(artifact_type)),
                 payload,
                 step_name="record_delivery",
+                # The transition owner persists this small document with its
+                # immutable event and artifact row; workunit:// names that ledger evidence.
+                metadata={"delivery_record": payload},
             )
             for artifact_type in context.milestone.required_artifacts
         )
@@ -1256,6 +1600,7 @@ def dispatch_backed_runtime() -> CompositeExecutorRuntime:
     """
 
     agent_runtime = DispatchBackedExecutorRuntime()
+    verification_runtime = RegisteredVerificationRuntime()
     advisory_runtime = DispatchBackedExecutorRuntime(kind=DispatchKind.ADVISORY)
     delivery_runtime = DeliveryRecordRuntime()
     return CompositeExecutorRuntime(
@@ -1264,7 +1609,7 @@ def dispatch_backed_runtime() -> CompositeExecutorRuntime:
             ExecutorKind.VALIDATE_REPOSITORY: advisory_runtime,
             ExecutorKind.PLAN_IMPLEMENTATION: advisory_runtime,
             ExecutorKind.IMPLEMENT_CODE_CHANGE: agent_runtime,
-            ExecutorKind.VERIFY_TESTS: agent_runtime,
+            ExecutorKind.VERIFY_TESTS: verification_runtime,
             ExecutorKind.VERIFY_ACCEPTANCE: agent_runtime,
             ExecutorKind.REVIEW_AGENT: advisory_runtime,
             ExecutorKind.DELIVER_ARTIFACT: delivery_runtime,
@@ -1277,6 +1622,8 @@ __all__ = [
     "CompositeExecutorRuntime",
     "DeferrableMilestoneRuntime",
     "DispatchBackedExecutorRuntime",
+    "RegisteredVerificationRuntime",
+    "DISPATCH_WAIT_FAILURE_CODE",
     "DispatchWaitTimeout",
     "MilestoneAwaitingDispatch",
     "MilestoneAwaitingIntegration",
@@ -1290,6 +1637,7 @@ __all__ = [
     "SimulatedExecutorRuntime",
     "dispatch_backed_runtime",
     "evidence_artifact",
+    "is_dispatch_wait_failure_code",
     "json_evidence_artifact",
     "dispatch_intent_row",
 ]

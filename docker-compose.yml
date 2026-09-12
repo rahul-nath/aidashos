@@ -100,10 +100,8 @@ services:
   postgres-test:
     image: pgvector/pgvector:pg16
     container_name: local-agent-postgres-test
-    # In no stack any operator command asks for, so bringing up infrastructure
-    # never starts a database nobody wanted. The suite is unaffected: naming a
-    # service explicitly starts it whether or not its profile is active, and
-    # tests/postgres_server.py runs `docker compose up --detach postgres-test`.
+    # The verifier and suite name this service explicitly. Ordinary core or
+    # observability startup does not acquire this separate test database.
     profiles: [test]
     # The suite's own server, deliberately separate from the durable one above.
     # Tests used to create their per-test schemas inside `local_agent`, the same
@@ -111,8 +109,8 @@ services:
     # teardown left orphaned schemas among production data. Here that cannot
     # happen: nothing durable lives in this container.
     #
-    # No `restart` policy, because a test server has no business surviving a
-    # reboot. The suite starts it on demand in about a second.
+    # No `restart` policy: the suite or an explicit runtime relaunch starts it
+    # on demand. Verification startup never pulls or builds an image.
     #
     # The data directory is a tmpfs. That is what makes it fast - applying the
     # 35-table coordination schema costs 24ms here against 81ms on a disk-backed

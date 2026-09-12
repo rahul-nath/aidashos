@@ -114,15 +114,24 @@ def snapshot(facts: dict[str, Any]):
     )
 
 
-def test_next_hosted_preview_milestone_requires_deploy_approval() -> None:
-    result = snapshot(base_facts())
+@pytest.mark.parametrize("governed", [True, False])
+def test_pending_saga_guidance_distinguishes_retired_governed_work(governed: bool) -> None:
+    facts = base_facts()
+    if not governed:
+        facts["sagas"][0]["gawd_doc_id"] = None
+    result = snapshot(facts)
 
     assert result.schema_version == "project_action_snapshot.v1"
-    assert result.action is ProjectActionKind.DEPLOY_APPROVAL_REQUIRED
-    assert result.milestone and result.milestone.name == "Hosted preview"
-    assert result.next_command == (
-        "pi /start /approved-gawd gawd-1 --target-project pest_site_factory"
+    assert result.action is (
+        ProjectActionKind.HUMAN_DECISION_REQUIRED
+        if governed
+        else ProjectActionKind.DEPLOY_APPROVAL_REQUIRED
     )
+    assert result.milestone and result.milestone.name == "Hosted preview"
+    assert result.next_command == ("agent-ledger get_gawd_doc gawd-1" if governed else None)
+    if governed:
+        assert "compile_design_doc" in result.summary
+        assert "start_work_unit" in result.summary
     # A checkpoint for a completed older milestone must not mask the current action.
     assert result.checkpoint is None
 
@@ -268,7 +277,7 @@ def test_project_action_http_endpoint(
     # client is built from; a route that quietly went back to returning a dict
     # would publish a bare object and take the client's typing with it.
     assert route.response_model is ProjectActionSnapshot
-    assert response.action == "DEPLOY_APPROVAL_REQUIRED"
+    assert response.action == "HUMAN_DECISION_REQUIRED"
 
 
 def test_an_intent_without_a_lease_is_its_own_narrower_shape() -> None:
@@ -553,16 +562,7 @@ def test_the_approve_directive_is_not_runnable_once_the_approval_is_approved(
 
 
 def test_a_landed_merge_still_names_something_the_operator_can_run(tmp_path: Path) -> None:
-    """The state one step after the fix must not be a dead end.
-
-    Once the fast-forward above succeeds, the approved commit is HEAD and the
-    milestone is still open. The merge branch used to capture that state, match
-    none of its own cases, and return the chain's initial summary with
-    `next_command = None` - so following the cockpit's instruction left the
-    operator with nothing. It now falls through to the approved-GAWD path, which
-    is the code that detects a contained approved commit and prints the exact
-    `complete_saga_milestone` call.
-    """
+    """A historical saga with a landed commit redirects to its retained contract."""
 
     repository = build_target_repository(tmp_path / "target")
     facts = _approved_merge_facts(
@@ -574,9 +574,8 @@ def test_a_landed_merge_still_names_something_the_operator_can_run(tmp_path: Pat
     result = snapshot(facts)
 
     assert result.action is not ProjectActionKind.MERGE_INTEGRATION_REQUIRED
-    assert result.next_command == (
-        "pi /start /approved-gawd gawd-1 --target-project pest_site_factory"
-    )
+    assert result.next_command == "agent-ledger get_gawd_doc gawd-1"
+    assert "compile_design_doc" in result.summary
 
 
 def test_an_approved_merge_naming_no_commit_blocks_rather_than_going_quiet(

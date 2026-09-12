@@ -104,6 +104,16 @@ DEFAULT_DAEMON_STATE_DIR: str = f"~/{LOCAL_AGENT_STATE_DIR_NAME}/daemon"
 # product-level latency budgets.
 DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS: int = 3600
 
+# Output budget for the small local-model tasks exposed through the delegation
+# surface. It is named for the task because the frontier CLIs do not offer one
+# shared output-token switch, so pretending this belongs to every agent runtime
+# made most adapters silently ignore it.
+DEFAULT_DELEGATED_TASK_MAX_TOKENS: int = 2048
+
+# Conventional process outcomes shared by runners and lifecycle classifiers.
+PROCESS_TIMEOUT_EXIT_CODE: int = 124
+PROCESS_CANCELED_EXIT_CODE: int = 130
+
 # How long the supervisor lets one dispatched agent process run.
 #
 # Deliberately above the largest budget any milestone declares for itself
@@ -162,6 +172,27 @@ DEFAULT_ARTIFACT_WRITE_TIMEOUT_SECONDS: int = 60
 # Descendants can retain inherited descriptors, so draining still needs a hard
 # recovery boundary.
 DEFAULT_STREAM_DRAIN_TIMEOUT_SECONDS: int = 10
+
+# Durable stream-supervision cadence and evidence limits. The names carry the
+# unit and purpose so a call site never has to reverse-engineer a bare number.
+DEFAULT_AGENT_SUPERVISOR_HEARTBEAT_SECONDS: float = 30.0
+DEFAULT_AGENT_SUPERVISOR_WARNING_SECONDS: float = 300.0
+DEFAULT_AGENT_SUPERVISOR_TERMINATION_GRACE_SECONDS: float = 30.0
+DEFAULT_AGENT_SUPERVISOR_QUIET_SECONDS: float = 300.0
+DEFAULT_AGENT_SUPERVISOR_STALLED_SECONDS: float = 600.0
+AGENT_EVENT_MAX_LINE_BYTES: int = 256 * 1024
+AGENT_EVENT_MAX_PAYLOAD_BYTES: int = 64 * 1024
+AGENT_EVENT_STREAM_READER_LIMIT_BYTES: int = AGENT_EVENT_MAX_LINE_BYTES * 4
+AGENT_EVENT_TRANSCRIPT_TEXT_LIMIT: int = 16_000
+AGENT_EVENT_MALFORMED_TEXT_LIMIT: int = 2_000
+AGENT_EVENT_VALUE_MAX_DEPTH: int = 8
+AGENT_EVENT_VALUE_MAX_ITEMS: int = 1_000
+AGENT_EVENT_SUMMARY_TAIL_SIZE: int = 30
+AGENT_PROGRESS_SIGNATURE_WINDOW_SIZE: int = 128
+AGENT_PROGRESS_EVIDENCE_TASK_CONTRACT_LIMIT: int = 12_000
+AGENT_CHECKPOINT_TASK_CONTRACT_LIMIT: int = 50_000
+AGENT_PROCESS_EXIT_POLL_SECONDS: float = 0.05
+AGENT_ACTIVITY_MINIMUM_POLL_SECONDS: float = 0.01
 
 # The Pi daemon keeps long commands observable with NDJSON liveness events.
 # The client idle deadline is deliberately longer than the heartbeat cadence:

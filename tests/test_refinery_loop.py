@@ -423,7 +423,9 @@ def test_a_red_project_gate_parks_the_request_and_leaves_main_unchanged(
         status="active",
         access=ProjectAccessPolicy(mode=AccessMode.READ_WRITE),
         description="red gate fixture",
-        verification_commands=["printf 'combination refused' >&2; exit 7"],
+        verification_commands=[
+            "printf 'launcher warning' >&2; printf 'combination refused' >&1; exit 7"
+        ],
         integrated_branch="main",
     )
     refinery = Refinery(
@@ -441,8 +443,42 @@ def test_a_red_project_gate_parks_the_request_and_leaves_main_unchanged(
     assert isinstance(parked, BisectedOut)
     assert isinstance(parked.cause, GateFailed)
     assert parked.cause.exit_code == 7
+    assert "launcher warning" in parked.cause.output_excerpt
     assert "combination refused" in parked.cause.output_excerpt
     _assert_branch_never_advanced(repository)
+
+
+def test_refinery_gate_strips_control_plane_environment(
+    monkeypatch: pytest.MonkeyPatch,
+    repository: StackRepository,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("LOCAL_AGENT_USE_DBOS", "true")
+    monkeypatch.setenv("UNRELATED_TOOLCHAIN_SETTING", "kept")
+    project = LinkedProject(
+        id=_PROJECT,
+        kind="test_repo",
+        path=repository.path,
+        status="active",
+        access=ProjectAccessPolicy(mode=AccessMode.READ_WRITE),
+        description="control-plane environment fixture",
+        verification_commands=[
+            'test -z "${LOCAL_AGENT_USE_DBOS:-}" && test "$UNRELATED_TOOLCHAIN_SETTING" = kept'
+        ],
+        integrated_branch="main",
+    )
+    refinery = Refinery(
+        _PROJECT,
+        project=project,
+        builder=StackBuilder(repository.path, tmp_path / "worktrees"),
+        clock=lambda: 1_700_000_000.0,
+    )
+    _enqueue(repository, "alpha")
+
+    poll = refinery.poll_once()
+
+    assert isinstance(poll, Drained)
+    assert isinstance(_requests()["req-alpha"], Integrated)
 
 
 def test_a_dirty_target_checkout_refuses_fast_forward_and_requeues(

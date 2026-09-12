@@ -33,6 +33,7 @@ from local_first_agent_os.work_units.events import (
     OperatorDecision,
     decision_outcome,
 )
+from local_first_agent_os.work_units.execution import DISPATCH_WAIT_FAILURE_CODE
 from local_first_agent_os.work_units.lifecycle import (
     LifecyclePhase,
     MilestoneExecutionStatus,
@@ -119,6 +120,27 @@ def _view(
         artifacts=(),
         recent_events=(),
     )
+
+
+def test_recovery_names_the_settled_failure_not_only_the_old_timeout() -> None:
+    milestone = _milestone(
+        status=MilestoneExecutionStatus.BLOCKED,
+        dispatch_status=DispatchIntentStatus.FAILED,
+        failure_code="dispatch_wait_elapsed",
+    ).model_copy(update={"dispatch_failure_summary": "OAuth access token has been revoked"})
+    commands = next_commands_for_view(
+        _view(
+            status=WorkUnitStatus.BLOCKED,
+            milestones=(milestone,),
+            blocking=BlockingCondition(
+                kind="BLOCKED_MILESTONE", detail="wait elapsed", milestone_keys=("1",)
+            ),
+        )
+    )
+    assert commands.detail is not None
+    assert "OAuth access token has been revoked" in commands.detail
+    assert "dispatch_wait_elapsed" not in commands.detail
+    assert "correctable" not in commands.headline
 
 
 def _blocked_view() -> WorkUnitView:
@@ -220,7 +242,10 @@ def test_settled_adoption_is_refused_when_the_intent_failed() -> None:
     assert "FAILED" in (adoption.reason or "")
 
 
-def test_settled_adoption_is_ready_when_the_intent_is_done() -> None:
+@pytest.mark.parametrize(
+    "status", [DispatchIntentStatus.PAUSED, DispatchIntentStatus.CHECKPOINT_REVIEW]
+)
+def test_parked_adoption_preview_preserves_the_boundary_refusal(status) -> None:
     view = _view(
         status=WorkUnitStatus.BLOCKED,
         blocking=BlockingCondition(kind="BLOCKED_MILESTONE", detail="", milestone_keys=("1",)),
@@ -228,13 +253,83 @@ def test_settled_adoption_is_ready_when_the_intent_is_done() -> None:
             _milestone(
                 "1",
                 status=MilestoneExecutionStatus.BLOCKED,
+                failure_code="dispatch_wait_elapsed",
+                dispatch_status=status,
+                dispatch_intent_id="intent-1",
+            ),
+        ),
+    )
+    adoption = _find(next_commands_for_view(view).commands, "adopt_settled_work_unit_dispatch")
+    assert adoption.status is NextCommandStatus.REFUSED
+    assert adoption.refusal_code == "settled_adoption_dispatch_parked"
+
+
+def test_done_status_alone_does_not_prove_settled_adoption_readiness() -> None:
+    view = _view(
+        status=WorkUnitStatus.BLOCKED,
+        blocking=BlockingCondition(kind="BLOCKED_MILESTONE", detail="", milestone_keys=("1",)),
+        milestones=(
+            _milestone(
+                "1",
+                status=MilestoneExecutionStatus.BLOCKED,
+                failure_code=DISPATCH_WAIT_FAILURE_CODE,
                 dispatch_status=DispatchIntentStatus.DONE,
                 dispatch_intent_id="intent-1",
             ),
         ),
     )
     adoption = _find(next_commands_for_view(view).commands, "adopt_settled_work_unit_dispatch")
-    assert adoption.status is NextCommandStatus.READY
+    assert adoption.status is NextCommandStatus.UNPROVED
+    assert "DONE alone" in (adoption.reason or "")
+    assert "recorded artifacts" in (adoption.reason or "")
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        DispatchIntentStatus.PENDING,
+        DispatchIntentStatus.CLAIMED,
+        DispatchIntentStatus.IN_PROGRESS,
+    ],
+)
+def test_active_dispatch_preview_matches_the_adoption_boundary(status) -> None:
+    view = _view(
+        status=WorkUnitStatus.BLOCKED,
+        blocking=BlockingCondition(kind="BLOCKED_MILESTONE", detail="", milestone_keys=("1",)),
+        milestones=(
+            _milestone(
+                "1",
+                status=MilestoneExecutionStatus.BLOCKED,
+                failure_code=DISPATCH_WAIT_FAILURE_CODE,
+                dispatch_status=status,
+                dispatch_intent_id="intent-1",
+            ),
+        ),
+    )
+    adoption = _find(next_commands_for_view(view).commands, "adopt_settled_work_unit_dispatch")
+    assert adoption.status is NextCommandStatus.REFUSED
+    assert adoption.refusal_code == "settled_adoption_dispatch_still_active"
+
+
+def test_settled_adoption_is_refused_for_a_done_missing_artifact_dispatch() -> None:
+    view = _view(
+        status=WorkUnitStatus.BLOCKED,
+        blocking=BlockingCondition(kind="BLOCKED_MILESTONE", detail="", milestone_keys=("1",)),
+        milestones=(
+            _milestone(
+                "1",
+                status=MilestoneExecutionStatus.BLOCKED,
+                failure_code="missing_required_artifacts",
+                dispatch_status=DispatchIntentStatus.DONE,
+                dispatch_intent_id="intent-1",
+            ),
+        ),
+    )
+
+    adoption = _find(next_commands_for_view(view).commands, "adopt_settled_work_unit_dispatch")
+
+    assert adoption.status is NextCommandStatus.REFUSED
+    assert adoption.refusal_code == "settled_adoption_not_wait_elapsed"
 
 
 def test_review_recovery_is_refused_when_no_review_ever_ran() -> None:

@@ -5,12 +5,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import Any
+from typing import TYPE_CHECKING
 
 from ..contracts import IngressEvent, WorkflowResult, WorkflowType
 from ..directives import DirectiveParser
 from ..runtime import AppRuntime
+
+if TYPE_CHECKING:
+    from ..pow_wow.types import DelegateFn
 
 
 class WorkflowMixinBase:
@@ -19,7 +21,7 @@ class WorkflowMixinBase:
     def _start(self, workflow_type: WorkflowType, event: IngressEvent) -> str:
         raise NotImplementedError
 
-    def _saga_delegate_fn(self, workflow_id: str) -> Callable[..., Mapping[str, Any]]:
+    def _saga_delegate_fn(self, workflow_id: str) -> DelegateFn:
         raise NotImplementedError
 
     def _fail_directory_embedding(

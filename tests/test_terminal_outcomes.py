@@ -87,13 +87,55 @@ def test_streamed_provider_limit_variants_classify_as_usage_limit() -> None:
         assert classify_failure(evidence) == TerminalOutcome.USAGE_LIMIT
 
 
+def test_provider_transcripts_do_not_guess_at_unknown_failures() -> None:
+    assert classify_failure("model not loaded: qwen3.5-27b") == (
+        TerminalOutcome.LOCAL_MODEL_NOT_LOADED
+    )
+    for evidence in (
+        "staff reviewer rejected the proposed change",
+        "provider returned a novel refusal code ZEBRA-17",
+        "process exited 1",
+    ):
+        assert classify_failure(evidence) == TerminalOutcome.UNKNOWN_FAILURE
+
+
 def test_business_and_infrastructure_failures_are_disjoint() -> None:
     assert set(BusinessFailure).isdisjoint(set(InfrastructureFailure))
+    assert BusinessFailure.REVIEW_OUTPUT_MISSING.value == (
+        TerminalOutcome.REVIEW_OUTPUT_MISSING.value
+    )
+    assert BusinessFailure.POLICY_DENIED.value == TerminalOutcome.POLICY_DENIED.value
+    assert InfrastructureFailure.LOCAL_MODEL_NOT_LOADED.value == (
+        TerminalOutcome.LOCAL_MODEL_NOT_LOADED.value
+    )
     assert failure_category(BusinessFailure.VERIFICATION_FAILED) == FailureCategory.BUSINESS
+    assert failure_category(TerminalOutcome.REVIEW_OUTPUT_MISSING) == FailureCategory.BUSINESS
+    assert failure_category("POLICY_DENIED") == FailureCategory.BUSINESS
     assert failure_category(InfrastructureFailure.USAGE_LIMIT) == FailureCategory.INFRASTRUCTURE
+    assert failure_category(InfrastructureFailure.ARTIFACT_WRITE_FAILED) == (
+        FailureCategory.INFRASTRUCTURE
+    )
+    assert failure_category(TerminalOutcome.LOCAL_MODEL_NOT_LOADED) == (
+        FailureCategory.INFRASTRUCTURE
+    )
     assert classify_failure("codex authentication invalid or expired") == (
         TerminalOutcome.AUTHENTICATION_FAILED
     )
+
+
+def test_every_terminal_outcome_has_an_explicit_category_decision() -> None:
+    business = {failure.value for failure in BusinessFailure}
+    infrastructure = {failure.value for failure in InfrastructureFailure}
+
+    for outcome in TerminalOutcome:
+        expected = (
+            FailureCategory.BUSINESS
+            if outcome.value in business
+            else FailureCategory.INFRASTRUCTURE
+            if outcome.value in infrastructure
+            else None
+        )
+        assert failure_category(outcome) is expected
 
 
 def test_duplicate_milestone_intent_is_suppressed_at_claim_time(

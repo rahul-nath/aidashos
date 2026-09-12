@@ -109,7 +109,7 @@ def settle_landed_integration(payload: dict[str, Any]) -> SettlementOutcome:
     """Settle one ``integration_landed`` event's milestone, or say why not."""
 
     intent_id = str(payload.get("intent_id") or "") or None
-    if intent_id is None or not payload.get("milestone_key"):
+    if intent_id is None:
         return SettlementSkipped(
             intent_id=intent_id,
             reason="the integration request did not come from a milestone",
@@ -124,6 +124,8 @@ def settle_landed_integration(payload: dict[str, Any]) -> SettlementOutcome:
                 "MILESTONE_COMPLETED_BEFORE_EXACT_MERGE forbids settling without one"
             ),
         )
+    # Legacy approval metadata is optional; the retained dispatch owns the
+    # WorkUnit/milestone identity, and the aggregate verifies its current intent.
     with_source = _work_unit_source(intent_id)
     if with_source is None:
         return SettlementSkipped(
@@ -238,8 +240,7 @@ def settle_landed_integration(payload: dict[str, Any]) -> SettlementOutcome:
         work_unit_id,
         phase=milestone.phase,
         milestone_key=milestone_key,
-        attempt=attempt,
-        child_workflow_id=child_workflow_id,
+        child_workflow_id=f"integration-settlement:{subject.request_id}",
         dispatch_intent_id=intent_id,
         artifact=artifact,
         shared_payload=shared_payload,
@@ -247,6 +248,14 @@ def settle_landed_integration(payload: dict[str, Any]) -> SettlementOutcome:
             f"the landed commit {integrated.integration_commit_sha} settled this "
             f"milestone ({landing})"
         ),
+    )
+    # The row-lock owner may have observed a timeout after our initial snapshot.
+    # Use the state it actually completed, not the stale pre-lock observation.
+    attempt = int(outcome.event.payload["attempt"])
+    child_workflow_id = str(outcome.event.child_workflow_id)
+    live_execution = (
+        outcome.event.payload.get("integration_previous_status")
+        == MilestoneExecutionStatus.RUNNING.value
     )
     if live_execution:
         from .root_workflow import notify_integration_settlement

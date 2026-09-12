@@ -11,6 +11,24 @@ from local_first_agent_os.project_center import load_project_center
 from local_first_agent_os.settings import Settings
 
 
+@pytest.mark.parametrize("relative_path", [".", "../sibling"])
+def test_relative_project_path_is_bound_to_registry_checkout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative_path: str
+) -> None:
+    checkout = tmp_path / "checkout"
+    config_dir = checkout / "configs"
+    config_dir.mkdir(parents=True)
+    write_registry(config_dir, Path(relative_path))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    center = load_project_center(Settings(config_dir=config_dir))
+
+    expected = (checkout / relative_path).resolve()
+    assert all(project.expanded_path == expected for project in center.projects)
+
+
 def write_registry(config_dir: Path, project_path: Path) -> None:
     (config_dir / "linked_projects.toml").write_text(
         f"""

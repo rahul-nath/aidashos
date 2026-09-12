@@ -15,6 +15,27 @@ git clone https://github.com/rahul-nath/aidashos.git && cd aidashos && make
 `make` runs `scripts/bootstrap.sh --install-system`: uv and Python 3.13, Node, `.env` from the example, Docker, Postgres, and the schemas.
 It downloads no model weights.
 
+The base install also creates a protected operator identity and binds command-only verification to the registered checkout and the dedicated `postgres-test` service on `127.0.0.1:5433/local_agent`.
+Each gate receives a temporary database role through a relay that accepts only that role and database.
+The verifier cannot use the public test service's owner login through the relay or reach its port directly.
+Cleanup revokes the role's login, terminates its sessions, and drops its owned schemas before a successful receipt is accepted.
+
+For an existing checkout, run `./scripts/initialize-operator-identity.sh` and `./scripts/initialize-verification-resources.sh` explicitly to install these prerequisites.
+The verification setup command uses the existing PostgreSQL 16 image with `--pull never --no-build`; it refuses a missing image without downloading it.
+It preserves an existing matching setup and refuses a different protected binding or retained legacy Neon setup that needs an explicit migration.
+The readiness check is read-only.
+
+On macOS, contained test execution also needs the [native verifier helper](../../scripts/verifier_uid/README.md).
+Follow that guide to prepare the installation, review the privileged action, qualify it on your machine and activate the service.
+The base install alone does not establish that the verifier is ready.
+
+For a retained Neon v1 setup, first quiesce every dispatcher, verifier, and cleanup owner.
+Then run `uv run --offline --no-sync python -m local_first_agent_os.local_verification_setup migrate-legacy-neon-to-local` from the registered checkout.
+The command verifies the same Git common directory and matching CLOSED legacy lease receipts before binding the existing local test service.
+Malformed, mismatched, or unfinished legacy leases prevent migration.
+The retained Neon metadata, credential, and cleanup receipts remain unchanged; the command does not contact Neon.
+Repeated migration and ordinary initialization preserve an established matching local binding.
+
 ## 2. Boot sequence
 
 Two equivalent ways to run it.
@@ -39,7 +60,8 @@ Either way the stages are the same, and [scripts/boot/README.md](../../scripts/b
 7. `50-set-default-stack` materializes `.env`, checks the model registry against what you downloaded, and caps the llama router at one resident heavyweight model when both are installed.
 8. `60-verify-boot` runs `scripts/first-run-check.sh` and fails loudly with the fixing command for anything missing.
 
-The opinionated defaults you inherit are the checked-in configs: `configs/staffing.toml` seats senior on Codex and staff on Claude Code with gemma4 as the local junior, and `configs/model_registry.toml` maps the local roles.
+The opinionated defaults you inherit are the checked-in configs: `configs/staffing.toml` seats senior and staff in separate Codex sessions with distinct reasoning-effort profiles, declares a Claude-only fallback for a later attempt, and uses gemma4 as the local junior.
+`configs/model_registry.toml` maps the local roles.
 Swapping any seat is a one-line TOML edit.
 
 ## 3. Run
@@ -49,6 +71,7 @@ Swapping any seat is a one-line TOML edit.
 ```
 
 Postgres, the llama.cpp router, whisper, and the resident pi daemon come up supervised; the script exits non-zero naming anything that failed.
+Runtime relaunch also starts the already-installed verification database with image pulls and builds disabled, so the dedicated service is available again after a reboot.
 
 ## 4. Drive it
 
@@ -66,7 +89,7 @@ Or from your own AI tool over MCP: Claude Code picks up the repo's `.mcp.json` a
 ## Platforms
 
 macOS is the supported platform today, and it is the one this is developed and run on daily.
-Linux is expected to work, since every boot stage is POSIX shell and the runtime has no macOS-specific dependency, but it is not exercised on a schedule.
+The contained verifier uses macOS-specific security features, so this release does not claim that the complete workflow works on Linux.
 
 Windows is not supported.
 PowerShell twins of every boot stage are written and kept at `potential_directions/windows-boot/`, and they have never been executed or parsed, so nothing here claims they work.

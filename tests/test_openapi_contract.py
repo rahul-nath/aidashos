@@ -15,7 +15,10 @@ own environment: describing the application must not depend on a developer's
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -58,6 +61,57 @@ def test_the_committed_schema_matches_the_application() -> None:
         f"web/openapi.json is stale. Run `make api-types` and commit the result.\n"
         f"{result.stdout}{result.stderr}"
     )
+
+
+def test_schema_dump_owns_all_state_outside_a_readonly_checkout(tmp_path: Path) -> None:
+    checkout = tmp_path / "readonly-checkout"
+    shutil.copytree(
+        _REPO_ROOT / "src",
+        checkout / "src",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    for name in ("scripts/dump_openapi.py", "web/openapi.json"):
+        target = checkout / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(_REPO_ROOT / name, target)
+    scratch_parent = tmp_path / "scratch"
+    scratch_parent.mkdir()
+
+    def source_manifest() -> dict[Path, str | None]:
+        return {
+            path.relative_to(checkout): (
+                hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+            )
+            for path in checkout.rglob("*")
+        }
+
+    before = source_manifest()
+    files = [checkout / name for name, digest in before.items() if digest is not None]
+    directories = [checkout, *(path for path in checkout.rglob("*") if path.is_dir())]
+    for path in files:
+        path.chmod(0o444)
+    for path in directories:
+        path.chmod(0o555)
+    try:
+        result = subprocess.run(
+            [sys.executable, "-B", "scripts/dump_openapi.py", "--check"],
+            cwd=checkout,
+            env={**os.environ, "PYTHONPATH": str(checkout / "src"), "TMPDIR": str(scratch_parent)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "matches the application schema" in result.stdout
+        assert not (checkout / "docs").exists()
+        assert not list(scratch_parent.iterdir())
+        assert source_manifest() == before
+    finally:
+        for path in directories:
+            path.chmod(0o755)
+        for path in files:
+            path.chmod(0o644)
 
 
 def test_every_typed_route_declares_its_response_model() -> None:

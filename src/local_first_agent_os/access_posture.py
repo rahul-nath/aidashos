@@ -31,13 +31,36 @@ history removing.
 
 from __future__ import annotations
 
+import atexit
 import logging
+import threading
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import assert_never
 
 from .capabilities import Capability
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ObservedRefusal:
+    capability: Capability
+    agent_name: str
+    pow_wow_id: str | None
+    reason: str
+
+    def to_payload(self) -> dict[str, str]:
+        return {
+            "capability": self.capability.value,
+            "agent_name": self.agent_name,
+            "pow_wow_id": self.pow_wow_id or "",
+            "reason": self.reason,
+        }
+
+
+_OBSERVED_REFUSALS: list[ObservedRefusal] = []
+_OBSERVED_REFUSALS_LOCK = threading.Lock()
 
 
 class AccessPosture(StrEnum):
@@ -159,6 +182,14 @@ def record_unenforced_refusal(
     reconciliation and the crash reconciler both read.
     """
 
+    refusal = ObservedRefusal(
+        capability=capability,
+        agent_name=agent_name,
+        pow_wow_id=pow_wow_id,
+        reason=reason,
+    )
+    with _OBSERVED_REFUSALS_LOCK:
+        _OBSERVED_REFUSALS.append(refusal)
     logger.warning(
         "access_posture_observed_refusal",
         extra={
@@ -174,10 +205,44 @@ def record_unenforced_refusal(
     )
 
 
+def observed_refusals() -> tuple[ObservedRefusal, ...]:
+    """Return the exact observing-posture refusals recorded by this process."""
+
+    with _OBSERVED_REFUSALS_LOCK:
+        return tuple(_OBSERVED_REFUSALS)
+
+
+def flush_observed_refusal_summary() -> tuple[ObservedRefusal, ...]:
+    """Log and clear the process summary promised by observing posture."""
+
+    with _OBSERVED_REFUSALS_LOCK:
+        refusals = tuple(_OBSERVED_REFUSALS)
+        _OBSERVED_REFUSALS.clear()
+    if refusals:
+        logger.warning(
+            "access_posture_observed_refusal_summary",
+            extra={
+                "detail": (
+                    f"observing posture allowed {len(refusals)} action(s) that enforcing "
+                    "would have refused"
+                ),
+                "refusal_count": len(refusals),
+                "refusals": [refusal.to_payload() for refusal in refusals],
+            },
+        )
+    return refusals
+
+
+atexit.register(flush_observed_refusal_summary)
+
+
 __all__ = [
     "ALWAYS_ENFORCED",
     "AccessPosture",
+    "ObservedRefusal",
     "announce_posture",
+    "flush_observed_refusal_summary",
+    "observed_refusals",
     "record_unenforced_refusal",
     "relaxable",
     "resolve",

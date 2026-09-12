@@ -581,6 +581,25 @@ def models() -> None:
     console.print_json(json.dumps(rows))
 
 
+@app.command("active-general-selection")
+def active_general_selection() -> None:
+    """Print the durable local-general role and served model for scripts."""
+
+    from .runtime import get_runtime
+
+    _route_logs_to_stderr()
+    role, server_model_name = _active_general_selection(get_runtime())
+    typer.echo(f"{role}\t{server_model_name}")
+
+
+def _active_general_selection(runtime: Any) -> tuple[str, str]:
+    """Resolve one machine-readable active-general selection."""
+
+    role = runtime.model_manager.effective_general_role(refresh=True)
+    model = runtime.model_registry.resolve_model(role)
+    return role.value, model.server_model_name
+
+
 @app.command("pi")
 def pi_directive(
     directive: Annotated[

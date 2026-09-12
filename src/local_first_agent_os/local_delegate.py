@@ -4,7 +4,7 @@
 """The local model, as the one callback an executor holds to reach it.
 
 The junior tier does not run a CLI. It answers from the served local model
-through ``delegate_agent_task``, and the executor reaches that through a single
+through ``delegate_local_model_task``, and the executor reaches that through a single
 sync callback so "which model answers" stays behind an injected adapter instead
 of inside the scheduler.
 
@@ -30,7 +30,7 @@ import threading
 from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any
 
-from .contracts import ModelRole, WorkflowType, WorkspaceId
+from .contracts import WorkflowType, WorkspaceId
 from .pow_wow.types import DelegateFn
 from .workflow.saga_support import run_coroutine_blocking
 
@@ -109,46 +109,40 @@ def build_resident_local_delegate(runtime: AppRuntime) -> DelegateFn:
 def _build_local_delegate(runtime: AppRuntime, *, workflow_id_for: WorkflowIdFor) -> DelegateFn:
     """The shared body: resolve the served model to a role, then run the task."""
 
-    from .delegation import agent_result_payload, delegate_agent_task
+    from .delegation import agent_result_payload, delegate_local_model_task
 
     def delegate(
         *,
         prompt: str,
         task_name: str = "",
-        role: str = "delegate",
-        tier: str = "junior",
         model: str | None = None,
-        model_params: Mapping[str, Any] | None = None,
+        model_params: Mapping[str, object] | None = None,
         timeout_seconds: int | float | None = None,
         pow_wow_id: str = "",
-        **_: Any,
     ) -> Mapping[str, Any]:
-        # The bench slot names a served model (e.g. 'gemma4'); resolve it to the
-        # model role the ModelManager routes by. Falls back to GENERAL.
-        model_role = ModelRole.GENERAL
-        if model:
+        # An unspecified model on a local seat means the operator's durable
+        # active-general choice. Explicit workload profiles still resolve their
+        # served model name through the registry.
+        model_role = runtime.model_manager.effective_general_role(refresh=True)
+        if model is not None:
             resolved = runtime.model_registry.role_for_server_name(model)
-            if resolved is not None:
-                model_role = resolved
+            if resolved is None:
+                raise ValueError(f"local model {model!r} is not registered")
+            model_role = resolved
         workflow_id = workflow_id_for(pow_wow_id, task_name)
 
         async def _execute_delegated_agent_task() -> Mapping[str, Any]:
-            result = await delegate_agent_task(
+            result = await delegate_local_model_task(
                 runtime,
                 prompt=prompt,
-                tier="weak",
-                adapter="local_llama",
-                model_role=model_role.value,
-                role=role,
+                model_role=model_role,
                 model_params=dict(model_params or {}),
-                timeout_seconds=int(timeout_seconds or runtime.settings.saga_task_timeout_seconds),
-                metadata={
-                    "workflow_id": workflow_id,
-                    "tier": tier,
-                    "task_name": task_name,
-                    "requested_model": model,
-                    "resolved_model_role": model_role.value,
-                },
+                timeout_seconds=int(
+                    timeout_seconds
+                    if timeout_seconds is not None
+                    else runtime.settings.saga_task_timeout_seconds
+                ),
+                workflow_id=workflow_id,
             )
             return agent_result_payload(result)
 

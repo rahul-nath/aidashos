@@ -30,7 +30,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUTPUT = _REPO_ROOT / "web" / "openapi.json"
 
 
-def _isolate_runtime_environment() -> None:
+def _isolate_runtime_environment(scratch: Path) -> None:
     """Point the app at throwaway state so describing it needs no live services.
 
     The schema is a property of the code, not of any deployment. Reading a
@@ -38,10 +38,10 @@ def _isolate_runtime_environment() -> None:
     machine ran the dump.
     """
 
-    scratch = Path(tempfile.mkdtemp(prefix="openapi-dump-"))
     os.environ["LOCAL_AGENT_DATABASE_URL"] = f"sqlite:///{scratch / 'openapi.sqlite3'}"
     os.environ["LOCAL_AGENT_COORDINATION_BACKEND"] = "postgres"
     os.environ["AGENT_COORDINATION_ROOT"] = str(scratch)
+    os.environ["LOCAL_AGENT_COORDINATION_ROOT"] = str(scratch)
     os.environ["LOCAL_AGENT_ARTIFACT_ROOT"] = str(scratch / "artifacts")
     os.environ["LOCAL_AGENT_SPOOL_DIR"] = str(scratch / "spool")
     os.environ.setdefault("LOCAL_AGENT_USE_DBOS", "false")
@@ -49,12 +49,22 @@ def _isolate_runtime_environment() -> None:
 
 
 def render_schema() -> str:
-    _isolate_runtime_environment()
-    sys.path.insert(0, str(_REPO_ROOT / "src"))
-    from local_first_agent_os.api import create_app
+    with tempfile.TemporaryDirectory(prefix="openapi-dump-") as directory:
+        scratch = Path(directory)
+        _isolate_runtime_environment(scratch)
+        sys.path.insert(0, str(_REPO_ROOT / "src"))
+        from local_first_agent_os.api import create_app
+        from local_first_agent_os.runtime import get_runtime
 
-    schema = create_app().openapi()
-    return json.dumps(schema, indent=2, sort_keys=True) + "\n"
+        runtime = get_runtime()
+        try:
+            schema = create_app(intake_root=scratch).openapi()
+            return json.dumps(schema, indent=2, sort_keys=True) + "\n"
+        finally:
+            try:
+                runtime.close()
+            finally:
+                runtime.database.engine.dispose()
 
 
 def main(argv: list[str] | None = None) -> int:

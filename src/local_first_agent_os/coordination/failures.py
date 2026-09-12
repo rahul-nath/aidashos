@@ -11,7 +11,9 @@ codes (for example ``invalid_base_sha``).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
+from enum import StrEnum
 from typing import Any
 
 from .outcomes import (
@@ -24,6 +26,18 @@ from .outcomes import (
 
 FAILURE_SCHEMA_VERSION = "failure.v1"
 
+
+class FailureClassificationSource(StrEnum):
+    """Which owner selected the durable terminal outcome."""
+
+    EXPLICIT = "EXPLICIT"
+    MARKER = "MARKER"
+    JUNIOR_MODEL = "JUNIOR_MODEL"
+    UNCLASSIFIED = "UNCLASSIFIED"
+
+
+type UnknownFailureClassifier = Callable[[str], TerminalOutcome | None]
+
 _RETRYABLE_INFRASTRUCTURE_FAILURES = frozenset(
     {
         InfrastructureFailure.USAGE_LIMIT.value,
@@ -31,6 +45,7 @@ _RETRYABLE_INFRASTRUCTURE_FAILURES = frozenset(
         InfrastructureFailure.ORPHANED_LEASE_EXPIRED.value,
         InfrastructureFailure.SUPERVISOR_FAILED.value,
         InfrastructureFailure.PROCESS_FAILED.value,
+        InfrastructureFailure.EXECUTION_ENVIRONMENT_LOST.value,
         InfrastructureFailure.ARTIFACT_WRITE_FAILED.value,
         InfrastructureFailure.EVENT_WRITE_FAILED.value,
         InfrastructureFailure.CHECKPOINT_WRITE_FAILED.value,
@@ -51,6 +66,14 @@ class FailureV1:
     exception_type: str = ""
     schema_version: str = FAILURE_SCHEMA_VERSION
 
+    def __post_init__(self) -> None:
+        is_unknown = TerminalOutcome.UNKNOWN_FAILURE.value in {
+            self.error_code,
+            self.terminal_outcome,
+        }
+        if is_unknown and not self.message.strip():
+            raise ValueError("UNKNOWN_FAILURE requires raw failure text")
+
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["category"] = self.category.value
@@ -65,6 +88,14 @@ class FailureV1:
             "retryable": self.retryable,
             "operation": self.operation,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class FailureClassification:
+    """A failure record paired with the owner that selected its outcome."""
+
+    failure: FailureV1
+    source: FailureClassificationSource
 
 
 class DurableFailureError(RuntimeError):
@@ -103,6 +134,57 @@ def expected_failure(
     )
 
 
+def classified_failure(
+    raw_text: str,
+    *,
+    operation: str,
+    unknown_classifier: UnknownFailureClassifier | None = None,
+) -> FailureV1:
+    """Classify boundary evidence once, consulting judgment only after markers miss."""
+
+    return classify_failure_with_source(
+        raw_text,
+        operation=operation,
+        unknown_classifier=unknown_classifier,
+    ).failure
+
+
+def classify_failure_with_source(
+    raw_text: str,
+    *,
+    operation: str,
+    unknown_classifier: UnknownFailureClassifier | None = None,
+) -> FailureClassification:
+    """Classify boundary evidence and retain who selected the outcome."""
+
+    evidence = str(raw_text).strip()
+    if not evidence:
+        raise ValueError("failure classification requires raw failure text")
+    outcome = classify_failure(evidence)
+    source = (
+        FailureClassificationSource.MARKER
+        if outcome is not TerminalOutcome.UNKNOWN_FAILURE
+        else FailureClassificationSource.UNCLASSIFIED
+    )
+    if outcome is TerminalOutcome.UNKNOWN_FAILURE and unknown_classifier is not None:
+        model_outcome = unknown_classifier(evidence)
+        if model_outcome is not None:
+            if not isinstance(model_outcome, TerminalOutcome):
+                raise TypeError("unknown failure classifier must return TerminalOutcome or None")
+            if failure_category(model_outcome) is None:
+                raise ValueError("unknown failure classifier returned a non-failure outcome")
+            outcome = model_outcome
+            source = FailureClassificationSource.JUNIOR_MODEL
+    return FailureClassification(
+        failure=expected_failure(
+            outcome,
+            operation=operation,
+            message=evidence,
+        ),
+        source=source,
+    )
+
+
 def exceptional_failure(error: BaseException, *, operation: str) -> FailureV1:
     """Normalize an exception without trusting its free-form message as a code."""
 
@@ -112,12 +194,12 @@ def exceptional_failure(error: BaseException, *, operation: str) -> FailureV1:
             return failure
         return replace(failure, operation=operation)
 
+    evidence = f"{type(error).__name__}: {error}"
     if isinstance(error, TimeoutError):
         outcome = TerminalOutcome.DEADLINE_EXCEEDED
     elif isinstance(error, AssertionError):
         outcome = TerminalOutcome.INTERNAL_ASSERTION
     else:
-        evidence = f"{type(error).__name__}: {error}"
         outcome = classify_failure(evidence)
     category = failure_category(outcome) or FailureCategory.INFRASTRUCTURE
     return FailureV1(
@@ -125,7 +207,7 @@ def exceptional_failure(error: BaseException, *, operation: str) -> FailureV1:
         category=category,
         retryable=_retryable(outcome.value, category),
         operation=operation,
-        message=str(error),
+        message=str(error) or evidence,
         terminal_outcome=outcome.value,
         exception_type=type(error).__name__,
     )
@@ -147,7 +229,12 @@ def _retryable(error_code: str, category: FailureCategory) -> bool:
 __all__ = [
     "FAILURE_SCHEMA_VERSION",
     "DurableFailureError",
+    "FailureClassification",
+    "FailureClassificationSource",
     "FailureV1",
+    "UnknownFailureClassifier",
+    "classify_failure_with_source",
+    "classified_failure",
     "exceptional_failure",
     "expected_failure",
 ]

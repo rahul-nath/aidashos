@@ -514,7 +514,7 @@ def _paired_tier_staffing(
     Where the pair goes is `Staffing.pairing_avoiding`: the first declared
     fallback pairing that avoids every spent harness. The landing is therefore
     itself a checked `FrontierPairing` - implementer and reviewer arrive
-    together, already proven distinct - rather than whatever two independent
+    together as declared - rather than whatever two independent
     escapes happened to compose.
 
     Nothing declared avoiding the outage means both seats report
@@ -712,17 +712,7 @@ def build_quota_claim_gate(
 
 
 def collapsed_cross_checks(plan: Iterable[TierStaffing]) -> tuple[str, ...]:
-    """The notices for restaffings that put two frontier tiers on one provider.
-
-    A bench that staffs senior and staff on different frontier providers is
-    buying something specific: the reviewer is not the model that wrote the
-    change. Restaffing around a spent quota spends that property by
-    construction, because the replacement is always a provider some other tier
-    already uses. At a door a human reads the restaffing notice and decides; on
-    a dispatch path it fires per milestone for the whole cooldown behind a
-    progress line, so the collapsed property has to be named or it is simply
-    gone until somebody wonders why a review agreed with its own implementation.
-    """
+    """Report lost model/provider diversity without claiming review is invalid."""
 
     items = tuple(plan)
     effective: dict[DispatchTier, FrontierHarness] = {}
@@ -747,12 +737,6 @@ def collapsed_cross_checks(plan: Iterable[TierStaffing]) -> tuple[str, ...]:
         )
         if not sharing:
             continue
-        # Sharing a vendor and sharing a model are two different losses, and one
-        # message for both was a lie in whichever direction it was wrong. A
-        # restaffing that keeps a distinct model still has a reviewer that can
-        # disagree with the implementer; saying the cross-check is "collapsed"
-        # there understates what survived, and saying it is intact when one model
-        # holds both seats overstates it by far more.
         replacement_model = item.replacement.model
         # `None` is a model, not the absence of one: it means the harness's own
         # default, so two slots holding `None` on the same harness are the same
@@ -770,16 +754,15 @@ def collapsed_cross_checks(plan: Iterable[TierStaffing]) -> tuple[str, ...]:
         if collapsed_onto:
             notices.append(
                 f"{item.tier.value} now runs {named} on {replacement_kind.value}, "
-                f"the same model as {', '.join(collapsed_onto)}; the two-model "
-                "cross-check is collapsed for this dispatch and one model is "
-                "implementing and reviewing its own change"
+                f"the same model as {', '.join(collapsed_onto)}; model and provider "
+                "diversity are absent, but separate review sessions remain required"
             )
             continue
         notices.append(
             f"{item.tier.value} now shares {replacement_kind.value} with "
             f"{', '.join(sharing)}; provider diversity is gone for this dispatch, "
-            f"and the cross-check rests on {named} differing from the other "
-            "seat's model"
+            f"and {named} differs from the other seat's model; separate review "
+            "sessions remain required"
         )
     return tuple(notices)
 

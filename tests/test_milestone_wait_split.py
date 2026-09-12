@@ -22,6 +22,7 @@ from test_dispatch_backed_runtime import _context
 
 from local_first_agent_os.constants import dispatch_settlement_topic
 from local_first_agent_os.contracts import DispatchIntentStatus
+from local_first_agent_os.dispatch_contracts import DispatchIngressFailureCode
 from local_first_agent_os.work_units.execution import (
     CompositeExecutorRuntime,
     DeferrableMilestoneRuntime,
@@ -29,10 +30,11 @@ from local_first_agent_os.work_units.execution import (
     DispatchWaitTimeout,
     MilestoneAwaitingDispatch,
     MilestoneFailed,
-    MilestoneSucceeded,
     SimulatedExecutorRuntime,
 )
 from local_first_agent_os.work_units.executors import ExecutorKind
+from local_first_agent_os.work_units.lifecycle import FailureClass
+from local_first_agent_os.work_units.plan_evidence import PlanEvidenceCause
 
 
 class _Submitter:
@@ -104,12 +106,13 @@ def _runner_result(**run_result: Any) -> str:
         {
             "schema_version": "dispatch_runner_result.v1",
             "intent_id": "intent-1",
-            "run_result": {"output_summary": "", **run_result},
+            "target_project_id": "proj",
+            "run_result": {"status": "COMPLETED", "output_summary": "", **run_result},
         }
     )
 
 
-def test_settle_translates_a_terminal_row(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_settle_refuses_summary_only_done_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "local_first_agent_os.work_units.execution.dispatch_intent_row",
         lambda _id: {
@@ -124,7 +127,38 @@ def test_settle_translates_a_terminal_row(monkeypatch: pytest.MonkeyPatch) -> No
 
     outcome = runtime.settle(_context(), awaiting)
 
-    assert isinstance(outcome, MilestoneSucceeded)
+    assert isinstance(outcome, MilestoneFailed)
+    assert outcome.failure_code is PlanEvidenceCause.HOST_EVIDENCE_UNAVAILABLE
+    assert outcome.failure_class is FailureClass.REQUIRES_OPERATOR
+    assert not outcome.artifacts
+
+
+@pytest.mark.parametrize(
+    ("run_status", "expected_code"),
+    [
+        (None, DispatchIngressFailureCode.REPORT_CONTRACT_VIOLATION.value),
+        ("FAILED", "unverifiable_dispatch_result"),
+    ],
+)
+def test_done_row_does_not_replace_runner_completion_evidence(
+    monkeypatch: pytest.MonkeyPatch, run_status: str | None, expected_code: str
+) -> None:
+    """Historical inconsistent rows remain failures during resumed settlement."""
+    monkeypatch.setattr(
+        "local_first_agent_os.work_units.execution.dispatch_intent_row",
+        lambda _id: {
+            "status": DispatchIntentStatus.DONE.value,
+            "result": _runner_result(status=run_status, output_summary="unproved answer"),
+            "outcome": None,
+            "error": None,
+        },
+    )
+    outcome = _runtime(_Submitter()).settle(
+        _context(), MilestoneAwaitingDispatch(dispatch_intent_id="intent-1", timeout_seconds=5.0)
+    )
+    assert isinstance(outcome, MilestoneFailed)
+    assert outcome.failure_code == expected_code
+    assert not outcome.artifacts
 
 
 def test_a_result_that_is_not_a_runner_payload_cannot_be_vouched_for(
@@ -152,7 +186,8 @@ def test_a_result_that_is_not_a_runner_payload_cannot_be_vouched_for(
     outcome = runtime.settle(_context(), awaiting)
 
     assert isinstance(outcome, MilestoneFailed)
-    assert outcome.failure_code == "unverifiable_dispatch_result"
+    assert outcome.failure_code == DispatchIngressFailureCode.REPORT_CONTRACT_VIOLATION.value
+    assert "diagnostic_event_id=" in outcome.failure_summary
 
 
 def test_a_run_that_changed_nothing_does_not_produce_a_source_patch() -> None:
@@ -180,9 +215,8 @@ def test_a_run_that_changed_nothing_does_not_produce_a_source_patch() -> None:
     patch = _agent_evidence(ArtifactKind.SOURCE_PATCH, real_run)
     tests = _agent_evidence(ArtifactKind.TEST_RESULT, real_run)
     assert patch is not None and "src/a.py" in patch
-    assert tests is not None and "2 passed" in tests
-    # Distinguishable bodies. The whole defect was that these were identical.
-    assert patch != tests
+    # Report text remains an observation. TEST_RESULT needs the host receipt owner.
+    assert tests is None
 
 
 def test_settle_translates_a_failed_row(monkeypatch: pytest.MonkeyPatch) -> None:

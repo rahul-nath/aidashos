@@ -741,6 +741,7 @@ dependencies = [
     { name = "urllib3" },
     { name = "watchdog" },
     { name = "webrtcvad-wheels" },
+    { name = "websockets" },
 ]
 
 [package.dev-dependencies]
@@ -785,6 +786,7 @@ requires-dist = [
     { name = "urllib3", specifier = ">=2.7.0" },
     { name = "watchdog", specifier = ">=6.0.0" },
     { name = "webrtcvad-wheels", specifier = ">=2.0.14" },
+    { name = "websockets", specifier = "==16.0" },
 ]
 
 [package.metadata.requires-dev]

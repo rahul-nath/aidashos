@@ -9,12 +9,15 @@ import asyncio
 import json
 import threading
 import uuid
-from typing import Any, Literal
+from typing import Any
 
-from local_first_agent_os.constants import DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS
+from local_first_agent_os.constants import (
+    DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
+    DEFAULT_DELEGATED_TASK_MAX_TOKENS,
+)
 
 from ..capabilities import UnknownCapability, parse_capability
-from ..contracts import PowWowStatus, TaskStatus
+from ..contracts import ModelRole, PowWowStatus, TaskStatus
 from ..operator_identity import OperatorIdentityRefused, verify_operator_actor
 from ..vocabulary import ToolPermissionStatus
 from .store import (
@@ -514,33 +517,26 @@ def _run_coroutine_blocking(coro: Any) -> Any:
 def _run_delegate_task(
     *,
     prompt: str,
-    tier: str = "weak",
-    adapter: str | None = None,
-    model_role: str = "general",
-    role: str = "delegate",
-    pow_wow_id: str | None = None,
+    model_role: ModelRole = ModelRole.GENERAL,
     task_id: str | None = None,
-    max_tokens: int = 2048,
+    task_max_tokens: int = DEFAULT_DELEGATED_TASK_MAX_TOKENS,
     timeout_seconds: int = DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
-    session_id: str | None = None,
 ) -> dict[str, Any]:
-    from local_first_agent_os.delegation import agent_result_payload, delegate_agent_task
+    from local_first_agent_os.delegation import (
+        agent_result_payload,
+        delegate_local_model_task,
+    )
     from local_first_agent_os.runtime import get_runtime
 
     runtime = get_runtime()
     return agent_result_payload(
         _run_coroutine_blocking(
-            delegate_agent_task(
+            delegate_local_model_task(
                 runtime,
                 prompt=prompt,
-                tier=tier,
-                adapter=adapter,
                 model_role=model_role,
-                role=role,
-                pow_wow_id=pow_wow_id,
                 task_id=task_id,
-                session_id=session_id,
-                max_tokens=max_tokens,
+                task_max_tokens=task_max_tokens,
                 timeout_seconds=timeout_seconds,
             )
         )
@@ -549,35 +545,28 @@ def _run_delegate_task(
 
 def delegate_task(
     prompt: str,
-    tier: Literal["weak", "strong", "special"] = "weak",
-    adapter: str | None = "local_llama",
-    model_role: str = "general",
-    role: str = "delegate",
+    model_role: ModelRole = ModelRole.GENERAL,
     pow_wow_id: str | None = None,
     task_id: str | None = None,
-    max_tokens: int = 2048,
+    task_max_tokens: int = DEFAULT_DELEGATED_TASK_MAX_TOKENS,
     timeout_seconds: int = DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
     submit_result: bool = True,
     session_id: str | None = None,
 ) -> dict[str, Any]:
-    """Delegate a bounded prompt to an agent adapter.
+    """Delegate a bounded prompt to the configured local model runtime.
 
-    Defaults to the local llama.cpp adapter so Codex/Claude can offload cheap
-    summarization, classification, drafting, and extraction work through MCP.
+    The model manager owns the installed backend. Today that is llama.cpp;
+    the accepted distribution plan puts any future MLX implementation behind
+    the same model-manager boundary.
     If ``pow_wow_id`` is provided, successful output is also submitted as a
     pow-wow artifact.
     """
     result = _run_delegate_task(
         prompt=prompt,
-        tier=tier,
-        adapter=adapter,
         model_role=model_role,
-        role=role,
-        pow_wow_id=pow_wow_id,
         task_id=task_id,
-        max_tokens=max_tokens,
+        task_max_tokens=task_max_tokens,
         timeout_seconds=timeout_seconds,
-        session_id=session_id,
     )
 
     artifact: dict[str, Any] | None = None

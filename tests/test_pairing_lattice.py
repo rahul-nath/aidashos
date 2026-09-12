@@ -71,12 +71,13 @@ def test_a_reviewer_is_never_weaker_than_the_implementer_it_reviews() -> None:
     )
 
 
-def test_a_pairing_never_names_one_model_for_both_seats() -> None:
-    """A seat reviewing itself is not a review, whatever it scores."""
+def test_one_model_can_fill_two_separate_sessions() -> None:
 
     chart = _chart(_model(CLAUDE, "only", 90))
 
-    assert ordered_pairings(chart) == ()
+    (pairing,) = ordered_pairings(chart)
+    assert pairing.senior == pairing.staff == chart.models[0]
+    assert pairing.cross_vendor is False
 
 
 def test_equal_quality_still_pairs() -> None:
@@ -86,7 +87,12 @@ def test_equal_quality_still_pairs() -> None:
 
     pairings = ordered_pairings(chart)
 
-    assert {(item.senior.model, item.staff.model) for item in pairings} == {("a", "b"), ("b", "a")}
+    assert {(item.senior.model, item.staff.model) for item in pairings} == {
+        ("a", "a"),
+        ("a", "b"),
+        ("b", "a"),
+        ("b", "b"),
+    }
 
 
 def test_the_diversity_bonus_is_a_term_in_the_score_not_a_tiebreak() -> None:
@@ -102,7 +108,7 @@ def test_the_diversity_bonus_is_a_term_in_the_score_not_a_tiebreak() -> None:
         _model(CLAUDE, "good", 88),
         _model(CODEX, "other", 85),
     )
-    # The best same-vendor pair is good(88) + best(92) = 180. The best
+    # The best same-vendor pair is best(92) + best(92) = 184. The best
     # cross-vendor pair is other(85) + best(92) = 177 on raw quality, which
     # loses - until the bonus puts it at 185 and it wins.
     with_bonus = ordered_pairings(_chart(*models, diversity_bonus=8))
@@ -111,7 +117,7 @@ def test_the_diversity_bonus_is_a_term_in_the_score_not_a_tiebreak() -> None:
     assert with_bonus[0].cross_vendor is True
     assert with_bonus[0].score == 185
     assert without_bonus[0].cross_vendor is False
-    assert without_bonus[0].score == 180
+    assert without_bonus[0].score == 184
 
 
 def test_the_order_is_total_and_stable() -> None:
@@ -137,6 +143,7 @@ def test_the_order_is_total_and_stable() -> None:
         ("claude-opus-5", "claude-fable-5", "claude-only, 2026-08-18"),
         ("claude-sonnet-5", "claude-opus-5", "claude-only, 2026-08-30"),
         ("gpt-5.6-terra", "gpt-5.6-sol", "codex-only, 2026-08-23"),
+        ("gpt-5.6-sol", "gpt-6-astra", "codex-only, 2026-09-04"),
     ],
 )
 def test_every_seating_this_operator_declared_is_legal_under_the_chart(
@@ -144,7 +151,7 @@ def test_every_seating_this_operator_declared_is_legal_under_the_chart(
 ) -> None:
     """A re-derivation that contradicts the seating history fails here.
 
-    The scores were seeded from these four rulings, so this is the check that
+    These rulings constrain the chart, so this is the check that
     keeps a future edit honest: change a number in a way that would have made one
     of the operator's own seatings illegal, and this says which one.
     """

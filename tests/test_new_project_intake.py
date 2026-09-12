@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from work_unit_support import register_document_target
 
 from local_first_agent_os.new_project_intake import (
     DurableWorkflowPlan,
@@ -1495,6 +1496,7 @@ def test_a_finalized_document_compiles_against_the_id_the_draft_declared(tmp_pat
     parsed = parse_design_doc(final_markdown, design_doc_id="finalized-intake")
     assert parsed.declared_target_project_id == "local-first-agent-os"
 
+    register_document_target(final_markdown, tmp_path / "registered-target")
     outcome = compile_design_doc(parsed, design_doc_revision_id="ddr-finalized-intake")
     assert isinstance(outcome, CompiledPlanOutcome)
     assert not [item for item in outcome.execution_blockers if "target project" in item]
@@ -1581,3 +1583,19 @@ def test_the_finalized_blank_draft_parses_clean_and_compiles_its_own_output(tmp_
         section for section in parsed.sections if section.normalized_heading == "staff verdict"
     )
     assert verdict.kind is SectionKind.INTAKE_METADATA
+
+
+def test_release_qualification_is_prompted_at_authoring_and_review(tmp_path) -> None:
+    from local_first_agent_os.new_project_intake import RELEASE_COVERAGE_QUESTIONS
+
+    draft_file = create_sparse_gawd_draft_file(tmp_path)
+    draft = parse_sparse_gawd_draft(draft_file.path)
+    finalized = build_reviewable_gawd_draft(draft)
+    tasks = build_gawd_review_tasks(draft)
+    for question in RELEASE_COVERAGE_QUESTIONS:
+        assert question in draft_file.path.read_text()
+        assert question in finalized.final_markdown
+        assert question in tasks[1].description
+        assert question in tasks[2].description
+    # A question in the shipped template must never masquerade as an authored answer.
+    assert draft.rollout_migration_rollback == ()

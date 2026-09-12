@@ -30,6 +30,7 @@ from local_first_agent_os.contracts import (
 )
 from local_first_agent_os.coordination.store import tx
 from local_first_agent_os.work_units.execution import (
+    DISPATCH_WAIT_FAILURE_CODE,
     DispatchBackedExecutorRuntime,
     DispatchParked,
     DispatchParkedError,
@@ -148,7 +149,7 @@ def _expires(milestone_wait: dict[str, Any]) -> Any:
 def _blocked_with(waited: Any, code: str) -> None:
     expected = {
         "dispatch_paused": DispatchParked,
-        "dispatch_wait_elapsed": DispatchStillActive,
+        DISPATCH_WAIT_FAILURE_CODE: DispatchStillActive,
     }[code]
     assert isinstance(waited, expected)
 
@@ -519,7 +520,7 @@ def test_a_clean_transaction_notifies_everything_it_collected() -> None:
 
 # Variable 6: which failure code the milestone records for a halted dispatch.
 def test_the_two_halted_dispatch_failure_codes_are_distinct() -> None:
-    """`dispatch_paused` names a checkpoint; `dispatch_wait_elapsed` names a clock.
+    """`dispatch_paused` names a checkpoint; `DEADLINE_EXCEEDED` names a clock.
 
     One code for both is what said the second when the ledger knew the first.
     """
@@ -530,12 +531,14 @@ def test_the_two_halted_dispatch_failure_codes_are_distinct() -> None:
     engine = WorkUnitEngine.__new__(WorkUnitEngine)
     with pytest.MonkeyPatch().context() as patch:
         patch.setattr(
-            "local_first_agent_os.work_units.root_workflow.record_milestone_transition_step",
-            lambda *args, **kwargs: recorded.append({"args": args, "kwargs": kwargs}) or {},
+            "local_first_agent_os.work_units.root_workflow.record_dispatch_wait_halt_step",
+            lambda *args, **kwargs: (
+                recorded.append({"args": args, "kwargs": kwargs}) or {"status": "BLOCKED"}
+            ),
         )
         from local_first_agent_os.work_units.lifecycle import LifecyclePhase
 
-        for code in ("dispatch_paused", "dispatch_wait_elapsed"):
+        for code in ("dispatch_paused", DISPATCH_WAIT_FAILURE_CODE):
             engine._block_on_halted_dispatch(
                 work_unit_id="wu-1",
                 phase=LifecyclePhase.PLAN,
@@ -548,9 +551,9 @@ def test_the_two_halted_dispatch_failure_codes_are_distinct() -> None:
 
     assert [item["kwargs"]["failure_code"] for item in recorded] == [
         "dispatch_paused",
-        "dispatch_wait_elapsed",
+        DISPATCH_WAIT_FAILURE_CODE,
     ]
-    assert all(item["args"][3] == "BLOCKED" for item in recorded)
+    assert all(item["args"][3] == 1 for item in recorded)
 
 
 def test_a_poll_that_finds_nothing_does_not_spin_forever(

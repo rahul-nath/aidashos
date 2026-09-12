@@ -10,21 +10,24 @@ from typing import Any
 
 import pytest
 
-from local_first_agent_os.agent_adapters import AgentTask, LocalLlamaAdapter
 from local_first_agent_os.constants import DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS
 from local_first_agent_os.contracts import ModelCallRequest, ModelRole, SourceType, WorkspaceId
-from local_first_agent_os.delegation import agent_result_payload, delegate_agent_task
+from local_first_agent_os.delegation import agent_result_payload, delegate_local_model_task
 from local_first_agent_os.ingress import normalize_scheduled_event
+from local_first_agent_os.local_model_delegation import (
+    LocalModelAdapter,
+    LocalModelRunProvenance,
+    LocalModelTask,
+)
 from local_first_agent_os.runtime import AppRuntime
 
 
-def test_agent_and_model_request_defaults_allow_one_hour() -> None:
-    task = AgentTask(
+def test_local_task_and_model_request_defaults_allow_one_hour() -> None:
+    task = LocalModelTask(
         task_id="default-timeout",
-        pow_wow_id="pow-default-timeout",
-        saga_id="saga-default-timeout",
-        role="delegate",
         prompt="Confirm the default timeout.",
+        model_role=ModelRole.GENERAL,
+        task_max_tokens=64,
     )
     request = ModelCallRequest(
         workflow_id="workflow-default-timeout",
@@ -37,66 +40,100 @@ def test_agent_and_model_request_defaults_allow_one_hour() -> None:
     assert request.timeout_seconds == DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS
 
 
-def test_local_llama_adapter_uses_model_manager(runtime: AppRuntime) -> None:
-    adapter = LocalLlamaAdapter(runtime, model_role="general")
+@pytest.mark.parametrize("actual_role", (ModelRole.GENERAL, ModelRole.GENERAL_FALLBACK))
+def test_local_model_adapter_uses_model_manager(
+    runtime: AppRuntime, monkeypatch: pytest.MonkeyPatch, actual_role: ModelRole
+) -> None:
+    requests: list[ModelCallRequest] = []
+    call_model = runtime.model_manager.call_model
+
+    def record_request(request: ModelCallRequest):
+        requests.append(request)
+        return call_model(request).model_copy(update={"model_role": actual_role})
+
+    monkeypatch.setattr(runtime.model_manager, "call_model", record_request)
+    adapter = LocalModelAdapter(runtime)
     result = asyncio.run(
         adapter.run(
-            AgentTask(
+            LocalModelTask(
                 task_id="task-1",
-                pow_wow_id="pow-1",
-                saga_id="saga-1",
-                role="summarizer",
                 prompt="Summarize this local model delegation seam.",
-                max_tokens=64,
+                model_role=ModelRole.GENERAL,
+                task_max_tokens=64,
             )
         )
     )
 
     assert result.success is True
     assert "Mock local answer" in result.output
-    assert result.metadata["adapter"] == "local_llama"
-    assert result.metadata["model_role"] == "general"
-    assert result.metadata["output_artifact_id"]
+    assert isinstance(result.provenance, LocalModelRunProvenance)
+    assert result.provenance.model_role is actual_role
+    assert result.provenance.output_artifact is not None
+    assert requests[0].params["max_tokens"] == 64
 
 
-def test_delegate_agent_task_defaults_to_weak_local_route(runtime: AppRuntime) -> None:
+def test_local_model_task_refuses_a_shadow_token_budget() -> None:
+    with pytest.raises(ValueError, match="use task_max_tokens"):
+        LocalModelTask(
+            task_id="task-budget",
+            prompt="Use the one declared budget.",
+            model_role=ModelRole.GENERAL,
+            task_max_tokens=64,
+            model_params={"max_tokens": 4096},
+        )
+
+
+def test_local_model_task_snapshots_its_model_parameters() -> None:
+    parameters: dict[str, object] = {"temperature": 0}
+    task = LocalModelTask(
+        task_id="task-parameters",
+        prompt="Use the validated parameters.",
+        model_role=ModelRole.GENERAL,
+        task_max_tokens=64,
+        model_params=parameters,
+    )
+
+    parameters["max_tokens"] = 4096
+
+    assert task.model_params == {"temperature": 0}
+
+
+def test_delegate_local_model_task_has_no_frontier_fallback(runtime: AppRuntime) -> None:
     result = asyncio.run(
-        delegate_agent_task(
+        delegate_local_model_task(
             runtime,
             prompt="Classify this note.",
-            tier="weak",
-            model_role="general",
-            max_tokens=32,
+            model_role=ModelRole.GENERAL,
+            task_max_tokens=32,
         )
     )
     payload = agent_result_payload(result)
 
     assert payload["ok"] is True
-    assert payload["metadata"]["adapter"] == "local_llama"
+    assert payload["provenance"]["runtime"] == "local_model"
     assert "Mock local answer" in payload["output"]
 
 
-def test_delegate_agent_task_rejects_unregistered_explicit_workflow_id(
+def test_delegate_local_model_task_rejects_unregistered_explicit_workflow_id(
     runtime: AppRuntime,
 ) -> None:
     result = asyncio.run(
-        delegate_agent_task(
+        delegate_local_model_task(
             runtime,
             prompt="Draft a generated workflow.",
-            adapter="local_llama",
-            model_role="general",
-            metadata={"workflow_id": "missing-workflow-run"},
-            max_tokens=32,
+            model_role=ModelRole.GENERAL,
+            workflow_id="missing-workflow-run",
+            task_max_tokens=32,
         )
     )
     payload = agent_result_payload(result)
 
     assert payload["ok"] is False
     assert "not registered" in str(payload["error"])
-    assert payload["metadata"] == {}
+    assert payload["artifact_ids"] == []
 
 
-def test_delegate_agent_task_records_artifacts_for_registered_workflow(
+def test_delegate_local_model_task_records_artifacts_for_registered_workflow(
     runtime: AppRuntime,
 ) -> None:
     workflow_id = "junior-delegate-e2e"
@@ -115,19 +152,18 @@ def test_delegate_agent_task_records_artifacts_for_registered_workflow(
     )
 
     result = asyncio.run(
-        delegate_agent_task(
+        delegate_local_model_task(
             runtime,
             prompt="Draft a generated workflow.",
-            adapter="local_llama",
-            model_role="general",
-            metadata={"workflow_id": workflow_id},
-            max_tokens=32,
+            model_role=ModelRole.GENERAL,
+            workflow_id=workflow_id,
+            task_max_tokens=32,
         )
     )
     payload = agent_result_payload(result)
 
     assert payload["ok"] is True
-    output_artifact_id = payload["metadata"]["output_artifact_id"]
+    output_artifact_id = payload["provenance"]["output_artifact_id"]
     output_ref = runtime.repository.get_artifact(output_artifact_id)
     assert output_ref is not None
     output = runtime.artifact_store.read_json(output_artifact_id)
@@ -157,10 +193,10 @@ def test_mcp_delegate_task_emits_result_without_pow_wow(
             "ok": True,
             "task_id": "task-1",
             "output": "local result",
-            "artifacts": [],
+            "artifact_ids": [],
             "error": None,
             "tokens_used": 0,
-            "metadata": {"adapter": "local_llama"},
+            "provenance": {"runtime": "local_model"},
         },
     )
 

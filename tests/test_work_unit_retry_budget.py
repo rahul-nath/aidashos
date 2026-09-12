@@ -224,7 +224,9 @@ def _denies(world: dict[str, Any]) -> None:
 
 
 def _answer_override(work_unit_id: str, decision: str) -> None:
-    request_id = service.retry_override_request_id(work_unit_id, FIRST_MILESTONE)
+    request_id = service.retry_override_request_id(
+        work_unit_id, FIRST_MILESTONE, _milestone(work_unit_id).attempt
+    )
     service.submit_work_unit_decision(
         work_unit_id, request_id, decision, f"idem-{request_id}-{decision}"
     )
@@ -263,7 +265,9 @@ def _reports_exhausted(world: dict[str, Any]) -> None:
 @then("an operator override decision is waiting")
 def _override_waiting(world: dict[str, Any]) -> None:
     pending = service.pending_operator_decisions(world["work_unit_id"])
-    request_id = service.retry_override_request_id(world["work_unit_id"], FIRST_MILESTONE)
+    request_id = service.retry_override_request_id(
+        world["work_unit_id"], FIRST_MILESTONE, _milestone(world["work_unit_id"]).attempt
+    )
     assert request_id in {item["request_id"] for item in pending}
 
 
@@ -282,28 +286,28 @@ def test_a_class_that_reaches_blocked_spends_an_attempt(failure_class: FailureCl
 @pytest.mark.parametrize(
     "failure_class",
     [
+        FailureClass.SCHEDULING,
         FailureClass.REQUIRES_OPERATOR,
         FailureClass.POLICY_VIOLATION,
         FailureClass.NONRECOVERABLE,
     ],
 )
-def test_a_class_that_parks_or_fails_spends_no_attempt(failure_class: FailureClass) -> None:
+def test_a_non_chargeable_class_spends_no_attempt(failure_class: FailureClass) -> None:
     assert isinstance(attempt_charge(failure_class), UnchargedFailure)
 
 
 def test_a_provider_that_died_in_flight_spends_no_attempt() -> None:
-    """`TRANSIENT` reaches BLOCKED like the others and is charged unlike them.
+    """`TRANSIENT` reaches BLOCKED like judged failures but is uncharged.
 
-    It is the one class where the milestone's work was never judged: the request
-    died in flight, so there is no attempt to bill. Charging it is how three
-    infrastructure failures in a row exhausted a milestone whose code had not
-    been read once.
+    The request died in flight, so there is no attempt to bill. Charging it is
+    how three infrastructure failures in a row exhausted a milestone whose code
+    had not been read once.
     """
 
     assert isinstance(attempt_charge(FailureClass.TRANSIENT), UnchargedFailure)
 
 
-def test_only_transient_reaches_a_retry_decision_uncharged() -> None:
+def test_only_unjudged_work_reaches_a_retry_decision_uncharged() -> None:
     """The uncharged classes are safe because most of them never get here.
 
     `attempt_charge` says REQUIRES_OPERATOR, POLICY_VIOLATION and NONRECOVERABLE
@@ -311,10 +315,12 @@ def test_only_transient_reaches_a_retry_decision_uncharged() -> None:
     be resumed without limit. It cannot: `_status_for_failure` never routes them
     to BLOCKED, and `decide_retry` refuses anything else. The two functions live
     in different modules, so nothing but this test holds them together - routing
-    one of them to BLOCKED later would silently make its retries unbounded.
+    one of those classes to BLOCKED later would silently make its retries
+    unbounded.
 
-    TRANSIENT is the deliberate exception, bounded by resume being operator-driven
-    rather than by the budget.
+    TRANSIENT is eligible for the bounded automatic resume sweep. SCHEDULING is
+    blocked but deliberately excluded from that sweep, so an operator resumes it
+    only after the external condition changes.
     """
 
     blockable = {
@@ -329,7 +335,7 @@ def test_only_transient_reaches_a_retry_decision_uncharged() -> None:
         if isinstance(attempt_charge(failure_class), UnchargedFailure)
     }
 
-    assert uncharged == {FailureClass.TRANSIENT}
+    assert uncharged == {FailureClass.TRANSIENT, FailureClass.SCHEDULING}
 
 
 def test_an_absent_class_is_read_conservatively() -> None:
@@ -479,7 +485,7 @@ def test_the_override_request_does_not_collide_with_the_approval_request(
 
     work_unit_id = "wu-1"
     approval = f"wud_{sha256_text(f'{work_unit_id}:{FIRST_MILESTONE}')[:24]}"
-    override = service.retry_override_request_id(work_unit_id, FIRST_MILESTONE)
+    override = service.retry_override_request_id(work_unit_id, FIRST_MILESTONE, 1)
     assert approval != override
 
 
@@ -598,6 +604,76 @@ def test_a_denied_override_leaves_the_budget_standing(work_unit_ledger: Path) ->
     assert result["exhausted"][0]["milestone_key"] == FIRST_MILESTONE
 
 
+@pytest.mark.parametrize("legacy_request", [False, True])
+def test_retry_override_replay_cannot_authorize_a_second_extra_execution(
+    work_unit_ledger: Path,
+    legacy_request: bool,
+) -> None:
+    from local_first_agent_os.ids import sha256_text
+    from local_first_agent_os.work_units.events import ApprovalRequested, WorkUnitTransition
+    from local_first_agent_os.work_units.lifecycle import WorkUnitStatus
+
+    work_unit_id = _blocked_work_unit(
+        attempt=EXHAUSTED_AT,
+        failure_class=FailureClass.CORRECTABLE,
+        failure_code="work failed",
+    )
+    if legacy_request:
+        digest = sha256_text(
+            f"{work_unit_id}:{FIRST_MILESTONE}:{DecisionRequestKind.RETRY_BUDGET_OVERRIDE.value}"
+        )
+        repo.record_fact(
+            work_unit_id,
+            ApprovalRequested(
+                phase=LifecyclePhase.PLAN,
+                milestone_key=FIRST_MILESTONE,
+                attempt=EXHAUSTED_AT,
+                request_id=f"wud_{digest[:24]}",
+                prompt="Approve one more attempt",
+                kind=DecisionRequestKind.RETRY_BUDGET_OVERRIDE,
+            ),
+        )
+    first = service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+    request_id = first["exhausted"][0]["override_request_id"]
+    service.submit_work_unit_decision(
+        work_unit_id, request_id, "APPROVED", f"idem-{request_id}-APPROVED"
+    )
+    service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+    service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+    assert _milestone(work_unit_id).attempt == EXHAUSTED_AT + 1
+    for status in (MilestoneExecutionStatus.RUNNING, MilestoneExecutionStatus.BLOCKED):
+        repo.record_fact(
+            work_unit_id,
+            MilestoneTransition(
+                phase=LifecyclePhase.PLAN,
+                milestone_key=FIRST_MILESTONE,
+                status=status,
+                attempt=EXHAUSTED_AT + 1,
+                failure_class=FailureClass.CORRECTABLE,
+                failure_code="extra execution failed",
+            ),
+        )
+    repo.record_fact(
+        work_unit_id,
+        WorkUnitTransition(status=WorkUnitStatus.BLOCKED, current_phase=LifecyclePhase.PLAN),
+    )
+    replay = service.submit_work_unit_decision(
+        work_unit_id, request_id, "APPROVED", f"idem-{request_id}-APPROVED"
+    )
+    assert replay["applied"] is False
+    assert replay["resume"] is None
+    refused = service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+    assert _milestone(work_unit_id).status is MilestoneExecutionStatus.BLOCKED
+    assert _milestone(work_unit_id).attempt == EXHAUSTED_AT + 1
+    next_request_id = refused["exhausted"][0]["override_request_id"]
+    assert next_request_id != request_id
+    service.submit_work_unit_decision(
+        work_unit_id, next_request_id, "APPROVED", f"idem-{next_request_id}-APPROVED"
+    )
+    service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+    assert _milestone(work_unit_id).attempt == EXHAUSTED_AT + 2
+
+
 def test_the_resume_payload_still_satisfies_the_route_contract(
     work_unit_ledger: Path,
 ) -> None:
@@ -627,6 +703,77 @@ def test_the_resume_payload_still_satisfies_the_route_contract(
     retry_policy = result.exhausted[0].retry_policy
     assert isinstance(retry_policy, ChargedFailureBudgetView)
     assert retry_policy.max_charged_failures == 5
+
+
+@pytest.mark.parametrize("already_ready", [False, True])
+def test_retry_approval_replay_repairs_delivery_for_only_its_successor(
+    work_unit_ledger: Path, already_ready: bool
+) -> None:
+    from local_first_agent_os.work_units.events import WorkUnitTransition
+    from local_first_agent_os.work_units.lifecycle import WorkUnitStatus
+
+    work_unit_id = _blocked_work_unit(
+        attempt=EXHAUSTED_AT,
+        failure_class=FailureClass.CORRECTABLE,
+        failure_code="work failed",
+    )
+    repo.mark_enqueue_delivered(work_unit_id)
+    refused = service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+    request_id = refused["exhausted"][0]["override_request_id"]
+    _answer_override(work_unit_id, "APPROVED")
+    if already_ready:
+        service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+        repo.mark_enqueue_delivered(work_unit_id)
+    repo.record_fact(
+        work_unit_id,
+        WorkUnitTransition(status=WorkUnitStatus.BLOCKED, current_phase=LifecyclePhase.PLAN),
+    )
+    for _ in range(2):
+        replay = service.submit_work_unit_decision(
+            work_unit_id, request_id, "APPROVED", f"idem-{request_id}-APPROVED"
+        )
+        assert replay["applied"] is False
+        assert replay["resume"]["enqueued"] is True
+    pending = repo.list_pending_enqueues()
+    assert len(pending) == 1
+    assert pending[0].work_unit_id == work_unit_id
+    assert pending[0].kind is repo.EnqueueKind.RESUME
+    service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+    assert _milestone(work_unit_id).attempt == EXHAUSTED_AT + 1
+
+
+def test_a_pending_retry_request_cannot_approve_a_later_execution(
+    work_unit_ledger: Path,
+) -> None:
+    work_unit_id = _blocked_work_unit(
+        attempt=EXHAUSTED_AT,
+        failure_class=FailureClass.CORRECTABLE,
+        failure_code="work failed",
+    )
+    refused = service.resume_work_unit(work_unit_id, delivery=EnqueueDelivery.DURABLE)
+    request_id = refused["exhausted"][0]["override_request_id"]
+    for status in (
+        MilestoneExecutionStatus.READY,
+        MilestoneExecutionStatus.RUNNING,
+        MilestoneExecutionStatus.BLOCKED,
+    ):
+        repo.record_fact(
+            work_unit_id,
+            MilestoneTransition(
+                phase=LifecyclePhase.PLAN,
+                milestone_key=FIRST_MILESTONE,
+                status=status,
+                attempt=EXHAUSTED_AT + 1,
+                failure_class=FailureClass.CORRECTABLE,
+                failure_code="later failure",
+            ),
+        )
+    with pytest.raises(repo.DecisionRequestMismatch, match="execution ordinal"):
+        service.submit_work_unit_decision(
+            work_unit_id, request_id, "APPROVED", f"idem-{request_id}-APPROVED"
+        )
+    request = repo.get_decision_request(request_id)
+    assert request is not None and request.status.value == "PENDING"
 
 
 def test_the_decision_refuses_a_milestone_that_is_not_blocked() -> None:

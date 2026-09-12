@@ -39,6 +39,8 @@ _COPY_CHUNK_BYTES = 1024 * 1024
 # linked_projects.toml is the operator's own registry of private repositories.
 # The runtime fails closed without a file at that path, so the snapshot keeps
 # this repository's own example copy and never receives the private one.
+# Staffing also carries machine-local selections and per-WorkUnit overrides;
+# the public repository owns its portable example rather than those assignments.
 #
 # The release checklist is withheld for a sharper reason: its pre-snapshot scan
 # command enumerates, as grep patterns, the exact client names the private
@@ -47,7 +49,9 @@ _COPY_CHUNK_BYTES = 1024 * 1024
 _OPERATOR_STATE_PATHS = frozenset(
     {
         "configs/linked_projects.toml",
+        "configs/staffing.toml",
         "docs/public_release_checklist.md",
+        "src/local_first_agent_os/09032026_manual_audit.txt",
     }
 )
 

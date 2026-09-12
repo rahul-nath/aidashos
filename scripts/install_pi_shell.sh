@@ -7,15 +7,8 @@ cd "$ROOT"
 uv tool install --reinstall -e .
 
 mkdir -p "$HOME/.local/bin"
-operator_token_file="$HOME/.local-agent/operator.token"
-mkdir -p "$(dirname "$operator_token_file")"
-if [ ! -s "$operator_token_file" ]; then
-  umask 077
-  UV_CACHE_DIR=/tmp/uv-cache uv run python -c \
-    'import secrets, sys; print(secrets.token_urlsafe(48), file=open(sys.argv[1], "w", encoding="utf-8"))' \
-    "$operator_token_file"
-fi
-chmod 600 "$operator_token_file"
+"$ROOT/scripts/initialize-operator-identity.sh"
+operator_token_file="${LOCAL_AGENT_OPERATOR_TOKEN_FILE:-$HOME/.local-agent/operator.token}"
 cat > "$HOME/.local/bin/pi" <<SH
 #!/usr/bin/env bash
 export LOCAL_AGENT_OPERATOR_TOKEN_FILE="$operator_token_file"

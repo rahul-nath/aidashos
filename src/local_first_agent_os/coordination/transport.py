@@ -27,6 +27,7 @@ import tempfile
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 
 from ..settings import CoordinationTransportKind, Settings
@@ -67,12 +68,21 @@ class CoordinationTransport(Protocol):
     def execute(self, command: CoordinationCommand) -> Mapping[str, object]: ...
 
 
+class CoordinationCommandRefused(RuntimeError):
+    """The authoritative command owner returned a refusal, not a transport outage."""
+
+    def __init__(self, command: CoordinationCommandName, payload: Mapping[str, object]) -> None:
+        self.command = command
+        self.payload = MappingProxyType(dict(payload))
+        super().__init__(f"coordination command {command.value!r} failed: {payload}")
+
+
 def _require_ok(
     command: CoordinationCommand,
     payload: Mapping[str, object],
 ) -> Mapping[str, object]:
-    if not payload.get("ok"):
-        raise RuntimeError(f"coordination command {command.name.value!r} failed: {payload}")
+    if payload.get("ok") is not True:
+        raise CoordinationCommandRefused(command.name, payload)
     return payload
 
 

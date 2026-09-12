@@ -335,7 +335,7 @@ def resume_work_unit(
             ),
             execution.failure_class,
         )
-        request_id = retry_override_request_id(work_unit_id, execution.stable_key)
+        request_id = _retry_request_for_execution(work_unit_id, execution)
         decision = decide_retry(
             milestone_key=execution.stable_key,
             phase=execution.phase,
@@ -344,7 +344,7 @@ def resume_work_unit(
             charged_failures=count_charged_failures(failure.failure_class for failure in history),
             failure_class=current_failure,
             retry_policy=plan.milestone(execution.stable_key).failure_policy.retry_policy,
-            operator_override=_retry_override_granted(request_id),
+            operator_override=_retry_override_granted(request_id, execution.attempt),
         )
         match decision:
             case RetryPermitted():
@@ -426,24 +426,36 @@ def resume_work_unit(
     }
 
 
-def retry_override_request_id(work_unit_id: str, milestone_key: str) -> str:
-    """The decision an operator answers to let one milestone exceed its budget.
+def retry_override_request_id(work_unit_id: str, milestone_key: str, execution_ordinal: int) -> str:
+    """One decision permits retry after exactly one failed execution ordinal."""
 
-    Derived from the milestone and the kind, never from the attempt. Two reasons,
-    and they pull the same way: an override is a judgement about this milestone
-    rather than about one try at it, and the approval request for the same
-    milestone is derived from work-unit-plus-key alone, so anything that did not
-    also name the kind would collide with it.
-    """
-
+    if type(execution_ordinal) is not int or execution_ordinal < 1:
+        raise ValueError("execution_ordinal must be positive")
     digest = sha256_text(
         f"{work_unit_id}:{milestone_key}:{DecisionRequestKind.RETRY_BUDGET_OVERRIDE.value}"
+        f":after:{execution_ordinal}"
     )
     return f"wud_{digest[:24]}"
 
 
-def _retry_override_granted(request_id: str) -> bool:
-    """Whether an operator has already answered this override request yes.
+def _retry_request_for_execution(work_unit_id: str, execution: repo.MilestoneExecutionRow) -> str:
+    """Honor a legacy request only at the ordinal its immutable event names."""
+
+    legacy_digest = sha256_text(
+        f"{work_unit_id}:{execution.stable_key}:{DecisionRequestKind.RETRY_BUDGET_OVERRIDE.value}"
+    )
+    legacy = repo.get_decision_request(f"wud_{legacy_digest[:24]}")
+    if (
+        legacy is not None
+        and legacy.request_kind is DecisionRequestKind.RETRY_BUDGET_OVERRIDE
+        and repo.decision_request_execution_ordinal(legacy) == execution.attempt
+    ):
+        return legacy.request_id
+    return retry_override_request_id(work_unit_id, execution.stable_key, execution.attempt)
+
+
+def _retry_override_granted(request_id: str, execution_ordinal: int) -> bool:
+    """Whether approval permits retry of this failed ordinal, not a later one.
 
     A resolved-and-denied request is not an absence: it is a person saying the
     budget stands, and reading it as "no override" would be the same answer by
@@ -452,7 +464,12 @@ def _retry_override_granted(request_id: str) -> bool:
     """
 
     request = repo.get_decision_request(request_id)
-    if request is None or request.status is not DecisionRequestStatus.RESOLVED:
+    if (
+        request is None
+        or request.status is not DecisionRequestStatus.RESOLVED
+        or request.request_kind is not DecisionRequestKind.RETRY_BUDGET_OVERRIDE
+        or repo.decision_request_execution_ordinal(request) != execution_ordinal
+    ):
         return False
     outcome = decision_outcome(
         DecisionRequestKind.RETRY_BUDGET_OVERRIDE,
@@ -594,9 +611,18 @@ def submit_work_unit_decision(
     # all is a different error with a different audience, and it keeps raising the
     # ValueError that `OperatorDecision` produces.
     try:
-        decision_outcome(request.request_kind, OperatorDecision(decision), payload or {})
+        decision_effect = decision_outcome(
+            request.request_kind, OperatorDecision(decision), payload or {}
+        )
     except DecisionKindMismatch as exc:
         raise repo.DecisionRequestMismatch(str(exc)) from exc
+    if isinstance(decision_effect, RetryOverridden) and (
+        execution.status is not MilestoneExecutionStatus.BLOCKED
+        or repo.decision_request_execution_ordinal(request) != execution.attempt
+    ):
+        raise repo.DecisionRequestMismatch(
+            "retry override does not authorize this execution ordinal"
+        )
 
     outcome = repo.record_fact(
         work_unit_id,
@@ -677,6 +703,29 @@ def _resume_delivery_after_decision(
     unit = repo.get_work_unit(work_unit_id)
     if unit.status is not WorkUnitStatus.BLOCKED:
         return None
+    if isinstance(outcome, RetryOverridden):
+        execution = next(
+            (
+                item
+                for item in repo.list_milestone_executions(work_unit_id)
+                if item.milestone_execution_id == request.milestone_execution_id
+            ),
+            None,
+        )
+        if execution is None:
+            raise repo.DecisionRequestMismatch("retry override names no milestone execution")
+        requested_ordinal = repo.decision_request_execution_ordinal(request)
+        match execution.status:
+            case MilestoneExecutionStatus.BLOCKED:
+                if execution.attempt != requested_ordinal:
+                    return None
+            case MilestoneExecutionStatus.READY:
+                # A crash after READY but before enqueue still owes delivery of
+                # the same authorized successor, not permission for a later one.
+                if execution.attempt != requested_ordinal + 1:
+                    return None
+            case _:
+                return None
     refusal = resume_refusal() if resume_refusal is not None else None
     if refusal is not None:
         return {
@@ -746,23 +795,31 @@ def list_work_unit_artifacts(work_unit_id: str) -> tuple[dict[str, Any], ...]:
 
 def list_work_units(status: str | None = None) -> tuple[dict[str, Any], ...]:
     rows = repo.list_work_units(WorkUnitStatus(status) if status else None)
-    return tuple(
-        {
-            "work_unit_id": item.work_unit_id,
-            "title": item.title,
-            "status": item.status.value,
-            "current_phase": item.current_phase,
-            "root_workflow_id": item.root_workflow_id,
-            "compiled_plan_hash": item.compiled_plan_hash,
-            # Provenance. Without it this list is a dead end: a reader can see
-            # that six work units exist and cannot get back to the documents
-            # that produced them, which is why design-doc state was tracked by
-            # hand in a README instead of read from here.
-            "design_doc_revision_id": item.design_doc_revision_id,
-            "compiled_plan_revision_id": item.compiled_plan_revision_id,
-        }
-        for item in rows
-    )
+    summaries = []
+    for item in rows:
+        document = repo.get_design_doc_revision(item.design_doc_revision_id)
+        plan = repo.get_compiled_plan_revision(item.compiled_plan_revision_id).plan
+        summaries.append(
+            {
+                "work_unit_id": item.work_unit_id,
+                "title": item.title,
+                "design_doc_name": (
+                    Path(document.source_path).name if document.source_path else None
+                ),
+                "target_project_id": plan.target_project_id,
+                "status": item.status.value,
+                "current_phase": item.current_phase,
+                "root_workflow_id": item.root_workflow_id,
+                "compiled_plan_hash": item.compiled_plan_hash,
+                # Provenance. Without it this list is a dead end: a reader can see
+                # that six work units exist and cannot get back to the documents
+                # that produced them, which is why design-doc state was tracked by
+                # hand in a README instead of read from here.
+                "design_doc_revision_id": item.design_doc_revision_id,
+                "compiled_plan_revision_id": item.compiled_plan_revision_id,
+            }
+        )
+    return tuple(summaries)
 
 
 def list_design_docs() -> tuple[dict[str, Any], ...]:

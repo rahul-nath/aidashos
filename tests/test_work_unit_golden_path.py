@@ -1,35 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Rahul Nath <https://github.com/rahul-nath>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""A WorkUnit driven from a document to SUCCEEDED.
+"""Resident WorkUnit acceptance and durable recovery contracts.
 
-``tests/conftest.py`` pins ``LOCAL_AGENT_USE_DBOS=false`` before the package is
-imported, because ``@dbos_step`` and ``@dbos_workflow`` bind at import time. So
-the ordinary suite has never run a real DBOS workflow, every green WorkUnit trace
-in it went through the simulated runtime, and none of them ever submitted a
-dispatch intent. Every defect in the 2026-08-04 handoffs lived in that gap.
-
-Two lanes, for two different reasons:
-
-- ``test_the_golden_path_runs_through_the_resident_loops`` starts the enqueue
-  drainer and the ledger dispatcher as **real subprocesses** against disposable
-  databases, exactly the way ``scripts/start-agent-runtime.sh`` does. That is the
-  only shape where "the production resident constructors" is literally true, and
-  the only one that exercises DBOS's cross-process notification path. It is gated
-  on ``LOCAL_AGENT_RUN_POSTGRES_INTEGRATION=1``, which is what
-  ``scripts/run_dbos_postgres_smoke.sh`` already exports.
-- everything else is ledger semantics, and runs in the ordinary lane against the
-  per-test Postgres schema.
-
-The design doc is ``docs/examples/work_unit_golden_path_design_doc.md`` rather
-than the acceptance one, because the acceptance document's IMPLEMENT milestones
-require ``source_patch``, which the evidence gate grants only for non-empty
-``changed_files``. A bounded advisory turn cannot honestly produce that, and
-making the gate accept prose would be deleting the check to pass the test.
+The real happy path runs application subprocesses with separate disposable
+Postgres and DBOS databases and deterministic model responses. It is selected
+explicitly by scripts/accept_golden_path.py; ordinary ledger scenarios below do
+not certify that resident execution or installed native containment.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -39,8 +21,10 @@ import sys
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import psycopg
@@ -82,6 +66,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_PATH_DOC = REPO_ROOT / "docs" / "examples" / "work_unit_golden_path_design_doc.md"
 FIRST_MILESTONE = "a"
 REVIEW_MILESTONE = "b"
+DELIVERY_MILESTONE = "c"
 
 
 # --------------------------------------------------------------------------- #
@@ -165,14 +150,20 @@ def _golden_path_config_dir(root: Path, target: Path) -> Path:
         """
 seated_pairing = "all-local"
 
+[work_unit_pairing]
+mode = "fixed"
+pairing = "all-local"
+
 [pairings.all-local.senior]
 harness = "pi"
 model = "gemma4"
+reasoning_effort = "high"
 capacity = 2
 
 [pairings.all-local.staff]
 harness = "pi"
 model = "glimmer"
+reasoning_effort = "high"
 capacity = 1
 
 [bench.junior]
@@ -186,14 +177,14 @@ capacity = 4
     (config_dir / "linked_projects.toml").write_text(
         f"""
 [center]
-id = "local-first-agent-os"
+id = "local_first_agent_os"
 description = "golden path center"
-control_plane_project = "local-first-agent-os"
-default_saga_project = "local-first-agent-os"
-default_memory_project = "local-first-agent-os"
+control_plane_project = "local_first_agent_os"
+default_saga_project = "local_first_agent_os"
+default_memory_project = "local_first_agent_os"
 
 [[projects]]
-id = "local-first-agent-os"
+id = "local_first_agent_os"
 kind = "test_repo"
 path = {json.dumps(str(target))}
 status = "active"
@@ -240,12 +231,18 @@ def _resident_env(
     }
 
 
-@contextmanager
-def _resident_loops(env: dict[str, str]) -> Iterator[list[subprocess.Popen[bytes]]]:
-    """Start the two loops the operator scripts start, and stop them after.
+@dataclass(frozen=True)
+class ResidentLoop:
+    process: subprocess.Popen[bytes]
+    log_path: Path
 
-    `hold_resident_loop` releases its advisory lock when the connection closes, so
-    SIGTERM is enough; nothing has to be unlocked by hand.
+
+@contextmanager
+def _resident_loops(env: dict[str, str]) -> Iterator[list[ResidentLoop]]:
+    """Run the real residents with continuously writable diagnostic output.
+
+    Unread subprocess pipes fill and stop the resident inside a logging call.
+    Separate files preserve output without making log volume a lifecycle gate.
     """
 
     commands = [
@@ -258,65 +255,57 @@ def _resident_loops(env: dict[str, str]) -> Iterator[list[subprocess.Popen[bytes
         ],
         [
             sys.executable,
-            str(REPO_ROOT / "agent_coordination_mcp.py"),
-            "run_ledger_dispatcher",
+            "-m",
+            "local_first_agent_os.operator_dispatcher_host",
+            "--root",
+            env["AGENT_COORDINATION_ROOT"],
             "--interval-seconds",
-            "1",
+            "2",
         ],
     ]
-    processes = [
-        subprocess.Popen(
-            command, env=env, cwd=REPO_ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-        )
-        for command in commands
-    ]
-    try:
-        _assert_still_running(processes)
-        yield processes
-    finally:
-        for process in processes:
-            if process.poll() is None:
-                process.send_signal(signal.SIGTERM)
-        for process in processes:
-            try:
-                process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                process.kill()
+    with TemporaryDirectory(prefix="aidashos-resident-logs-") as log_dir, ExitStack() as stack:
+        loops: list[ResidentLoop] = []
+        try:
+            for index, command in enumerate(commands):
+                path = Path(log_dir) / f"resident-{index}.log"
+                stream = stack.enter_context(path.open("wb"))
+                process = subprocess.Popen(
+                    command, env=env, cwd=REPO_ROOT, stdout=stream, stderr=subprocess.STDOUT
+                )
+                loops.append(ResidentLoop(process, path))
+            _assert_still_running(loops)
+            yield loops
+        finally:
+            for loop in loops:
+                if loop.process.poll() is None:
+                    loop.process.send_signal(signal.SIGTERM)
+            for loop in loops:
+                try:
+                    loop.process.wait(timeout=20)
+                except subprocess.TimeoutExpired:
+                    loop.process.kill()
+                    loop.process.wait(timeout=10)
 
 
-def _assert_still_running(processes: list[subprocess.Popen[bytes]]) -> None:
-    """Fail now, with the loop's own words, if one of them has already exited.
-
-    A resident loop that dies immediately still returns a well-formed `err`
-    payload on stdout and exits zero, so nothing downstream notices. Without this
-    the symptom is a 240-second timeout on a ledger nobody is draining.
-    """
+def _assert_still_running(loops: list[ResidentLoop]) -> None:
+    """Report a resident that exits before its first poll with its diagnostics."""
 
     time.sleep(3.0)
-    for process in processes:
-        if process.poll() is not None:
+    for loop in loops:
+        if loop.process.poll() is not None:
             raise AssertionError(
-                f"resident loop {process.args} exited immediately "
-                f"(code {process.returncode}):\n{_drain(process)}"
+                f"resident loop {loop.process.args} exited immediately "
+                f"(code {loop.process.returncode}):\n{_drain(loop)}"
             )
 
 
-def _drain(process: subprocess.Popen[bytes]) -> str:
-    """Whatever a loop has written so far, without blocking on one still running.
+def _drain(loop: ResidentLoop) -> str:
+    """Read a bounded tail without stopping the resident or moving its writer."""
 
-    A resident loop that died silently is the failure most worth seeing here, and
-    reading its pipe only after it exits is how that stays invisible.
-    """
-
-    if process.stdout is None:
-        return ""
-    if process.poll() is None:
-        process.send_signal(signal.SIGTERM)
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-    return process.stdout.read().decode("utf-8", "replace")[-6000:]
+    with loop.log_path.open("rb") as stream:
+        size = stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, size - 6000))
+        return stream.read().decode("utf-8", "replace")
 
 
 def _await(predicate: Any, *, timeout: float, what: str, diagnose: Any = None) -> Any:
@@ -464,8 +453,8 @@ def test_the_golden_path_runs_through_the_resident_loops(tmp_path: Path) -> None
                 events = _coordination("list_work_unit_events", work_unit_id)
                 loops = [
                     {
-                        "argv": process.args,
-                        "exit_code": process.poll(),
+                        "argv": process.process.args,
+                        "exit_code": process.process.poll(),
                         "output": _drain(process),
                     }
                     for process in processes
@@ -500,6 +489,33 @@ def test_the_golden_path_runs_through_the_resident_loops(tmp_path: Path) -> None
             assert any(item["artifact_type"] == "implementation_plan" for item in artifacts), (
                 "the plan milestone must record its evidence, not merely succeed"
             )
+            plan_artifact = next(
+                item for item in artifacts if item["artifact_type"] == "implementation_plan"
+            )
+            plan_events = [
+                event
+                for event in _coordination("list_work_unit_events", work_unit_id)["events"]
+                if event["milestone_execution_id"] == plan_artifact["milestone_execution_id"]
+                and event["event_type"] == "MILESTONE_SUCCEEDED"
+            ]
+            assert len(plan_events) == 1
+            plan_record = next(
+                artifact
+                for artifact in plan_events[0]["payload"]["artifacts"]
+                if artifact["artifact_type"] == "implementation_plan"
+            )
+            assert plan_record["content_hash"] == plan_artifact["content_hash"]
+            plan_evidence = plan_record["metadata"]["implementation_plan"]
+            assert plan_evidence["schema_version"] == "implementation_plan_evidence.v1"
+            assert plan_evidence["report"]["status"] == "PLANNED"
+            assert "Deterministic model fixture only" in plan_evidence["report"]["plan_markdown"]
+            assert plan_evidence["origin"]["kind"] == "LOCAL_MODEL_INVOCATION"
+            assert (
+                plan_artifact["content_hash"]
+                == hashlib.sha256(
+                    json.dumps(plan_evidence, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+            )
 
             pending = _await(
                 lambda: _view()["pending_decisions"],
@@ -527,28 +543,53 @@ def test_the_golden_path_runs_through_the_resident_loops(tmp_path: Path) -> None
                 lambda: _view()["status"] == WorkUnitStatus.SUCCEEDED.value,
                 timeout=300,
                 what="the WorkUnit to reach SUCCEEDED",
+                diagnose=_why_stuck,
             )
-
-
-@given("a disposable coordination ledger and DBOS system database")
-@given("the golden path design doc is compiled and started")
-@when("the enqueue drainer and the resident dispatcher are running")
-@then("the first milestone reaches a real dispatch intent")
-@then("the local junior delegate answers it")
-@then("the milestone records its artifact")
-@when("the operator approves the review milestone")
-@then("the WorkUnit reaches SUCCEEDED")
-def _covered_by_the_integration_test() -> None:
-    """The happy-path scenario is the integration test above, step for step.
-
-    Written this way rather than re-driven here: the whole point of that test is
-    that it runs in real subprocesses against disposable databases, and a second
-    in-process implementation of the same scenario would pass while proving none
-    of it.
-    """
-
-    if os.environ.get("LOCAL_AGENT_RUN_POSTGRES_INTEGRATION") != "1":
-        pytest.skip("set LOCAL_AGENT_RUN_POSTGRES_INTEGRATION=1 to run the full drive")
+            completed_view = _view()
+            delivered = next(
+                item
+                for item in completed_view["milestones"]
+                if item["stable_key"] == DELIVERY_MILESTONE
+            )
+            assert delivered["status"] == MilestoneExecutionStatus.SUCCEEDED.value
+            records = [
+                item
+                for item in completed_view["artifacts"]
+                if item["artifact_type"] == "delivery_record"
+            ]
+            assert len(records) == 1
+            record = records[0]
+            assert record["milestone_execution_id"] == delivered["milestone_execution_id"]
+            # A fresh CLI process reads the retained event, independently of
+            # the resident that produced the record and the materialized view.
+            events = _coordination("list_work_unit_events", work_unit_id)["events"]
+            delivery_events = [
+                event
+                for event in events
+                if event["milestone_execution_id"] == delivered["milestone_execution_id"]
+                and event["event_type"] == "MILESTONE_SUCCEEDED"
+            ]
+            assert len(delivery_events) == 1
+            evidence = next(
+                artifact
+                for artifact in delivery_events[0]["payload"]["artifacts"]
+                if artifact["artifact_type"] == "delivery_record"
+            )
+            assert evidence["uri"] == record["uri"]
+            assert evidence["content_hash"] == record["content_hash"]
+            payload = evidence["metadata"]["delivery_record"]
+            content = json.dumps(payload, sort_keys=True).encode("utf-8")
+            assert hashlib.sha256(content).hexdigest() == record["content_hash"]
+            assert evidence["size_bytes"] == len(content)
+            assert evidence["media_type"] == "application/json"
+            assert payload["schema_version"] == "delivery_record.v1"
+            assert payload["work_unit_id"] == work_unit_id
+            assert payload["compiled_plan_hash"] == completed_view["compiled_plan_hash"]
+            assert {"implementation_plan", "operator_approval"} <= set(
+                payload["delivered_artifact_types"]
+            )
+            assert "delivery_record" not in payload["delivered_artifact_types"]
+            assert "Changing any file in a target repository." in payload["not_covered"]
 
 
 # --------------------------------------------------------------------------- #
@@ -800,7 +841,9 @@ def _not_ready(world: dict[str, Any]) -> None:
 
 @then("an operator override decision is waiting")
 def _override_waiting(world: dict[str, Any]) -> None:
-    request_id = service.retry_override_request_id(world["work_unit_id"], FIRST_MILESTONE)
+    request_id = service.retry_override_request_id(
+        world["work_unit_id"], FIRST_MILESTONE, _milestone(world["work_unit_id"]).attempt
+    )
     pending = service.pending_operator_decisions(world["work_unit_id"])
     assert request_id in {item["request_id"] for item in pending}
 
@@ -809,12 +852,7 @@ def _override_waiting(world: dict[str, Any]) -> None:
 
 
 def test_the_golden_path_document_compiles_to_a_runnable_plan(work_unit_ledger: Path) -> None:
-    """The document the integration test drives, checked without needing DBOS.
-
-    A compile failure here would make that test fail for a reason that has
-    nothing to do with the resident loops, in the one lane that is expensive to
-    run and rare to run.
-    """
+    """The resident document requests only evidence its executors can produce."""
 
     result = service.compile_design_doc_text(
         GOLDEN_PATH_DOC.read_text(encoding="utf-8"), design_doc_id="golden_path"
@@ -822,61 +860,33 @@ def test_the_golden_path_document_compiles_to_a_runnable_plan(work_unit_ledger: 
 
     assert result.runnable is True, result.diagnostics
     assert result.compiled_plan_revision_id is not None
-
-
-def test_every_golden_path_milestone_asks_for_evidence_its_executor_can_produce(
-    work_unit_ledger: Path,
-) -> None:
-    """The reason this document exists rather than the acceptance one.
-
-    `source_patch` needs non-empty `changed_files` and `test_result` needs
-    verification output; a bounded advisory turn produces neither, so a document
-    asking for them can only pass by weakening the gate.
-    """
-
-    result = service.compile_design_doc_text(
-        GOLDEN_PATH_DOC.read_text(encoding="utf-8"), design_doc_id="golden_path_evidence"
-    )
-    assert result.compiled_plan_revision_id is not None
     plan = repo.get_compiled_plan_revision(result.compiled_plan_revision_id).plan
-
+    assert plan.schema_version == "compiled_work_plan.v5"
     required = {
         item for milestone in plan.ordered_milestones() for item in milestone.required_artifacts
     }
-    assert "source_patch" not in required
-    assert "test_result" not in required
+    assert not {"source_patch", "test_result"} & required
+    assert {"implementation_plan", "operator_approval", "delivery_record"} <= required
+    assert [
+        milestone.stable_key
+        for milestone in plan.ordered_milestones()
+        if milestone.approval_policy.required
+    ] == [REVIEW_MILESTONE]
 
 
-def test_the_golden_path_document_still_gates_on_an_operator(
-    work_unit_ledger: Path,
-) -> None:
-    """An unattended path that never asks a person is not the path this system wants."""
+def test_golden_path_pairing_policy_cannot_select_a_frontier_provider(tmp_path: Path) -> None:
+    from local_first_agent_os.pairing_lattice import load_quality_chart, policy_candidates
+    from local_first_agent_os.staffing import Harness, load_staffing
 
-    result = service.compile_design_doc_text(
-        GOLDEN_PATH_DOC.read_text(encoding="utf-8"), design_doc_id="golden_path_gate"
+    config = _golden_path_config_dir(tmp_path, tmp_path / "target")
+    staffing = load_staffing(config / "staffing.toml")
+    candidates = policy_candidates(
+        load_quality_chart(config / "model_quality.toml"),
+        staffing.selection_for("golden-path"),
+        staffing.pairings,
     )
-    assert result.compiled_plan_revision_id is not None
-    plan = repo.get_compiled_plan_revision(result.compiled_plan_revision_id).plan
-
-    gated = [
-        milestone for milestone in plan.ordered_milestones() if milestone.approval_policy.required
-    ]
-    assert [milestone.stable_key for milestone in gated] == [REVIEW_MILESTONE]
-
-
-def test_the_ordinary_suite_cannot_run_the_full_drive() -> None:
-    """The constraint that shaped this file, asserted rather than assumed.
-
-    `conftest` pins the DBOS flag before the package is imported, so no fixture
-    can turn it on afterwards: the decorators have already bound. A test that
-    believed otherwise would silently exercise the identity-decorator path and
-    report a green DBOS integration that never touched DBOS.
-    """
-
-    from local_first_agent_os.dbos_app import is_dbos_active
-
-    assert os.environ["LOCAL_AGENT_USE_DBOS"] == "false"
-    assert is_dbos_active() is False
+    assert len(candidates) == 1
+    assert {model.harness for pair in candidates for model in pair.models()} == {Harness.PI}
 
 
 def test_the_resident_loops_this_test_starts_are_the_ones_the_runtime_starts() -> None:
@@ -884,7 +894,8 @@ def test_the_resident_loops_this_test_starts_are_the_ones_the_runtime_starts() -
 
     script = (REPO_ROOT / "scripts" / "start-agent-runtime.sh").read_text(encoding="utf-8")
     assert "run_enqueue_drainer" in script
-    assert "run_ledger_dispatcher" in script
+    assert "-m local_first_agent_os.operator_dispatcher_host" in script
+    assert "--interval-seconds 2" in script
 
 
 def test_a_cancelled_work_unit_reaches_the_lease_its_intent_started(

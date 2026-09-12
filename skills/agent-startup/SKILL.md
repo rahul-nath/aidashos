@@ -90,7 +90,8 @@ in-process child agent.
 
 - Junior: local Pi delegate, usually `gemma4`, no worktree.
 - Senior: an external frontier coding CLI, the implementer; `configs/staffing.toml` names the vendor.
-- Staff: the other vendor's frontier CLI, the reviewer. The two seats are never the same vendor.
+- Staff: the reviewer in a separate session, with read-only final review and isolated planning context.
+  The two seats may use the same model; provider diversity is a selection preference, not a review-validity condition.
 - Code tasks get isolated worktrees.
 - Advisory tasks are read-only/no-worktree.
 - Coordination flows through ledger rows, artifacts, and `blocked_by`, not shared chat memory.
@@ -147,6 +148,21 @@ Senior and staff agents must keep exploration bounded:
 - Do not re-read unchanged files unless needed.
 - Do not re-litigate accepted architecture unless there is a concrete contradiction in the repo.
 
+## Single-Go or CGD Triage
+
+Before implementing a non-trivial request, classify the work as either safe for one bounded pass or prudent to specify as a compilable GAWD document first.
+Tell the operator which posture you recommend and why in one or two sentences.
+
+Prefer a single bounded pass when the scope is local, the intended behavior is already settled, the validation boundary is clear, and the change does not introduce a new durable protocol, authority boundary, migration, or independently integrated sequence of milestones.
+
+Recommend a CGD first when correctness depends on coordinating multiple ownership boundaries, durable state transitions, wire formats, permissions or approvals, migrations, staged rollout or recovery, several independently integrated milestones, or evidence that must survive the current agent session.
+Use `CGD` as the accepted shorthand for a compilable GAWD document.
+
+The classification is advisory, not an authority grant.
+Do not compile, start, approve, merge, deploy, or otherwise advance governed work merely because a CGD is prudent.
+Reuse and revise an existing relevant CGD instead of creating a duplicate when one already owns the intended contract.
+Do not inflate a small fix into a CGD when focused implementation and direct verification are sufficient.
+
 Common validation:
 
 ```bash
@@ -155,6 +171,11 @@ UV_CACHE_DIR=/tmp/uv-cache uv run pyright
 UV_CACHE_DIR=/tmp/uv-cache uv run pytest -k 'not streams_query_events'
 git diff --check
 ```
+
+## Recovery Learning
+
+After an incident requires diagnosis or recovery, use [Recovery Postmortem](../recovery-postmortem/SKILL.md) before the final handoff.
+Capture private decision-time evidence and actual results even when the cause remains unresolved; the procedure does not itself certify training examples or launch training.
 
 ## Handoffs
 

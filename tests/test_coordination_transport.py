@@ -21,12 +21,33 @@ from pathlib import Path
 import pytest
 
 from local_first_agent_os.coordination import transport as transport_module
+from local_first_agent_os.coordination.contracts import CoordinationCommandName
 from local_first_agent_os.coordination.ledger_selection import CoordinationLedgerSelection
 from local_first_agent_os.coordination.transport import (
+    CoordinationCommandRefused,
+    InProcessCoordinationTransport,
     SubprocessCoordinationTransport,
     command_from_argv,
 )
 from local_first_agent_os.daemon_stdio import detach_inherited_stdin
+
+
+@pytest.mark.parametrize("ok", [False, None, 1, "true"])
+def test_owner_refusal_retains_typed_command_and_payload(ok: object) -> None:
+    command = command_from_argv([CoordinationCommandName.LIST_LEDGER_EVENTS.value])
+    transport = InProcessCoordinationTransport(
+        lambda _: {"ok": ok, "error": "fixture_owner_refusal"}
+    )
+    with pytest.raises(CoordinationCommandRefused) as refused:
+        transport.execute(command)
+    assert isinstance(refused.value, RuntimeError)
+    assert refused.value.command is command.name
+    assert refused.value.payload == {"ok": ok, "error": "fixture_owner_refusal"}
+
+
+def test_owner_success_requires_an_actual_boolean_true() -> None:
+    command = command_from_argv([CoordinationCommandName.LIST_LEDGER_EVENTS.value])
+    assert InProcessCoordinationTransport(lambda _: {"ok": True}).execute(command) == {"ok": True}
 
 
 def _is_devnull(stat_result: os.stat_result) -> bool:

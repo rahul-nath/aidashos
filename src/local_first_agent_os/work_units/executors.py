@@ -19,9 +19,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Final
+from typing import Final, assert_never
 
 from ..capabilities import Capability
+from ..execution_admission import (
+    ExecutionDriver,
+    declared_capabilities_for,
+    required_capabilities_for,
+)
 from .events import ArtifactKind
 from .lifecycle import LifecyclePhase
 from .retry import ChargedFailureBudget, OperatorOnly, RetryPolicy
@@ -40,6 +45,41 @@ class ExecutorKind(StrEnum):
     REVIEW_OPERATOR = "review.operator"
     DELIVER_ARTIFACT = "deliver.artifact"
     DELIVER_DEPLOYMENT = "deliver.deployment"
+
+
+REGISTERED_VERIFICATION_CAPABILITIES: Final = declared_capabilities_for(
+    ExecutionDriver.REGISTERED_VERIFICATION
+)
+
+
+def execution_driver_for(kind: ExecutorKind) -> ExecutionDriver:
+    match kind:
+        case ExecutorKind.VERIFY_TESTS:
+            return ExecutionDriver.REGISTERED_VERIFICATION
+        case ExecutorKind.DELIVER_ARTIFACT:
+            return ExecutionDriver.DELIVERY_RECORD
+        case ExecutorKind.REVIEW_OPERATOR:
+            return ExecutionDriver.OPERATOR_DECISION
+        case (
+            ExecutorKind.CLARIFY_REQUIREMENTS
+            | ExecutorKind.VALIDATE_REPOSITORY
+            | ExecutorKind.PLAN_IMPLEMENTATION
+            | ExecutorKind.IMPLEMENT_CODE_CHANGE
+            | ExecutorKind.VERIFY_ACCEPTANCE
+            | ExecutorKind.REVIEW_AGENT
+            | ExecutorKind.DELIVER_DEPLOYMENT
+        ):
+            return ExecutionDriver.PLANNED_DISPATCH
+        case _:
+            assert_never(kind)
+
+
+def required_runtime_capabilities(kind: ExecutorKind) -> tuple[Capability, ...]:
+    """Minimum authority of a driver, distinct from its maximum permitted tools."""
+
+    return tuple(
+        sorted(required_capabilities_for(execution_driver_for(kind)), key=lambda c: c.value)
+    )
 
 
 class ApprovalRequirement(StrEnum):
@@ -112,7 +152,10 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         phase=LifecyclePhase.CLARIFY,
         input_schema="clarify_request.v1",
         output_schema="clarify_result.v1",
-        permitted_tools=(Capability.READ_REPOSITORY, Capability.ASK_OPERATOR),
+        permitted_tools=(
+            *declared_capabilities_for(ExecutionDriver.PLANNED_DISPATCH),
+            Capability.ASK_OPERATOR,
+        ),
         retry_policy=_BOUNDED_RETRY,
         timeout_seconds=900,
         required_artifact_types=(ArtifactKind.CLARIFICATION_RECORD,),
@@ -123,7 +166,10 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         phase=LifecyclePhase.VALIDATE,
         input_schema="validate_request.v1",
         output_schema="validate_result.v1",
-        permitted_tools=(Capability.READ_REPOSITORY, Capability.RUN_COMMAND),
+        permitted_tools=(
+            *declared_capabilities_for(ExecutionDriver.PLANNED_DISPATCH),
+            Capability.RUN_COMMAND,
+        ),
         retry_policy=_BOUNDED_RETRY,
         timeout_seconds=900,
         required_artifact_types=(ArtifactKind.ENVIRONMENT_REPORT,),
@@ -161,7 +207,7 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         phase=LifecyclePhase.VERIFY,
         input_schema="verify_request.v1",
         output_schema="verify_result.v1",
-        permitted_tools=(Capability.READ_REPOSITORY, Capability.RUN_COMMAND),
+        permitted_tools=REGISTERED_VERIFICATION_CAPABILITIES,
         retry_policy=_BOUNDED_RETRY,
         timeout_seconds=3600,
         required_artifact_types=(ArtifactKind.TEST_RESULT,),
@@ -220,7 +266,10 @@ _DECLARATIONS: Final[tuple[ExecutorDeclaration, ...]] = (
         phase=LifecyclePhase.DELIVER,
         input_schema="deliver_request.v1",
         output_schema="deliver_result.v1",
-        permitted_tools=(Capability.READ_REPOSITORY, Capability.PUBLISH_DEPLOYMENT),
+        permitted_tools=(
+            *declared_capabilities_for(ExecutionDriver.PLANNED_DISPATCH),
+            Capability.PUBLISH_DEPLOYMENT,
+        ),
         retry_policy=_OPERATOR_ONLY,
         timeout_seconds=3600,
         required_artifact_types=(ArtifactKind.DEPLOYMENT_RECORD,),
@@ -269,7 +318,11 @@ __all__ = [
     "ApprovalRequirement",
     "ExecutorDeclaration",
     "ExecutorKind",
+    "ExecutionDriver",
+    "REGISTERED_VERIFICATION_CAPABILITIES",
     "RetryPolicy",
     "default_executor_for_phase",
+    "execution_driver_for",
     "lookup_executor",
+    "required_runtime_capabilities",
 ]

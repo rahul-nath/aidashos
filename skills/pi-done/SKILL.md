@@ -21,7 +21,7 @@ Aliases and chainable forms:
 
 ```bash
 pi /start /done "what owns workflow truth?"
-pi /store /Users/rahul/notes /done "what was just stored?"
+pi /store ~/notes /done "what was just stored?"
 ```
 
 Design note: `/done` differs from `/get` by adding base-model aggregation on top of the vector-store candidates. `/get` returns ranked previews; `/done` returns a synthesized answer plus the ranked previews. Both share the same retrieval boundary, so embeddings only have to be loaded once.

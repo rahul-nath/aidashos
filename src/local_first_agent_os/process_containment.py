@@ -11,14 +11,13 @@ writing outside its leased worktree, so this module owns the lower boundary.
 from __future__ import annotations
 
 import ipaddress
-import json
 import os
 import platform
+import shlex
 import shutil
-import socket
 import subprocess
 import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +25,7 @@ from typing import Final, Protocol
 from urllib.parse import urlsplit
 
 from .operator_identity import operator_token_file
+from .seatbelt_policy import PathGrant, PathScope, SeatbeltPolicy, TcpGrant, UnixGrant
 from .spawn_authority import (
     ReadOnlyInspection,
     SpawnPosture,
@@ -59,6 +59,8 @@ _EXACT_ENV: Final = frozenset(
         "GIT_CONFIG_GLOBAL",
         "GIT_CONFIG_NOSYSTEM",
         "GIT_CONFIG_SYSTEM",
+        "GIT_EXEC_PATH",
+        "GIT_TEMPLATE_DIR",
         "GOPATH",
         "GOROOT",
         "HOME",
@@ -114,12 +116,18 @@ def _allowed_environment(
     overrides: Mapping[str, str] | None,
     scratch: Path,
 ) -> dict[str, str]:
+    from .native_verification_broker import BROKER_ENV
+
     resolved = project_environment(cwd, overrides)
     allowed = {
         name: value
         for name, value in resolved.items()
         if name in _EXACT_ENV or name in _CONTEXT_ENV or name.startswith(_PREFIX_ENV)
     }
+    # A caller override cannot select a different owner for the native transport.
+    # The receiving broker still authenticates the caller by kernel identity.
+    if BROKER_ENV in os.environ:
+        allowed[BROKER_ENV] = os.environ[BROKER_ENV]
     allowed.update(
         {
             "TMPDIR": str(scratch),
@@ -140,26 +148,22 @@ def _allowed_environment(
     return allowed
 
 
-def _filter(kind: str, path: Path) -> str:
-    return f"({kind} {json.dumps(str(path.expanduser().resolve()))})"
+type GitPathProbe = Callable[[Path, tuple[str, ...]], subprocess.CompletedProcess[str]]
 
 
-def _git_paths(cwd: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+def _git_path_probe(cwd: Path, arguments: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ("git", "-C", str(cwd), *arguments), capture_output=True, text=True, check=False
+    )
+
+
+def _git_paths(
+    cwd: Path, probe_command: GitPathProbe = _git_path_probe
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     """Return exact Git read and implementation-write paths for one worktree."""
 
-    probe = subprocess.run(
-        [
-            "git",
-            "-C",
-            str(cwd),
-            "rev-parse",
-            "--path-format=absolute",
-            "--git-dir",
-            "--git-common-dir",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+    probe = probe_command(
+        cwd, ("rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
     )
     if probe.returncode != 0:
         return (), ()
@@ -169,12 +173,7 @@ def _git_paths(cwd: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     git_dir, common_dir = parts
     reads = (git_dir, common_dir)
     writes: list[Path] = [git_dir, common_dir / "objects"]
-    branch = subprocess.run(
-        ["git", "-C", str(cwd), "symbolic-ref", "-q", "HEAD"],
-        capture_output=True,
-        text=True,
-        check=False,
-    ).stdout.strip()
+    branch = probe_command(cwd, ("symbolic-ref", "-q", "HEAD")).stdout.strip()
     if branch:
         for base in (common_dir, common_dir / "logs"):
             ref = base / branch
@@ -182,17 +181,70 @@ def _git_paths(cwd: Path) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
     return reads, tuple(writes)
 
 
-def _command_read_paths(command: Sequence[str], environment: Mapping[str, str]) -> tuple[Path, ...]:
+def _runtime_read_paths(executable: Path) -> tuple[Path, ...]:
+    resolved = executable.resolve()
+    roots = [executable, resolved]
+    runtime_library = resolved.parent.parent / "lib"
+    if resolved.parent.name == "bin" and runtime_library.is_dir():
+        # Relocatable runtimes such as uv-managed Python load both their dylib
+        # and standard library beside the real bin directory.
+        roots.append(runtime_library)
+    return tuple(roots)
+
+
+type ShebangRead = Callable[[Path], bytes]
+
+
+def _read_shebang(script: Path) -> bytes:
+    with script.open("rb") as stream:
+        return stream.readline(4096)
+
+
+def _shebang_executable(
+    script: Path, environment: Mapping[str, str], read: ShebangRead = _read_shebang
+) -> Path | None:
+    try:
+        first_line = read(script)
+    except OSError:
+        return None
+    if not first_line.startswith(b"#!"):
+        return None
+    try:
+        arguments = shlex.split(first_line[2:].decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not arguments:
+        return None
+    interpreter = arguments[0]
+    if Path(interpreter).name == "env":
+        candidates = (
+            argument
+            for argument in arguments[1:]
+            if not argument.startswith("-") and "=" not in argument
+        )
+        interpreter = next(candidates, "")
+    resolved = shutil.which(interpreter, path=environment.get("PATH"))
+    return Path(resolved) if resolved else None
+
+
+def _command_read_paths(
+    command: Sequence[str],
+    environment: Mapping[str, str],
+    read_shebang: ShebangRead = _read_shebang,
+) -> tuple[Path, ...]:
     executable = str(command[0]) if command else ""
     resolved = shutil.which(executable, path=environment.get("PATH"))
     roots: list[Path] = []
     if resolved:
         binary = Path(resolved)
-        roots.extend((binary, binary.resolve()))
+        roots.extend(_runtime_read_paths(binary))
+        interpreter = _shebang_executable(binary, environment, read_shebang)
+        if interpreter is not None:
+            roots.extend(_runtime_read_paths(interpreter))
     elif executable:
         binary = Path(executable).expanduser()
         if binary.exists():
-            roots.extend((binary, binary.resolve()))
+            roots.extend(_runtime_read_paths(binary))
     for entry in environment.get("PATH", "").split(os.pathsep):
         if entry:
             path_entry = Path(entry).expanduser()
@@ -210,19 +262,19 @@ def _reader_database_endpoints(environment: Mapping[str, str]) -> tuple[str, ...
     if not parsed.hostname:
         raise ProcessContainmentUnavailable("ledger reader URL requires a network host")
     port = parsed.port or 5432
-    try:
-        addresses = socket.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
-    except OSError as exc:
-        raise ProcessContainmentUnavailable("ledger reader host could not be resolved") from exc
-    resolved = {entry[4][0] for entry in addresses}
-    if not resolved or any(not ipaddress.ip_address(address).is_loopback for address in resolved):
-        raise ProcessContainmentUnavailable(
-            "the macOS containment adapter requires a loopback ledger reader"
-        )
+    if parsed.hostname != "localhost":
+        try:
+            loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+        except ValueError as exc:
+            raise ProcessContainmentUnavailable(
+                "the ledger reader requires a literal loopback address"
+            ) from exc
+        if not loopback:
+            raise ProcessContainmentUnavailable("the ledger reader requires a loopback address")
     return (f"localhost:{port}",)
 
 
-def _profile(
+def _containment_policy(
     *,
     command: Sequence[str],
     cwd: Path,
@@ -230,22 +282,25 @@ def _profile(
     posture: SpawnPosture,
     harness: FrontierHarness,
     environment: Mapping[str, str],
-) -> str:
+    git_probe: GitPathProbe = _git_path_probe,
+    read_shebang: ShebangRead = _read_shebang,
+) -> SeatbeltPolicy:
     home = Path(environment.get("HOME") or Path.home()).expanduser().resolve()
-    git_reads, git_writes = _git_paths(cwd)
-    writable: list[str] = [_filter("subpath", scratch), _filter("literal", Path("/dev/null"))]
+    git_reads, git_writes = _git_paths(cwd, git_probe)
+    writable = [PathGrant(scratch), PathGrant(Path("/dev/null"), PathScope.EXACT)]
     if isinstance(posture, UnattendedImplementation):
-        writable.append(_filter("subpath", cwd))
+        writable.append(PathGrant(cwd))
         writable.extend(
-            _filter("subpath" if path.is_dir() else "literal", path) for path in git_writes
+            PathGrant(path, PathScope.TREE if path.is_dir() else PathScope.EXACT)
+            for path in git_writes
         )
     if harness is FrontierHarness.CODEX:
-        writable.append(_filter("subpath", Path(environment.get("CODEX_HOME") or home / ".codex")))
+        writable.append(PathGrant(Path(environment.get("CODEX_HOME") or home / ".codex")))
     else:
         writable.extend(
             (
-                _filter("subpath", home / ".claude"),
-                _filter("literal", home / ".claude.json"),
+                PathGrant(home / ".claude"),
+                PathGrant(home / ".claude.json", PathScope.EXACT),
             )
         )
     readable: list[Path] = [
@@ -259,45 +314,73 @@ def _profile(
         Path("/sbin"),
         Path("/private/etc"),
         Path("/private/var/db/dyld"),
+        # Claude Code initializes Foundation before it parses its command line.
+        # Foundation reads the system timezone database and terminates the
+        # process when Seatbelt hides it, even for `claude --version`.
+        Path("/private/var/db/timezone"),
         Path("/Library/Apple"),
         home / ".gitconfig",
         home / ".config" / "git",
         *git_reads,
-        *_command_read_paths(command, environment),
+        *_command_read_paths(command, environment, read_shebang),
     ]
     if harness is FrontierHarness.CODEX:
         readable.append(Path(environment.get("CODEX_HOME") or home / ".codex"))
     else:
-        readable.extend((home / ".claude", home / ".claude.json"))
+        readable.extend(
+            (
+                home / ".claude",
+                home / ".claude.json",
+                # Claude Code stores its session in the macOS login keychain.
+                # Security.framework cannot discover that item when Seatbelt
+                # hides the backing database, so expose this file rather than
+                # the whole Keychains directory.
+                home / "Library" / "Keychains" / "login.keychain-db",
+            )
+        )
     read_rules = tuple(
-        _filter(
-            "literal" if path == Path("/") else ("subpath" if path.is_dir() else "literal"),
-            path,
+        PathGrant(
+            path, PathScope.EXACT if path == Path("/") or not path.is_dir() else PathScope.TREE
         )
         for path in dict.fromkeys(path.expanduser().resolve() for path in readable if path.exists())
     )
     database_network = tuple(
-        f"(allow network-outbound (remote tcp {json.dumps(endpoint)}))"
+        TcpGrant("localhost", int(endpoint.rsplit(":", 1)[1]))
         for endpoint in _reader_database_endpoints(environment)
     )
-    return " ".join(
-        (
-            "(version 1)",
-            "(allow default)",
-            # Metadata lookup stays available because dyld, Python, and the
-            # harnesses probe optional paths while starting. File contents are
-            # the sensitive boundary and remain allowlisted.
-            "(deny file-read-data)",
-            *(f"(allow file-read-data {item})" for item in read_rules),
-            "(deny file-write*)",
-            *(f"(allow file-write* {item})" for item in writable),
-            f"(deny file-read-data {_filter('literal', operator_token_file())})",
-            "(deny network-outbound)",
-            '(allow network-outbound (literal "/private/var/run/mDNSResponder"))',
-            '(allow network-outbound (remote tcp "*:443"))',
-            *database_network,
-        )
+    return SeatbeltPolicy(
+        reads=(read_rules,),
+        writes=(tuple(writable),),
+        outbound=(
+            (
+                UnixGrant(Path("/private/var/run/mDNSResponder")),
+                TcpGrant("*", 443),
+                *database_network,
+            ),
+        ),
+        forbidden_reads=(PathGrant(operator_token_file(), PathScope.EXACT),),
+        deny_other_network=False,
+        pty=True,
     )
+
+
+def _profile(
+    *,
+    command: Sequence[str],
+    cwd: Path,
+    scratch: Path,
+    posture: SpawnPosture,
+    harness: FrontierHarness,
+    environment: Mapping[str, str],
+) -> str:
+    return _containment_policy(
+        command=command,
+        cwd=cwd,
+        scratch=scratch,
+        posture=posture,
+        harness=harness,
+        environment=environment,
+    ).render()
 
 
 class MacOSSeatbeltContainer:
@@ -320,16 +403,35 @@ class MacOSSeatbeltContainer:
         with tempfile.TemporaryDirectory(prefix="local-agent-seat-") as raw_scratch:
             scratch = Path(raw_scratch).resolve()
             environment = _allowed_environment(cwd, overrides, scratch)
-            profile = _profile(
-                command=command,
-                cwd=cwd.resolve(),
-                scratch=scratch,
-                posture=posture,
-                harness=harness,
-                environment=environment,
+            from .native_verification_broker import broker_command
+
+            proxy = broker_command(
+                command,
+                cwd,
+                scratch,
+                environment,
+                posture=describe_posture(posture),
+                harness=harness.value,
             )
+            if proxy is None:
+                profile = _profile(
+                    command=command,
+                    cwd=cwd.resolve(),
+                    scratch=scratch,
+                    posture=posture,
+                    harness=harness,
+                    environment=environment,
+                )
+                native_command = (
+                    str(_SANDBOX_EXEC),
+                    "-p",
+                    profile,
+                    *(str(part) for part in command),
+                )
+            else:
+                native_command = proxy
             yield ContainedProcess(
-                command=(str(_SANDBOX_EXEC), "-p", profile, *(str(part) for part in command)),
+                command=native_command,
                 environment=environment,
                 scratch_path=scratch,
                 posture=describe_posture(posture),

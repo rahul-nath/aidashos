@@ -16,6 +16,8 @@ import local_first_agent_os.observability as observability
 from local_first_agent_os.coordination.failures import (
     FAILURE_SCHEMA_VERSION,
     DurableFailureError,
+    FailureClassificationSource,
+    classify_failure_with_source,
     exceptional_failure,
     expected_failure,
 )
@@ -86,6 +88,69 @@ def test_generic_durable_exception_preserves_host_assigned_failure() -> None:
     )
 
     assert normalized is failure
+
+
+def test_unclassified_boundary_failure_retains_raw_text() -> None:
+    evidence = "provider returned a novel refusal code ZEBRA-17"
+
+    classification = classify_failure_with_source(evidence, operation="run_provider")
+    failure = classification.failure
+
+    assert failure.error_code == TerminalOutcome.UNKNOWN_FAILURE
+    assert failure.message == evidence
+    assert failure.terminal_outcome == TerminalOutcome.UNKNOWN_FAILURE
+    assert classification.source is FailureClassificationSource.UNCLASSIFIED
+
+
+def test_marker_classification_wins_without_invoking_junior_fallback() -> None:
+    calls: list[str] = []
+
+    classification = classify_failure_with_source(
+        "You've hit your session limit",
+        operation="run_provider",
+        unknown_classifier=lambda evidence: calls.append(evidence) or TerminalOutcome.POLICY_DENIED,
+    )
+
+    assert classification.failure.error_code == TerminalOutcome.USAGE_LIMIT
+    assert classification.source is FailureClassificationSource.MARKER
+    assert calls == []
+
+
+def test_junior_classification_records_provenance_and_preserves_raw_text() -> None:
+    evidence = "request refused by project ruleset ZEBRA-17"
+
+    classification = classify_failure_with_source(
+        evidence,
+        operation="run_provider",
+        unknown_classifier=lambda _evidence: TerminalOutcome.POLICY_DENIED,
+    )
+
+    assert classification.failure.error_code == TerminalOutcome.POLICY_DENIED
+    assert classification.failure.message == evidence
+    assert classification.source is FailureClassificationSource.JUNIOR_MODEL
+    assert "classification_source" not in classification.failure.to_dict()
+
+
+def test_junior_none_of_these_is_a_model_sourced_unknown_with_raw_text() -> None:
+    evidence = "provider returned a novel refusal code ZEBRA-17"
+
+    classification = classify_failure_with_source(
+        evidence,
+        operation="run_provider",
+        unknown_classifier=lambda _evidence: TerminalOutcome.UNKNOWN_FAILURE,
+    )
+
+    assert classification.failure.error_code == TerminalOutcome.UNKNOWN_FAILURE
+    assert classification.failure.message == evidence
+    assert classification.source is FailureClassificationSource.JUNIOR_MODEL
+
+
+def test_unknown_failure_requires_raw_text() -> None:
+    with pytest.raises(ValueError, match="requires raw failure text"):
+        expected_failure(
+            TerminalOutcome.UNKNOWN_FAILURE,
+            operation="run_provider",
+        )
 
 
 def test_json_logs_add_failure_dimensions_for_untyped_exceptions() -> None:

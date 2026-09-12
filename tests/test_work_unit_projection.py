@@ -13,6 +13,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from work_unit_support import (
+    ACCEPTANCE_DESIGN_DOC,
     compile_acceptance_doc,
     install_simulated_engine,
     run_acceptance_work_unit,
@@ -23,6 +24,7 @@ from local_first_agent_os.contracts import DispatchIntentStatus
 from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.coordination.dispatch import (
     claim_next_dispatch_intent,
+    complete_dispatch_intent,
     submit_dispatch_intent,
 )
 from local_first_agent_os.work_units import repository as repo
@@ -337,4 +339,47 @@ def test_the_view_distinguishes_a_parked_dispatch_from_a_claimed_one(
     ]
     assert all(item.dispatch_status is None for item in untouched), (
         "milestones with no intent must not borrow anyone else's dispatch state"
+    )
+
+    repo.record_fact(
+        work_unit_id,
+        MilestoneTransition(
+            phase=LifecyclePhase.PLAN,
+            milestone_key="a",
+            status=MilestoneExecutionStatus.BLOCKED,
+            attempt=1,
+            failure_code="dispatch_wait_elapsed",
+            failure_summary="still CLAIMED after 5400s",
+        ),
+    )
+    assert complete_dispatch_intent(
+        submitted["intent_id"], "FAILED", error="401 OAuth access token has been revoked"
+    )["ok"]
+    settled = build_work_unit_view(work_unit_id).milestones[0]
+    assert settled.dispatch_status is DispatchIntentStatus.FAILED
+    assert settled.dispatch_failure_summary == "401 OAuth access token has been revoked"
+    assert settled.failure_code == "dispatch_wait_elapsed"
+    assert settled.status is MilestoneExecutionStatus.BLOCKED
+    assert settled.attempt == 1
+
+
+def test_the_picker_has_document_and_project_identity(work_unit_ledger: Path) -> None:
+    compiled = service.compile_design_doc_text(
+        ACCEPTANCE_DESIGN_DOC,
+        design_doc_id="named-design",
+        source_path="/private/operator/docs/failure_taxonomy_and_propagation_design.md",
+    )
+    assert compiled.compiled_plan_revision_id
+    started = repo.start_work_unit(compiled.compiled_plan_revision_id)
+    summary = next(
+        row
+        for row in service.list_work_units()
+        if row["work_unit_id"] == started.work_unit.work_unit_id
+    )
+    assert summary["design_doc_name"] == "failure_taxonomy_and_propagation_design.md"
+    assert (
+        summary["target_project_id"]
+        == repo.get_compiled_plan_revision(
+            compiled.compiled_plan_revision_id
+        ).plan.target_project_id
     )

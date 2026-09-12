@@ -278,6 +278,7 @@ kind = "directory"
         configs = self.source / "configs"
         configs.mkdir()
         (configs / "staffing.toml").write_text("tier = 'junior'\n", encoding="utf-8")
+        (configs / "model_registry.toml").write_text("models = []\n", encoding="utf-8")
         (configs / "linked_projects.toml").write_text(
             'path = "~/ai_projects/private_business"\n', encoding="utf-8"
         )
@@ -285,6 +286,8 @@ kind = "directory"
         destination_configs.mkdir()
         example = destination_configs / "linked_projects.toml"
         example.write_text('path = "~/ai_projects/example_web_app"\n', encoding="utf-8")
+        staffing = destination_configs / "staffing.toml"
+        staffing.write_text("public_example = true\n", encoding="utf-8")
 
         self.write_manifest(
             """
@@ -297,9 +300,9 @@ overwrite = true
         plan = build_plan(load_manifest(self.manifest))
 
         withheld = [path.as_posix() for path in plan.withheld_paths]
-        self.assertEqual(withheld, ["configs/linked_projects.toml"])
+        self.assertEqual(withheld, ["configs/linked_projects.toml", "configs/staffing.toml"])
         planned = [action.relative_path.as_posix() for action in plan.actions]
-        self.assertEqual(planned, ["configs/staffing.toml"])
+        self.assertEqual(planned, ["configs/model_registry.toml"])
 
         apply_plan(plan)
 
@@ -307,6 +310,24 @@ overwrite = true
             example.read_text(encoding="utf-8"),
             'path = "~/ai_projects/example_web_app"\n',
         )
+        self.assertEqual(staffing.read_text(encoding="utf-8"), "public_example = true\n")
+
+    def test_private_audit_is_withheld_from_a_source_directory_export(self) -> None:
+        package = self.source / "src" / "local_first_agent_os"
+        package.mkdir(parents=True)
+        (package / "09032026_manual_audit.txt").write_text("private review notes\n")
+        (package / "runtime.py").write_text("PUBLIC_RUNTIME = True\n")
+        self.write_manifest('[[allow]]\npath = "src"\nkind = "directory"\noverwrite = true\n')
+        plan = build_plan(load_manifest(self.manifest))
+        self.assertEqual(
+            [path.as_posix() for path in plan.withheld_paths],
+            ["src/local_first_agent_os/09032026_manual_audit.txt"],
+        )
+        apply_plan(plan)
+        self.assertFalse(
+            (self.destination / "src/local_first_agent_os/09032026_manual_audit.txt").exists()
+        )
+        self.assertTrue((self.destination / "src/local_first_agent_os/runtime.py").is_file())
 
     def test_third_party_material_is_withheld_and_named_as_such(self) -> None:
         """The distillation stays home; the contract derived from it ships.

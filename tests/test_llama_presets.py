@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import configparser
 import os
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -336,3 +338,38 @@ def test_generator_and_model_spec_expand_registry_paths_identically() -> None:
             server_model_name="m",
             gguf_path="models/relative.gguf",
         )
+
+
+@pytest.mark.parametrize("alias", ["glimmer_deliberator", "qwen38_fallback"])
+def test_installed_speculation_contract_reaches_the_preset(alias: str, tmp_path: Path) -> None:
+    """The TOML, fallback registry and server must select the same draft setup."""
+    from local_first_agent_os.contracts import ModelSpec
+    from local_first_agent_os.model_registry import DEFAULT_MODELS
+
+    root = Path(__file__).parents[1]
+    registry_path = root / "configs" / "model_registry.toml"
+    raw = tomllib.loads(registry_path.read_text(encoding="utf-8"))["models"][alias]
+    spec = ModelSpec(alias=alias, **raw)
+    fallback = next(model for model in DEFAULT_MODELS if model.alias == alias)
+    assert spec.speculative is not None
+    assert spec.speculative == fallback.speculative
+
+    output = tmp_path / "presets.ini"
+    subprocess.run(
+        [
+            sys.executable,
+            str(root / "scripts" / "gen_llama_presets.py"),
+            str(registry_path),
+            str(output),
+        ],
+        check=True,
+    )
+    presets = configparser.ConfigParser(interpolation=None)
+    presets.read_string("[router]\n" + output.read_text(encoding="utf-8"))
+    preset = presets[spec.server_model_name]
+    assert preset["spec-type"] == spec.speculative.type
+    assert preset["model-draft"] == spec.speculative.draft_gguf_path
+    assert preset.getint("spec-draft-n-max") == spec.speculative.draft_n_max
+    assert preset["model"] == spec.gguf_path
+    assert preset.getint("parallel") == spec.parallel
+    assert preset.getint("c") == spec.context_window

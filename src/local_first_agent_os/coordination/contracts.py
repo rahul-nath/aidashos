@@ -12,9 +12,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
+from ..contracts import CheckpointStatus
 from ..dispatch_kinds import DispatchKind
 from ..vocabulary import DispatchTier
-from .outcomes import TerminalOutcome
+from .outcomes import CheckpointReason, TerminalOutcome
 
 
 class CoordinationCommandName(StrEnum):
@@ -122,7 +123,6 @@ class CoordinationFlag(StrEnum):
     ACCEPTANCE_CRITERIA = "--acceptance-criteria"
     ACCEPTED_BY = "--accepted-by"
     AFTER_SEQUENCE = "--after-sequence"
-    ADAPTER = "--adapter"
     AGENT_NAME = "--agent-name"
     AGENT_TIER = "--agent-tier"
     AUDIENCE = "--audience"
@@ -166,7 +166,7 @@ class CoordinationFlag(StrEnum):
     MAX_AUTOMATIC_RECOVERIES = "--max-automatic-recoveries"
     MAX_POLLS = "--max-polls"
     MAX_TRANSIENT_RESUMES = "--max-transient-resumes"
-    MAX_TOKENS = "--max-tokens"
+    TASK_MAX_TOKENS = "--task-max-tokens"
     MILESTONE_ID = "--milestone-id"
     MODEL_ROLE = "--model-role"
     MODEL = "--model"
@@ -195,6 +195,7 @@ class CoordinationFlag(StrEnum):
     RESULT_FILE = "--result-file"
     RESULT_JSON = "--result-json"
     RETENTION_SECONDS = "--retention-seconds"
+    RETRY_OF = "--retry-of"
     ROLE = "--role"
     ROOT = "--root"
     SAGA_ID = "--saga-id"
@@ -1023,8 +1024,8 @@ class ListExecutionArtifacts:
 @dataclass(frozen=True)
 class CreateExecutionCheckpoint:
     lease_id: str
-    reason: str
-    status: str
+    reason: CheckpointReason
+    status: CheckpointStatus
     saga_id: str | None = None
     pow_wow_id: str | None = None
     worktree_path: str | None = None
@@ -1045,9 +1046,9 @@ class CreateExecutionCheckpoint:
             self.name.value,
             self.lease_id,
             CoordinationFlag.REASON.value,
-            self.reason,
+            self.reason.value,
             CoordinationFlag.STATUS.value,
-            self.status,
+            self.status.value,
         ]
         for flag, value in (
             (CoordinationFlag.SAGA_ID, self.saga_id),

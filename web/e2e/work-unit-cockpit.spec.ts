@@ -42,6 +42,7 @@ function milestone(overrides: Record<string, unknown> = {}) {
     child_workflow_id: null,
     dispatch_intent_id: null,
     dispatch_status: null,
+    staff_review: null,
     failure_code: null,
     failure_summary: null,
     result_summary: 'planned',
@@ -266,6 +267,8 @@ async function stubWorkUnit(page: Page, view: Record<string, unknown>) {
           {
             work_unit_id: WORK_UNIT_ID,
             title: 'Acceptance design doc',
+            design_doc_name: view.design_doc_name ?? null,
+            target_project_id: view.target_project_id ?? null,
             status: String(view.status),
             current_phase: String(view.current_phase),
             root_workflow_id: `work-unit:${WORK_UNIT_ID}`,
@@ -320,6 +323,94 @@ async function selectWorkUnit(page: Page) {
 }
 
 test.describe('work unit cockpit', () => {
+  test('identifies a run by its design and target project', async ({ page }) => {
+    await stubShell(page)
+    await stubWorkUnit(page, workUnitView({
+      design_doc_name: 'failure_taxonomy_and_propagation_design.md',
+      target_project_id: 'local-first-agent-os',
+    }))
+    await page.goto('/')
+    const picker = page.getByLabel('WorkUnit cockpit').getByRole('combobox')
+    await expect(picker.locator(`option[value="${WORK_UNIT_ID}"]`)).toContainText(
+      'failure taxonomy and propagation',
+    )
+    await expect(picker.locator(`option[value="${WORK_UNIT_ID}"]`)).toContainText(
+      'local-first-agent-os',
+    )
+  })
+
+  test('shows settled failure separately from agent implementation instructions', async ({ page }) => {
+    await stubShell(page)
+    await stubWorkUnit(page, workUnitView({
+      current_phase: 'IMPLEMENT',
+      pending_decisions: [],
+      blocking: { kind: 'BLOCKED_MILESTONE', detail: 'dispatch wait elapsed', milestone_keys: ['b'] },
+      milestones: [milestone({
+        stable_key: 'b', title: 'Define the command algebra', phase: 'IMPLEMENT',
+        status: 'BLOCKED', milestone_execution_id: 'mex_b',
+        description: 'Implement the command envelope', acceptance_criteria: ['Reject invalid variants'],
+        dispatch_status: 'FAILED', failure_code: 'dispatch_wait_elapsed',
+        failure_summary: 'still CLAIMED after 5400s',
+        dispatch_failure_summary: '401 OAuth access token has been revoked',
+      })],
+    }))
+    await page.goto('/')
+    const cockpit = await selectWorkUnit(page)
+    const playbook = cockpit.getByRole('region', { name: 'What you need to do' })
+    await expect(playbook.getByText('401 OAuth access token has been revoked', { exact: false })).toBeVisible()
+    await expect(playbook.getByText('asks of you:', { exact: false })).toHaveCount(0)
+    await expect(playbook.getByText('Implement the command envelope')).not.toBeVisible()
+    await playbook.getByText('Agent task details', { exact: false }).click()
+    await expect(playbook.getByText('Implement the command envelope')).toBeVisible()
+  })
+
+  test('shows the staff report separately from verdict parsing and audit failures', async ({ page }) => {
+    await stubShell(page)
+    const report = 'The review environment failed before repository access: sandbox_apply: Operation not permitted.\nNo code defect is confirmed.\nApproval requires readable repository access and executable focused tests.'
+    await stubWorkUnit(page, workUnitView({
+      pending_decisions: [],
+      blocking: { kind: 'BLOCKED_MILESTONE', detail: 'did not approve', milestone_keys: ['b'] },
+      milestones: [milestone({
+        stable_key: 'b', title: 'Propagate failures', status: 'BLOCKED',
+        description: 'Implement propagation',
+        dispatch_failure_summary: "repo_audit.v1 requires a non-empty claims list; final typed staff review did not approve",
+        staff_review: {
+          kind: 'RECORDED', artifact_id: 'review-evidence', verdict: 'unclassified',
+          review_text: report, reviewed_commit_sha: '7173b3f',
+        },
+      })],
+    }))
+    await page.goto('/')
+    const cockpit = await selectWorkUnit(page)
+    const playbook = cockpit.getByRole('region', { name: 'What you need to do' })
+    await expect(playbook.getByText('No code defect is confirmed.', { exact: false })).toBeVisible()
+    await expect(playbook).toContainText('Verdict format was not recognized')
+    await expect(playbook).toContainText('7173b3f')
+    await expect(playbook).toContainText('repo_audit.v1 requires a non-empty claims list')
+    await cockpit.getByLabel('Milestones').getByRole('button', { name: 'why?' }).click()
+    await expect(cockpit.getByLabel('Milestones')).toContainText(report)
+  })
+
+  test('keeps malformed review evidence visible even without agent task details', async ({ page }) => {
+    await stubShell(page)
+    await stubWorkUnit(page, workUnitView({
+      pending_decisions: [],
+      blocking: { kind: 'BLOCKED_MILESTONE', detail: 'review unavailable', milestone_keys: ['a'] },
+      milestones: [milestone({
+        status: 'BLOCKED', staff_review: {
+          kind: 'INVALID_ARTIFACT', artifact_id: 'invalid-review',
+          explanation: 'Stored review evidence is malformed; its verdict cannot be displayed.',
+        },
+      })],
+    }))
+    await page.goto('/')
+    const cockpit = await selectWorkUnit(page)
+    const playbook = cockpit.getByRole('region', { name: 'What you need to do' })
+    await expect(playbook).toContainText('Stored review evidence is malformed')
+    await expect(playbook).toContainText('invalid-review')
+    await expect(playbook).not.toContainText('Recorded verdict: approve')
+  })
+
   test('shows all seven phases, including the ones with no work', async ({ page }) => {
     await stubShell(page)
     await stubWorkUnit(page, workUnitView())

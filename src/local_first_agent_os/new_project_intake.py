@@ -52,6 +52,16 @@ from .work_units.permissions import (
 )
 
 SCHEMA_VERSION_SPARSE_GAWD_DRAFT = "sparse_gawd_draft.v1"
+RELEASE_COVERAGE_QUESTIONS: Final = (
+    "Assess release applicability: does this change an installable artifact, public "
+    "interface, configuration, dependency, or persisted data?",
+    "If applicable, name the supported previous version and require clean installation, "
+    "previous-client compatibility, retained conversation and ledger data, interrupted-work "
+    "recovery, explicit schema-upgrade and rollback rehearsals against the exact artifact.",
+    "Require matching package version, source commit, tag, release notes, supported "
+    "environment, and installation instructions before publication.",
+    "If not applicable, record the reason; do not add release work to unrelated changes.",
+)
 # v2 because the payload gained `source` and `suggestions`, and because the two
 # together change what the old `risks` note meant. Under v1 every envelope was
 # heuristic and the note said so. Under v2 a declared envelope is not heuristic
@@ -1100,6 +1110,7 @@ def build_gawd_review_tasks(
                 "DELIVER a delivery record - so give a step a phase whose evidence "
                 "its own work actually produces. A step that writes no code is not "
                 "IMPLEMENT, and a step that runs no tests is not VERIFY."
+                f" Release coverage: {' '.join(RELEASE_COVERAGE_QUESTIONS)}"
                 f"{scaffold_block}"
                 f"{draft_block}"
             ),
@@ -1127,6 +1138,7 @@ def build_gawd_review_tasks(
                 "start the verdict with BLOCK and name the missing fields. If a "
                 "deterministic scaffold is provided below, dropping one of its "
                 "approval gates requires an explicit justification in the verdict."
+                f" Release coverage: {' '.join(RELEASE_COVERAGE_QUESTIONS)}"
                 f"{scaffold_block}"
                 f"{draft_block}"
             ),
@@ -1514,6 +1526,7 @@ def render_gawd_review_markdown(draft: SparseGawdDraft, envelope: PermissionEnve
                 "rollback or compensation behavior.",
             )
         ),
+        _bullets(RELEASE_COVERAGE_QUESTIONS),
         "",
         "## 11. Risk Synthesis / Known Limitations",
         "**Risk synthesis.**",
@@ -1714,6 +1727,7 @@ declare its own, or the compiler refuses with `missing_delivery_contract`.
 ## 10. Rollout / Migration / Rollback
 
 - Write deploy, migration, rollback, or manual gate notes if known.
+{_bullets(RELEASE_COVERAGE_QUESTIONS)}
 
 ## 11. Risk Synthesis / Known Limitations
 
@@ -2003,6 +2017,7 @@ def _clean_line(line: str) -> str:
     if not cleaned:
         return ""
     placeholders = {
+        *(question.lower() for question in RELEASE_COVERAGE_QUESTIONS),
         "write the archetype and one-sentence computational shape.",
         "write the concrete pain this removes.",
         "write the starting state.",

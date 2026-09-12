@@ -65,7 +65,7 @@ class FrontierTurnUsage:
 
 @dataclass(frozen=True)
 class CodexUsage:
-    """Measured cumulative usage from one Codex ``turn.completed`` event."""
+    """Measured cumulative usage from one completed Codex invocation."""
 
     tokens: FrontierTurnUsage
 
@@ -82,6 +82,7 @@ class UsageUnverifiableReason(StrEnum):
     """Why a provider event cannot truthfully become a measured usage row."""
 
     MISSING_USAGE = "missing_usage"
+    NOT_REPORTED = "not_reported"
     MISSING_REQUIRED_FIELDS = "missing_required_fields"
     UNSUPPORTED_EVENT = "unsupported_event"
     UNSUPPORTED_HARNESS = "unsupported_harness"
@@ -168,6 +169,8 @@ def _parse_codex_usage(
     *,
     kind: str,
 ) -> CodexUsage | UsageUnverifiable:
+    if kind == "codex.app_server.turn.completed":
+        return _parse_codex_app_server_usage(payload, kind=kind)
     if kind != "turn.completed":
         return _unverifiable(
             harness=FrontierHarness.CODEX.value,
@@ -208,6 +211,60 @@ def _parse_codex_usage(
                 else _token_count(raw_usage, "cache_write_tokens", provider="codex")
             ),
             output_tokens=_token_count(raw_usage, "output_tokens", provider="codex"),
+        )
+    )
+
+
+def _parse_codex_app_server_usage(
+    payload: Mapping[str, object], *, kind: str
+) -> CodexUsage | UsageUnverifiable:
+    """Decode the last notification of one fresh, single-turn review thread.
+
+    App-server completion has no usage contract. Only its separate, matching
+    tokenUsage notification proves measurement; absence is ordinary unknown
+    usage, while malformed reported counters remain a projection diagnostic.
+    """
+
+    thread_id, turn_id = payload.get("threadId"), payload.get("turnId")
+    if any(not isinstance(value, str) or not value for value in (thread_id, turn_id)):
+        raise ValueError("Codex app-server completion requires thread and turn identities")
+    notification = payload.get("usage_notification")
+    if notification is None:
+        return _unverifiable(
+            harness=FrontierHarness.CODEX.value,
+            kind=kind,
+            reason=UsageUnverifiableReason.NOT_REPORTED,
+        )
+    if not isinstance(notification, Mapping):
+        raise ValueError("Codex app-server usage notification must be an object")
+    if notification.get("threadId") != thread_id or notification.get("turnId") != turn_id:
+        raise ValueError("Codex app-server usage identity differs from completion")
+    token_usage = notification.get("tokenUsage")
+    if not isinstance(token_usage, Mapping) or not isinstance(token_usage.get("total"), Mapping):
+        raise ValueError("Codex app-server usage requires a total object")
+    total = token_usage["total"]
+    required = ("inputTokens", "cachedInputTokens", "cacheWriteInputTokens", "outputTokens")
+    missing = _missing_required_fields(total, required)
+    if missing:
+        return _unverifiable(
+            harness=FrontierHarness.CODEX.value,
+            kind=kind,
+            reason=UsageUnverifiableReason.MISSING_REQUIRED_FIELDS,
+            missing_fields=missing,
+        )
+    input_tokens, cached_tokens, cache_write_tokens, output_tokens = (
+        _token_count(total, field, provider="codex app-server") for field in required
+    )
+    if cached_tokens + cache_write_tokens > input_tokens:
+        raise ValueError("Codex cached and cache-write input cannot exceed total input")
+    # Codex reports cache writes inside inputTokens. Our shared schema has a
+    # separate cache-write bucket, so split it out rather than count it twice.
+    return CodexUsage(
+        FrontierTurnUsage(
+            input_tokens=input_tokens - cache_write_tokens,
+            cached_input_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+            output_tokens=output_tokens,
         )
     )
 

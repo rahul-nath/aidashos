@@ -64,7 +64,7 @@ DEFAULT_MODELS: list[ModelSpec] = [
         reasoning_dialect="reasoning_strength",
         speculative=SpeculativeDecoding(
             type="draft-dflash",
-            draft_n_max=2,
+            draft_n_max=15,
             draft_gguf_path=_home_path("models", "glimmer", "draft.gguf"),
         ),
         default_params={"temperature": 0.6, "top_k": 20, "top_p": 0.95},

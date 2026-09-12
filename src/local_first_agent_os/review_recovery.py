@@ -162,7 +162,7 @@ def recover_unparsed_dispatch_review(
         {
             "task_name": "review_verdict_recovery",
             "role": "host review parser recovery",
-            "status": "COMPLETED",
+            "status": "completed",
             "summary": (
                 "The current typed parser classified the immutable staff decision as APPROVE."
             ),

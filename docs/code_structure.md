@@ -35,8 +35,15 @@ Ledger operations are grouped by the durable state they own:
 - `coordination/dispatch.py` owns dispatch intent transitions.
 - `coordination/execution.py` owns execution leases, durable events, and retention.
 - `coordination/durable.py` owns DBOS serialization boundaries.
-- `coordination/saga_coordinator.py` owns the high-level staged saga runner.
+- `coordination/saga_coordinator.py` projects two legacy saga-inspection results into typed workflow contracts; it does not dispatch work.
 - `coordination/cli.py` owns argparse and MCP serialization only.
+
+## Local delegation and retired direct queries
+
+`local_model_delegation.py` owns bounded local-model tasks, their invocation provenance, and retained typed failures through ModelManager.
+`delegation.py` remains the shared caller-facing local delegate and payload projection.
+The retired unmanaged CLI-query aliases and historical query-workflow replay produce the fixed refusal in `agent_query_retirement.py` before provider invocation or historical-record mutation.
+They cannot select a provider model or dispatch work.
 
 ## Pow-wow execution
 

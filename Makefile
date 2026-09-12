@@ -1,4 +1,4 @@
-.PHONY: setup boot whisper-coreml api-types api-types-check config-docs config-docs-check format format-check
+.PHONY: setup boot whisper-coreml api-types api-types-check config-docs config-docs-check format format-check test-golden-path
 
 # The public front door, and deliberately the first target: the site tells a
 # fresh clone to run bare `make`, so bare `make` has to be the base install
@@ -64,3 +64,8 @@ format:
 # the rule enforceable rather than aspirational.
 format-check:
 	uv run ruff format --check
+
+# Real resident processes and disposable databases, with a deterministic model.
+# Missing or skipped acceptance scenarios fail this command.
+test-golden-path:
+	uv run --offline --no-sync python scripts/accept_golden_path.py

@@ -29,6 +29,7 @@ from local_first_agent_os.pow_wow.views import (
         ("REQUEST_CHANGES add a regression test", ReviewDisposition.REQUEST_CHANGES),
         ("REJECT unsafe behavior", ReviewDisposition.REJECT),
         ("ESCALATE architectural disagreement", ReviewDisposition.ESCALATE),
+        ("CANNOT_REVIEW: tools unavailable", ReviewDisposition.UNAVAILABLE),
         ("Looks reasonable.", ReviewDisposition.UNCLASSIFIED),
         ("", ReviewDisposition.UNCLASSIFIED),
     ],
@@ -44,6 +45,18 @@ def test_review_verdict_does_not_sniff_later_prose() -> None:
     verdict = ReviewVerdict.parse("APPROVE\nThis previously blocked the workflow.")
     assert verdict.disposition is ReviewDisposition.APPROVE
     assert not verdict.disposition.requests_changes
+
+
+@pytest.mark.parametrize("decision", ["APPROVE", "## Review\nVerdict: APPROVE"])
+def test_historical_sandbox_diagnostic_does_not_override_explicit_review(decision: str) -> None:
+    text = (
+        f"{decision}\nThe regression test proves the historical "
+        "sandbox-exec: sandbox_apply: Operation not permitted failure is repaired."
+    )
+    verdict = ReviewVerdict.parse(text)
+    assert verdict.disposition is ReviewDisposition.APPROVE
+    assert not verdict.disposition.requests_changes
+    assert verdict.text == text
 
 
 def test_a_labeled_verdict_line_counts_wherever_it_sits() -> None:

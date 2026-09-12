@@ -19,7 +19,6 @@ from local_first_agent_os.spawn_authority import ReadOnlyInspection, UnattendedI
 from local_first_agent_os.staffing import (
     DEFAULT_BENCH,
     DEFAULT_ROSTERS,
-    BackupModel,
     BenchSlot,
     CheckRole,
     FrontierHarness,
@@ -28,7 +27,6 @@ from local_first_agent_os.staffing import (
     JudgmentRole,
     JudgmentWorkload,
     Roster,
-    SharedSeatRefused,
     WorkloadModelProfile,
     dispatch_seat_counts,
     load_bench,
@@ -42,11 +40,8 @@ from local_first_agent_os.vocabulary import DispatchTier
 def test_default_bench_seats_two_different_frontier_vendors() -> None:
     """The fallback bench keeps the one property the seating exists for.
 
-    `DEFAULT_BENCH` is reached only when no staffing.toml exists. Which vendor
-    holds which seat there is currently allowed to differ from the repo config,
-    because a fleet of tests scripts its scenarios against the default seating;
-    what may never differ is the invariant that the two frontier seats are two
-    vendors, so that is what this asserts.
+    Missing configuration preserves the existing two-vendor default; explicit
+    operator configuration may choose same-model review instead.
     """
 
     frontier_seats = {
@@ -56,9 +51,18 @@ def test_default_bench_seats_two_different_frontier_vendors() -> None:
     assert frontier_seats == {Harness.CLAUDE, Harness.CODEX}
     junior = resolve_bench(DispatchTier.JUNIOR)
     assert junior.harness == Harness.PI
-    assert junior.model == "gemma4"
-    # qwen kept as a backup junior model for the upcoming local comparison eval
-    assert junior.backup_models == (BackupModel(harness=Harness.PI, model="qwen3.8-27b-mtp"),)
+    assert junior.model is None
+    assert junior.backup_models == ()
+
+
+def test_repo_junior_seat_follows_the_active_general_selection() -> None:
+    repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
+    bench = load_bench(repo_cfg)
+
+    for workload in JudgmentWorkload:
+        resolved = resolve_bench_for_workload(DispatchTier.JUNIOR, workload, bench)
+        assert resolved.harness is Harness.PI
+        assert resolved.model is None
 
 
 def test_capacity_encodes_allocation() -> None:
@@ -263,8 +267,7 @@ def test_a_spent_vendor_moves_the_whole_pair_to_the_fallback_pairing(tmp_path: P
     no backup stayed behind on the spent vendor while its pair member escaped,
     and the seat that did move landed beside a reviewer nobody had checked it
     against. Moving to a declared pairing removes both - the landing was
-    constructed through `FrontierPairing`, so its two seats are already proven
-    distinct.
+    constructed through `FrontierPairing`, so both seats are declared together.
     """
 
     body = """
@@ -414,21 +417,8 @@ model = "claude-fable-5"
         load_bench(cfg)
 
 
-def test_the_repo_matrix_survives_the_loss_of_any_one_vendor() -> None:
-    """The operator's staffing matrix (2026-08-23), made executable.
-
-    Whichever pairing is seated, killing any single vendor it depends on has to
-    land the pair - both seats, together - on a bench that avoids the dead
-    vendor and keeps two different models. Not one scenario but the property
-    itself, quantified over every pairing the file declares and every vendor
-    each depends on: this is what makes editing the config safe, because a
-    matrix hole fails here by name instead of surfacing as a queued pipeline
-    during the outage that finds it.
-
-    Killing everything a pairing depends on must queue both seats, since the
-    both-vendors-out answer is the local ensemble direction and nothing
-    declared yet; see docs/local_fallback_seating_gawd.md.
-    """
+def test_repo_pairings_follow_only_their_declared_fallbacks() -> None:
+    """Outage pairs move together; the pinned Codex pair has no provider escape."""
 
     repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
     staffing = load_staffing(repo_cfg)
@@ -440,6 +430,9 @@ def test_the_repo_matrix_survives_the_loss_of_any_one_vendor() -> None:
         for vendor in depends_on:
             plan = staffing_around_spent_quotas(candidate, frozenset({vendor}))
             moved = {item.tier: item for item in plan if item.tier is not DispatchTier.JUNIOR}
+            if not seated.fallback:
+                assert all(isinstance(item, TierUnstaffable) for item in moved.values())
+                continue
             for tier, item in moved.items():
                 assert isinstance(item, TierRestaffed), (
                     f"pairing {seated.name!r} has no way off a spent {vendor.value} for "
@@ -455,8 +448,6 @@ def test_the_repo_matrix_survives_the_loss_of_any_one_vendor() -> None:
                     ).frontier_harnesses()
                 )
                 assert item.slot.reasoning_effort in accepted_efforts
-            # Constructing the landing as a pairing IS the cross-check assertion:
-            # a shared seat would have raised SharedSeatRefused above.
 
         both_out = staffing_around_spent_quotas(candidate, frozenset(FrontierHarness))
         unstaffed = [item for item in both_out if item.tier is not DispatchTier.JUNIOR]
@@ -498,17 +489,17 @@ def test_the_repo_matrix_is_the_operator_s_matrix() -> None:
         ("claude", "claude-opus-5", "high"),
     )
     assert seats("codex-only") == (
-        ("codex", "gpt-5.6-terra", "max"),
-        ("codex", "gpt-5.6-sol", "high"),
+        ("codex", "gpt-5.6-sol", "xhigh"),
+        ("codex", "gpt-6-astra", "high"),
     )
     assert staffing.pairings["cross-vendor"].fallback == ("claude-only", "codex-only")
     assert staffing.pairings["claude-only"].fallback == ("codex-only",)
-    assert staffing.pairings["codex-only"].fallback == ("claude-only",)
+    assert staffing.pairings["codex-only"].fallback == ()
 
 
 def test_workload_profile_changes_model_not_seniority_or_capacity(tmp_path: Path) -> None:
     repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
-    bench = load_bench(repo_cfg)
+    bench = load_staffing(repo_cfg).pairings["cross-vendor"].seats()
 
     standard = resolve_bench_for_workload(
         DispatchTier.SENIOR,
@@ -543,7 +534,7 @@ def test_executor_routes_only_independent_reading_to_its_workload_profile(
     repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "worktrees",
-        bench=load_bench(repo_cfg),
+        bench=load_staffing(repo_cfg).pairings["cross-vendor"].seats(),
     )
     role = JudgmentRole(name="implementer", tier=DispatchTier.SENIOR)
     reading = PowWowTaskSpec(
@@ -595,23 +586,13 @@ model = "claude-opus-5"
 """.strip()
 
 
-def test_one_model_in_both_seats_is_unrepresentable(tmp_path: Path) -> None:
-    """The hardening: the reviewer being the author cannot be written down.
-
-    It used to be a log line, and a log line during a 3am outage is not read.
-    Then it was a refusal with an acknowledgement flag, and the flag's first use
-    was an agent reaching for it past a second model that was already installed.
-    Now the pairing does not construct, full stop (operator's ruling,
-    2026-08-23): every harness this system staffs offers more than one model,
-    so a second model always exists and the last resort the flag served does
-    not.
-    """
+def test_same_model_seats_are_allowed_without_an_acknowledgement(tmp_path: Path) -> None:
 
     cfg = tmp_path / "staffing.toml"
     cfg.write_text(_same_model_config(acknowledged=False), encoding="utf-8")
 
-    with pytest.raises(SharedSeatRefused, match="both implementer and reviewer"):
-        load_bench(cfg)
+    bench = load_bench(cfg)
+    assert bench[DispatchTier.SENIOR].model == bench[DispatchTier.STAFF].model
 
 
 def test_the_retired_acknowledgement_flag_is_refused_by_name(tmp_path: Path) -> None:
@@ -685,35 +666,7 @@ harness = "claude"
 
 
 def test_repo_staffing_toml_matches_locked_mapping() -> None:
-    """The mapping is locked; the effort dial is not, and pinning both hid that.
-
-    `configs/staffing.toml` locks that both frontier seats hold a frontier
-    vendor. Which vendor holds which seat is the operator's call and swapping it
-    is expected.
-
-    It no longer demands *two* vendors. `load_bench` already treats two models
-    from one provider as the sanctioned outage fallback, and only this assertion
-    disagreed - so when one provider's quota went out for six days on
-    2026-08-11, the config that the runtime would have accepted could not be
-    written down, and the seating had to be smuggled past the file it is
-    supposed to be declared in. A rule the code does not enforce and the
-    operator cannot satisfy is not protection.
-
-    The property it was reaching for lives in
-    `test_the_repo_bench_never_lets_the_reviewer_be_the_author`, which holds
-    across any staffing: the reviewer must not be the model that wrote the
-    change. That one is unchanged and still refuses a genuinely shared seat.
-
-    `reasoning_effort` is the opposite kind of setting. It is a dial the operator
-    turns against cost - senior runs at capacity 3, so effort is paid three times
-    on every fan-out - and pinning a specific value here made an intended
-    adjustment look like a regression. A tripwire that fires on the changes you
-    meant is one you learn to edit without reading, which costs you the ones you
-    did not mean.
-
-    So the mapping is asserted exactly and the dial is asserted only to be a
-    value the harnesses accept.
-    """
+    """Both configured frontier seats resolve to supported CLI harnesses."""
 
     repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
     bench = load_bench(repo_cfg)
@@ -734,22 +687,16 @@ def test_repo_staffing_toml_matches_locked_mapping() -> None:
     assert staff.reasoning_effort in accepted_efforts
 
 
-def test_the_repo_bench_never_lets_the_reviewer_be_the_author() -> None:
-    """The invariant the seating exists to serve, stated on its own.
-
-    Separate from the mapping test because it survives any future swap: whatever
-    sits in the two seats, review is worth running only if the reviewer can
-    disagree with the implementer for reasons the implementer did not already
-    have. `load_bench` warns when this is violated; this refuses to let the
-    repository's own config be the violation.
-    """
+def test_repo_same_provider_pair_keeps_distinct_model_and_effort_assignments() -> None:
 
     repo_cfg = Path(__file__).resolve().parents[1] / "configs" / "staffing.toml"
     bench = load_bench(repo_cfg)
     senior = bench[DispatchTier.SENIOR]
     staff = bench[DispatchTier.STAFF]
 
-    assert (senior.harness, senior.model) != (staff.harness, staff.model)
+    assert senior.harness is staff.harness is Harness.CODEX
+    assert (senior.model, staff.model) == ("gpt-5.6-sol", "gpt-6-astra")
+    assert (senior.reasoning_effort, staff.reasoning_effort) == ("xhigh", "high")
 
 
 def test_prose_that_names_the_seating_matches_the_config() -> None:
@@ -773,7 +720,6 @@ def test_prose_that_names_the_seating_matches_the_config() -> None:
     bench = load_bench(repo_root / "configs" / "staffing.toml")
     senior = bench[DispatchTier.SENIOR].harness
     staff = bench[DispatchTier.STAFF].harness
-    spoken = {Harness.CLAUDE: "Claude", Harness.CODEX: "Codex"}
     written = {Harness.CLAUDE: "Claude Code", Harness.CODEX: "Codex"}
 
     # The shooting script is private-repo-owned: it is a recording plan, it names
@@ -783,10 +729,8 @@ def test_prose_that_names_the_seating_matches_the_config() -> None:
     demo_path = repo_root / "docs" / "demo_shooting_script.md"
     if demo_path.exists():
         demo = demo_path.read_text(encoding="utf-8")
-        assert f"implementation was {spoken[senior]}, review is {spoken[staff]}" in demo, (
-            "the demo's 3:30 narration names the wrong vendor for the seat; "
-            "update docs/demo_shooting_script.md to match configs/staffing.toml"
-        )
+        assert "name the actual implementation and review models and efforts" in demo
+        assert "Do not infer a historical run's assignment from today's configuration" in demo
 
     readme = (repo_root / "README.md").read_text(encoding="utf-8")
     assert f"that is {written[senior]} implementing and {written[staff]} reviewing" in readme, (
@@ -814,7 +758,9 @@ def test_roster_payload_is_json_friendly() -> None:
 def test_bench_slot_reasoning_effort_reaches_codex_command(tmp_path) -> None:
     from pathlib import Path
 
+    from local_first_agent_os.capabilities import Capability
     from local_first_agent_os.pow_wow import CliPowWowExecutor
+    from local_first_agent_os.spawn_authority import SpawnAuthority
     from local_first_agent_os.staffing import load_bench
 
     config = tmp_path / "staffing.toml"
@@ -835,7 +781,9 @@ capacity = 1
         encoding="utf-8",
     )
     bench = load_bench(Path(config))
-    executor = CliPowWowExecutor(worktree_root=tmp_path / "wt", bench=bench)
+    executor = CliPowWowExecutor(
+        worktree_root=tmp_path / "wt", bench=bench, codex_bin="/usr/bin/true"
+    )
     command = executor._build_agent_cli_command(
         FrontierHarness.CODEX,
         "gpt-5.6-sol",
@@ -843,9 +791,18 @@ capacity = 1
         ReadOnlyInspection(),
         reasoning_effort="high",
     )
-    assert "--model" in command and "gpt-5.6-sol" in command
-    assert "-c" in command and "model_reasoning_effort=high" in command
-    assert "-s" in command and "read-only" in command
+    assert command == ("/usr/bin/true", "app-server")
+    request = executor._inspection_request(
+        harness=FrontierHarness.CODEX,
+        authority=SpawnAuthority.of((Capability.READ_REPOSITORY, Capability.INVOKE_MODEL)),
+        repository=tmp_path,
+        model="gpt-5.6-sol",
+        prompt="review this",
+        effort="high",
+    )
+    assert request is not None
+    assert request.model == "gpt-5.6-sol" and request.effort == "high"
+    assert isinstance(request.authority.posture(), ReadOnlyInspection)
 
 
 def test_bench_slot_reasoning_effort_reaches_claude_command(tmp_path: Path) -> None:

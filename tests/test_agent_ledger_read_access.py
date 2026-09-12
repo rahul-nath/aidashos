@@ -241,25 +241,44 @@ def test_an_executor_without_a_ledger_root_offers_nothing(tmp_path: Path, harnes
 
 
 def test_the_offer_never_displaces_the_prompt(tmp_path: Path) -> None:
-    """The prompt is positional and must stay last under every harness.
+    """CLI prompts stay last; inspection prompt/authority travel in a typed request.
 
     `--mcp-config` is variadic on claude, so an offer appended after the prompt
     would swallow it. This is the same hazard `--disallowedTools` already has.
     """
 
+    from local_first_agent_os.capabilities import Capability
     from local_first_agent_os.pow_wow.executor import CliPowWowExecutor
     from local_first_agent_os.spawn_authority import (
         ReadOnlyInspection,
+        SpawnAuthority,
         SupervisedCommands,
         UnattendedImplementation,
     )
     from local_first_agent_os.staffing import FrontierHarness
 
-    executor = CliPowWowExecutor(worktree_root=tmp_path, agent_ledger_root=_ROOT)
+    executor = CliPowWowExecutor(
+        worktree_root=tmp_path, agent_ledger_root=_ROOT, codex_bin="/usr/bin/true"
+    )
 
     for harness in FrontierHarness:
         for posture in (ReadOnlyInspection(), SupervisedCommands(), UnattendedImplementation()):
             command = executor._build_agent_cli_command(harness, None, "THE PROMPT", posture)
+            if harness is FrontierHarness.CODEX and isinstance(posture, ReadOnlyInspection):
+                assert command == ("/usr/bin/true", "app-server")
+                request = executor._inspection_request(
+                    harness=harness,
+                    authority=SpawnAuthority.of(
+                        (Capability.READ_REPOSITORY, Capability.INVOKE_MODEL)
+                    ),
+                    repository=tmp_path,
+                    model="fixture-model",
+                    prompt="THE PROMPT",
+                    effort=None,
+                )
+                assert request is not None and request.prompt == "THE PROMPT"
+                assert not any("mcp_servers" in part for part in command)
+                continue
             assert command[-1] == "THE PROMPT"
             assert any("agent_coordination_mcp.py" in part for part in command)
 

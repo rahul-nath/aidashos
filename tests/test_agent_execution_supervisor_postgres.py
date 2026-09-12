@@ -50,13 +50,7 @@ from local_first_agent_os.settings import Settings
 from local_first_agent_os.spawn_authority import UnattendedImplementation
 from local_first_agent_os.staffing import JudgmentRole
 from local_first_agent_os.vocabulary import DispatchTier
-from local_first_agent_os.workflow.engine import (
-    _find_latest_dependency_ready_gawd,
-    _find_latest_retryable_milestone,
-)
-from local_first_agent_os.workflow.saga_support import (
-    resolve_target_project_from_gawd_dispatch_history,
-)
+from local_first_agent_os.workflow.engine import _find_latest_retryable_milestone
 
 pytestmark = [
     pytest.mark.integration,
@@ -291,12 +285,14 @@ def test_real_postgres_sigkill_recovery_completes_lease_and_releases_intent(
         text=True,
     ).stdout.strip()
     escaped_pid_path = repo / "escaped-child.pid"
+    # Both probes use only stdlib; the host virtual environment is outside their grants.
+    interpreter = str(Path(sys.executable).resolve(strict=True))
     escaped_code = "import time; time.sleep(30)"
     code = (
         "from pathlib import Path; import signal,subprocess,sys,time; "
         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
         "Path('README.md').write_text('# timed out but preserved\\n'); "
-        f"child=subprocess.Popen([sys.executable,'-u','-c',{escaped_code!r}], "
+        f"child=subprocess.Popen([sys.executable,'-I','-S','-u','-c',{escaped_code!r}], "
         "start_new_session=True); "
         "Path('escaped-child.pid').write_text(str(child.pid)); "
         "print('parent ready', flush=True); time.sleep(30)"
@@ -304,7 +300,7 @@ def test_real_postgres_sigkill_recovery_completes_lease_and_releases_intent(
 
     try:
         capture, supervised = executor._run_frontier_command(
-            [sys.executable, "-u", "-c", code],
+            [interpreter, "-I", "-S", "-u", "-c", code],
             repo,
             execution_attempt=lease,
             harness="codex",
@@ -368,6 +364,8 @@ def test_real_postgres_sigkill_recovery_completes_lease_and_releases_intent(
         ).fetchone()
 
     assert capture.exit_code == 124
+    assert "parent ready" in capture.stdout
+    assert escaped_pid_path.is_file()
     assert supervised.checkpoint_id
     assert lease_row == ("TIMED_OUT", "DEADLINE_EXCEEDED", "COMPLETED", "COMPLETED")
     assert intent_status == ("CHECKPOINT_REVIEW",)
@@ -586,7 +584,7 @@ def test_real_postgres_claude_limit_switches_to_supervised_codex_lease(
     assert transition_payload["replacement_lease_id"] == codex_lease[0]
 
 
-def test_real_postgres_operator_shortcuts_resolve_from_ledger_state(
+def test_real_postgres_retry_preserves_historical_dispatch_and_saga_state(
     postgres_harness: _PostgresHarness,
 ) -> None:
     settings = postgres_harness.settings
@@ -643,11 +641,6 @@ def test_real_postgres_operator_shortcuts_resolve_from_ledger_state(
 
     retry_resolution = _find_latest_retryable_milestone(settings)
     assert retry_resolution["milestone_id"] == "postgres-retryable"
-    assert resolve_target_project_from_gawd_dispatch_history(settings, doc["gawd_doc_id"]) == {
-        "target_project_id": "integration-target",
-        "source": "prior_gawd_dispatch_intents",
-        "intent_ids": [historical_intent["intent_id"]],
-    }
     run_coordination_command(
         [
             "retry_saga_milestone",
@@ -657,10 +650,18 @@ def test_real_postgres_operator_shortcuts_resolve_from_ledger_state(
         settings=settings,
     )
 
-    approval_resolution = _find_latest_dependency_ready_gawd(settings)
-    assert approval_resolution["saga_id"] == saga["saga_id"]
-    assert approval_resolution["gawd_doc_id"] == doc["gawd_doc_id"]
-    assert approval_resolution["milestone_id"] == "postgres-retryable"
+    milestone = run_coordination_command(
+        ["get_saga_milestone", "postgres-retryable"], settings=settings
+    )["milestone"]
+    assert milestone["status"] == "PENDING"
+    assert milestone["saga_id"] == saga["saga_id"]
+    assert milestone["gawd_doc_id"] == doc["gawd_doc_id"]
+    retained = run_coordination_command(["list_dispatch_intents"], settings=settings)["intents"]
+    assert len(retained) == 1
+    assert retained[0]["intent_id"] == historical_intent["intent_id"]
+    assert retained[0]["source"] == f"approved_gawd:{doc['gawd_doc_id']}:milestone:prior"
+    assert retained[0]["target_project_id"] == "integration-target"
+    assert retained[0]["status"] == "PENDING"
 
 
 def test_real_postgres_legacy_merge_approval_hydrates_without_mutation(
@@ -744,16 +745,16 @@ def test_real_postgres_legacy_merge_approval_hydrates_without_mutation(
             "auto_merge": False,
         },
     }
-    run_coordination_command(
-        [
-            "complete_dispatch_intent",
-            intent["intent_id"],
-            "DONE",
-            "--result",
-            json.dumps(result),
-        ],
-        settings=settings,
-    )
+    # This reader must hydrate retained pre-enforcement bytes. The current
+    # completion owner correctly refuses this old report as a fresh observation.
+    # Seed only the disposable database owned by this integration fixture.
+    with psycopg.connect(postgres_harness.database_url) as connection:
+        historical_row = connection.execute(
+            "UPDATE dispatch_intents SET status='DONE', result=%s, completed_at=claimed_at "
+            "WHERE intent_id=%s RETURNING *",
+            (json.dumps(result), intent["intent_id"]),
+        ).fetchone()
+    assert historical_row is not None
     submitted = run_coordination_command(
         [
             "submit_approval_request",
@@ -782,7 +783,12 @@ def test_real_postgres_legacy_merge_approval_hydrates_without_mutation(
             "SELECT status FROM approval_requests WHERE approval_id=%s",
             (submitted["approval_id"],),
         ).fetchone()
+        retained_row = connection.execute(
+            "SELECT * FROM dispatch_intents WHERE intent_id=%s",
+            (intent["intent_id"],),
+        ).fetchone()
     assert status == ("PENDING",)
+    assert retained_row == historical_row
 
 
 def test_real_postgres_recovery_staff_review_request_is_atomic_and_typed(
@@ -797,6 +803,10 @@ def test_real_postgres_recovery_staff_review_request_is_atomic_and_typed(
             "submit_dispatch_intent",
             "senior",
             "Retained implementation",
+            "--permitted-capability",
+            "read_repository",
+            "--permitted-capability",
+            "invoke_model",
             "--kind",
             "code",
             "--target-project-id",

@@ -72,3 +72,6 @@ mv "$COPY_PARTIAL" "$COPY_FINAL"
 trap - EXIT
 echo "Backup complete: $LOCAL_FINAL"
 echo "Off-machine copy complete: $COPY_FINAL"
+uv run python -m local_first_agent_os.backup_retention \
+  --local-root "$BACKUP_DIR" \
+  --copy-root "$COPY_DIR"

@@ -23,11 +23,16 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import suite_postgres_source
 from pydantic import AliasChoices
 from staffing_support import repo_bench
 
 import local_first_agent_os
 from local_first_agent_os.coordination import DispatchKind
+from local_first_agent_os.native_verification_broker import (
+    BROKER_ENV,
+    authenticated_contained_client,
+)
 from local_first_agent_os.pow_wow import (
     CliPowWowExecutor,
     FakeProcessPowWowExecutor,
@@ -123,6 +128,66 @@ def _is_control_plane_name(name: str) -> bool:
     return name.startswith(CONTROL_PLANE_ENV_PREFIXES) or name in CONTROL_PLANE_ENV_NAMES
 
 
+def _leaked_control_plane_names(observed: dict[str, str]) -> list[str]:
+    names = {name for name in observed if _is_control_plane_name(name)}
+    if BROKER_ENV in names and authenticated_contained_client():
+        # The launch owner deliberately restores this transport after stripping.
+        # Neither a caller override nor an unauthenticated hint is an exception.
+        assert observed[BROKER_ENV] == os.environ[BROKER_ENV]
+        names.remove(BROKER_ENV)
+    return sorted(names)
+
+
+def test_generic_gate_strip_removes_inherited_native_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(BROKER_ENV, "inherited transport is not target configuration")
+    environment, stripped = verification_gate_environment(tmp_path)
+    assert BROKER_ENV not in environment
+    assert BROKER_ENV in stripped
+
+
+def test_owned_launch_restores_its_transport_after_the_gate_strip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_first_agent_os import native_verification_broker
+    from local_first_agent_os.process_ownership import ProcessOwnership, prepare_process_launch
+
+    configuration = json.dumps({"socket": "owned", "proxy": "proxy", "nonce": "owned"})
+    monkeypatch.setenv(BROKER_ENV, configuration)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setattr(
+        native_verification_broker,
+        "broker_command",
+        lambda *_args, **_kwargs: (sys.executable, "proxy", "request.json"),
+    )
+    environment, _ = verification_gate_environment(tmp_path)
+    assert BROKER_ENV not in environment
+    environment[BROKER_ENV] = "caller-selected transport"
+    launch = prepare_process_launch(("/usr/bin/true",), tmp_path, environment)
+    assert launch.ownership is ProcessOwnership.BROKER_PROXY
+    assert launch.environment[BROKER_ENV] == configuration
+
+
+def test_containment_overrides_cannot_select_native_transport(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from local_first_agent_os.process_containment import _allowed_environment
+
+    monkeypatch.setenv(BROKER_ENV, "current owner")
+    overrides = {BROKER_ENV: "caller-selected owner"}
+    assert _allowed_environment(tmp_path, overrides, tmp_path)[BROKER_ENV] == "current owner"
+    monkeypatch.delenv(BROKER_ENV)
+    assert BROKER_ENV not in _allowed_environment(tmp_path, overrides, tmp_path)
+
+
+def test_an_environment_hint_does_not_excuse_control_plane_leakage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(BROKER_ENV, "not an authenticated native transport")
+    assert _leaked_control_plane_names({BROKER_ENV: os.environ[BROKER_ENV]}) == [BROKER_ENV]
+
+
 def test_a_verification_command_sees_no_control_plane_variable(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -137,7 +202,7 @@ def test_a_verification_command_sees_no_control_plane_variable(
 
     assert capture.exit_code == 0, capture.stderr
     observed = json.loads(capture.stdout)
-    leaked = sorted(name for name in observed if _is_control_plane_name(name))
+    leaked = _leaked_control_plane_names(observed)
     assert leaked == [], f"the gate inherited control-plane variables: {leaked}"
     # The strip is not an allowlist by accident: a developer's shell survives.
     assert "HOME" in observed
@@ -209,7 +274,7 @@ def test_the_gate_and_the_agent_run_in_different_environments(
     assert agent_env["VIRTUAL_ENV"] == "/control/plane/.venv"
 
     gate_env = json.loads(run["verification"][0]["stdout"])
-    assert not [name for name in gate_env if _is_control_plane_name(name)]
+    assert not _leaked_control_plane_names(gate_env)
     assert "HOME" in gate_env
     assert gate_env["UNRELATED_TOOLCHAIN_SETTING"] == "kept"
 
@@ -305,7 +370,7 @@ def test_the_run_record_names_every_stripped_variable_and_no_value(
     for value in _DISPATCHER_ENVIRONMENT.values():
         assert value not in json.dumps(record)
     gate_env = json.loads(run["verification"][0]["stdout"])
-    assert not [name for name in gate_env if _is_control_plane_name(name)]
+    assert not _leaked_control_plane_names(gate_env)
 
 
 # Variables this repository reads that are deliberately not control-plane
@@ -315,9 +380,11 @@ def test_the_run_record_names_every_stripped_variable_and_no_value(
 # one of the three prefixes instead.
 _FOREIGN_ENVIRONMENT_READS = {
     "PATH": "the shell's, consulted for toolchain lookup",
+    "TMPDIR": "the operating system's temporary-directory convention",
     "NVM_DIR": "nvm's own variable, read to honor a target project's .nvmrc",
     "CLAUDE_BIN": "operator override for an external harness binary",
     "CODEX_BIN": "operator override for an external harness binary",
+    "CODEX_HOME": "Codex-owned subscription reference; inspection workers receive private state",
     "HERMES_BASE_URL": "external adapter endpoint",
     "HERMES_API_KEY": "external adapter credential",
     "OPENCODE_BASE_URL": "external adapter endpoint",
@@ -417,7 +484,12 @@ def test_the_suite_passes_as_a_verification_command_under_an_environment_that_fa
 
     monkeypatch.setenv("LOCAL_AGENT_USE_DBOS", "true")
     selection = "tests/test_work_unit_lifecycle.py::test_all_seven_phases_occur_in_the_fixed_order"
-    command = f"uv run pytest {selection} -q"
+    # Exercise environment isolation using this test runner's installed dependencies.
+    # Creating another project venv would test network/cache availability first.
+    command = (
+        f"uv run --no-project --python {shlex.quote(sys.executable)} "
+        f"python -m pytest {selection} -q"
+    )
 
     direct = run_captured_shell_command(command, REPO_ROOT, timeout_seconds=300)
     assert direct.exit_code != 0, (
@@ -430,6 +502,11 @@ def test_the_suite_passes_as_a_verification_command_under_an_environment_that_fa
 
     gate_environment, stripped = verification_gate_environment(REPO_ROOT)
     assert "LOCAL_AGENT_USE_DBOS" in stripped
+    assert "LOCAL_AGENT_TEST_DATABASE_URL" not in gate_environment
+    # The generic strip removes all control-plane configuration. A verification
+    # resource owner then supplies only its declared test database, as in the
+    # production gate. This nested suite uses the outer suite's disposable scope.
+    gate_environment["LOCAL_AGENT_TEST_DATABASE_URL"] = suite_postgres_source().url
     gated = run_captured_shell_command(
         command, REPO_ROOT, timeout_seconds=300, environment=gate_environment
     )

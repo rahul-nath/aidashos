@@ -10,7 +10,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Iterator
-from functools import cache
+from functools import cache, partial
 from pathlib import Path
 
 import postgres_server
@@ -32,9 +32,12 @@ os.environ.setdefault("LOCAL_AGENT_MEMORY_PROFILING_ENABLED", "false")
 # fixture. `setdefault` leaves an explicit opt-in working.
 os.environ.setdefault("LOCAL_AGENT_USE_DBOS", "false")
 
+from local_first_agent_os import runtime as runtime_module
 from local_first_agent_os.coordination import store
 from local_first_agent_os.runtime import AppRuntime, build_runtime
 from local_first_agent_os.settings import Settings, get_settings
+
+pytest_plugins = ("native_codex_srt_profile", "pytester")
 
 REPO_CONFIGS = Path(__file__).resolve().parent.parent / "configs"
 
@@ -55,13 +58,90 @@ _ORPHAN_MAX_AGE_SECONDS = 3600
 
 
 @pytest.fixture(autouse=True)
+def test_state_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Each test owns its writable state, including subprocesses that change cwd."""
+
+    root = tmp_path / "test-state"
+    root.mkdir()
+    for field, path in {
+        "coordination_root": root,
+        "artifact_root": root / "artifacts",
+        "spool_dir": root / "spool",
+        "session_context_export_dir": root / "session-contexts",
+        "saga_worktree_root": root / "worktrees",
+        "lifecycle_log_dir": root / "lifecycle-logs",
+        "lifecycle_maintenance_state_path": root / "lifecycle-state.json",
+    }.items():
+        monkeypatch.setenv(f"LOCAL_AGENT_{field.upper()}", str(path))
+    # The coordination store's public CLI alias must agree with Settings.
+    monkeypatch.setenv("AGENT_COORDINATION_ROOT", str(root))
+    monkeypatch.setenv("LOCAL_AGENT_DATABASE_URL", f"sqlite:///{root / 'application.sqlite3'}")
+    store.set_root(None)
+    get_settings.cache_clear()
+    runtime_module._get_runtime_cached.cache_clear()
+    try:
+        yield root
+    finally:
+        store.set_root(None)
+        get_settings.cache_clear()
+        runtime_module._get_runtime_cached.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_project_registry(
+    test_state_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compilation may adopt a project, so its registry and target must be disposable."""
+
+    from work_unit_support import acceptance_target_project_id, write_test_project_registry
+
+    from local_first_agent_os import project_scaffold
+
+    source_configs = Path(os.environ.get("LOCAL_AGENT_CONFIG_DIR", REPO_CONFIGS)).expanduser()
+    root = test_state_root
+    config_dir = root / "configs"
+    config_dir.mkdir()
+    for source in source_configs.glob("*.toml"):
+        if source.name != "linked_projects.toml":
+            shutil.copyfile(source, config_dir / source.name)
+    target = root / "target"
+    target.mkdir()
+    write_test_project_registry(config_dir, acceptance_target_project_id(), target)
+    monkeypatch.setenv("LOCAL_AGENT_CONFIG_DIR", str(config_dir))
+    monkeypatch.setenv("LOCAL_AGENT_PROJECTS_ROOT", str(root / "adopted-projects"))
+    monkeypatch.setattr(
+        project_scaffold,
+        "adopt_unregistered_target",
+        partial(project_scaffold.adopt_unregistered_target, root=root / "adopted-projects"),
+    )
+    get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_intake_state(test_state_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The API and intake use a source-location seam separate from Settings."""
+
+    from local_first_agent_os import api
+    from local_first_agent_os.workflow import engine, saga_support
+
+    # The same root also locates the real CLI adapters used by these surfaces.
+    scripts = test_state_root / "scripts"
+    scripts.mkdir()
+    for name in ("inspect-agent-ledger.py", "first-run-check.sh"):
+        shutil.copyfile(REPO_CONFIGS.parent / "scripts" / name, scripts / name)
+    for module in (api, engine, saga_support):
+        monkeypatch.setattr(module, "resolve_project_repo_root", lambda: test_state_root)
+
+
+@pytest.fixture(autouse=True)
 def _operator_token_for_tests(
-    tmp_path_factory: pytest.TempPathFactory,
+    test_state_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Give test operator surfaces the same process-held proof production requires."""
 
-    token_file = tmp_path_factory.mktemp("operator-identity") / "operator.token"
+    token_file = test_state_root / "operator.token"
     token_file.write_text("test-operator-token\n", encoding="utf-8")
     token_file.chmod(0o600)
     monkeypatch.setenv("LOCAL_AGENT_OPERATOR_TOKEN_FILE", str(token_file))
@@ -130,7 +210,7 @@ def _drop_orphaned_schemas(admin_url: str) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_coordination_backend(monkeypatch: pytest.MonkeyPatch):
+def _isolate_coordination_backend(test_state_root: Path, monkeypatch: pytest.MonkeyPatch):
     """Give every test its own schema on the real Postgres server.
 
     The suite used to run on a SQLite adapter, which cannot express the primitives
@@ -177,7 +257,7 @@ def _isolate_coordination_backend(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.fixture()
-def work_unit_ledger(tmp_path: Path) -> Iterator[Path]:
+def work_unit_ledger(test_state_root: Path) -> Iterator[Path]:
     """The coordination ledger for WorkUnit tests.
 
     Isolation now comes from the per-test schema the autouse fixture creates, so
@@ -186,8 +266,8 @@ def work_unit_ledger(tmp_path: Path) -> Iterator[Path]:
     in these tests run against a query with no lock clause in it.
     """
 
-    store.set_root(str(tmp_path))
-    yield tmp_path
+    store.set_root(str(test_state_root))
+    yield test_state_root
     store.set_root(None)
 
 
@@ -206,18 +286,16 @@ def postgres_ledger(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
 
 
 @pytest.fixture()
-def runtime(tmp_path: Path) -> AppRuntime:
-    test_configs = tmp_path / "configs"
-    test_configs.mkdir(parents=True, exist_ok=True)
-    shutil.copy(REPO_CONFIGS / "pi_prompts.toml", test_configs / "pi_prompts.toml")
+def runtime(test_state_root: Path) -> AppRuntime:
     # Build from explicit data so tests ignore the developer's repo-root .env.
     settings = Settings.model_validate(
         {
-            "database_url": f"sqlite:///{tmp_path / 'test.sqlite3'}",
-            "artifact_root": tmp_path / "artifacts",
-            "spool_dir": tmp_path / "spool",
-            "session_context_export_dir": tmp_path / "session-contexts",
-            "config_dir": test_configs,
+            "database_url": f"sqlite:///{test_state_root / 'application.sqlite3'}",
+            "coordination_root": test_state_root,
+            "artifact_root": test_state_root / "artifacts",
+            "spool_dir": test_state_root / "spool",
+            "session_context_export_dir": test_state_root / "session-contexts",
+            "config_dir": test_state_root / "configs",
             "mock_models": True,
             "use_dbos": False,
         }

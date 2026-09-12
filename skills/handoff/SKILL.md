@@ -90,7 +90,7 @@ Ledger is canonical. Prefer an `append_note` with a scope such as `handoff`, `ha
 
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run python agent_coordination_mcp.py \
-  --root /Users/rahul/.local-agent/coordination/local_first_agent_os \
+  --root ~/.local-agent/coordination/local_first_agent_os \
   append_note \
   --session <session-id-if-known> \
   handoff-<slug> \

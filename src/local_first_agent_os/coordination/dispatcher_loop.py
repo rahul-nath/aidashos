@@ -45,6 +45,7 @@ def run_ledger_dispatcher(
     from ..dispatcher import LedgerDispatcher
     from ..dispatcher_runner import build_dispatcher_runner
     from ..runtime import build_runtime
+    from ..runtime_metrics import dispatcher_metrics_server
     from ..staffing import dispatch_seat_counts, load_staffing
 
     with hold_resident_loop(ResidentLoop.LEDGER_DISPATCHER, scope=tier) as lease:
@@ -96,10 +97,11 @@ def run_ledger_dispatcher(
             # Legacy saga intents retain the runner's compatibility fallback.
             tier_claimable=None,
         )
-        dispatched = dispatcher.dispatch_pending_intents(
-            interval_seconds=interval_seconds,
-            max_polls=max_polls,
-        )
+        with dispatcher_metrics_server(runtime.settings.dispatcher_metrics_port, tier):
+            dispatched = dispatcher.dispatch_pending_intents(
+                interval_seconds=interval_seconds,
+                max_polls=max_polls,
+            )
         return ok(
             dispatched=dispatched,
             polls=max_polls,

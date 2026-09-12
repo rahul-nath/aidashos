@@ -11,6 +11,7 @@ from typing import Any, Literal, Protocol
 
 from ..constants import AGENT_BRANCH_AUTO_MERGE
 from ..coordination.contracts import CoordinationCommand, CoordinationResult, DispatchKind
+from ..coordination.failures import FailureV1
 from ..project_center import LinkedProject
 from ..staffing import IMPLEMENTER, REVIEWER, JudgmentRole
 from .protocol import (
@@ -21,7 +22,22 @@ from .protocol import (
     infer_legacy_task_purpose,
 )
 
-type DelegateFn = Callable[..., Mapping[str, Any]]
+
+class DelegateFn(Protocol):
+    """The exact request surface a pow-wow may send to its local-model lane."""
+
+    def __call__(
+        self,
+        *,
+        prompt: str,
+        task_name: str = "",
+        model: str | None = None,
+        model_params: Mapping[str, object] | None = None,
+        timeout_seconds: int | float | None = None,
+        pow_wow_id: str = "",
+    ) -> Mapping[str, Any]: ...
+
+
 type CoordinationCommandFn = Callable[[CoordinationCommand], CoordinationResult]
 type ExecutionLeaseStatus = Literal[
     "COMPLETED",
@@ -215,10 +231,15 @@ class PowWowTaskResult:
     verification_output: tuple[str, ...] = ()
     risks: tuple[str, ...] = ()
     artifacts: tuple[PowWowArtifact, ...] = ()
+    failure: FailureV1 | None = None
 
     def to_payload(self) -> dict[str, Any]:
         payload = asdict(self)
         payload["artifacts"] = [artifact.to_payload() for artifact in self.artifacts]
+        if self.failure is None:
+            payload.pop("failure")
+        else:
+            payload["failure"] = self.failure.to_dict()
         return payload
 
 

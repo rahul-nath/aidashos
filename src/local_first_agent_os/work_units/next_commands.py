@@ -49,8 +49,9 @@ from typing import Any, Final, Literal, get_args
 
 from pydantic import model_validator
 
-from ..contracts import DispatchIntentStatus
+from ..contracts import DispatchIntentStatus, DispatchProgress, classify_dispatch_progress
 from .events import DecisionRequestKind, OperatorDecision
+from .execution import is_dispatch_wait_failure_code
 from .lifecycle import MilestoneExecutionStatus, WorkUnitStatus
 from .projection import BlockingCondition, MilestoneView, OperatorContract, WorkUnitView
 
@@ -218,7 +219,7 @@ _DISPOSITIONS: Final[dict[WorkUnitStatus, _StatusDisposition]] = {
         recoverable=False,
     ),
     WorkUnitStatus.BLOCKED: _StatusDisposition(
-        headline="a correctable failure parked this work for you",
+        headline="execution is blocked; inspect the cause and recovery options",
         resumable=True,
         cancellable=True,
         recoverable=True,
@@ -386,13 +387,32 @@ def _settled_adoption(view: WorkUnitView, milestone: MilestoneView) -> NextComma
         milestone.stable_key,
     )
     intent = "credit this milestone with a dispatch that finished after the wait elapsed"
-    precondition = "the milestone's own dispatch intent settled DONE"
+    precondition = (
+        "the milestone is blocked by an exhausted dispatch wait, its own intent settled DONE, "
+        "and its recorded result carries valid adoptable evidence"
+    )
+    if not is_dispatch_wait_failure_code(milestone.failure_code):
+        return NextCommand(
+            command=command,
+            intent=intent,
+            status=NextCommandStatus.REFUSED,
+            precondition=precondition,
+            reason=(
+                f"milestone {milestone.stable_key} is blocked by "
+                f"{milestone.failure_code or 'an untyped failure'}, not an exhausted dispatch wait"
+            ),
+            refusal_code="settled_adoption_not_wait_elapsed",
+        )
     if milestone.dispatch_status is DispatchIntentStatus.DONE:
         return NextCommand(
             command=command,
             intent=intent,
-            status=NextCommandStatus.READY,
+            status=NextCommandStatus.UNPROVED,
             precondition=precondition,
+            reason=(
+                "DONE alone does not prove adoption readiness; the adoption boundary must "
+                "validate recorded artifacts and review/integration evidence"
+            ),
         )
     if milestone.dispatch_status is None:
         return NextCommand(
@@ -401,6 +421,27 @@ def _settled_adoption(view: WorkUnitView, milestone: MilestoneView) -> NextComma
             status=NextCommandStatus.UNPROVED,
             precondition=precondition,
             reason=f"milestone {milestone.stable_key} has no dispatch intent recorded",
+        )
+    progress = classify_dispatch_progress(milestone.dispatch_status)
+    if progress is DispatchProgress.ACTIVE:
+        return NextCommand(
+            command=command,
+            intent=intent,
+            status=NextCommandStatus.REFUSED,
+            precondition=precondition,
+            reason=f"intent {milestone.dispatch_intent_id or '?'} is still active",
+            refusal_code="settled_adoption_dispatch_still_active",
+        )
+    if progress is DispatchProgress.PARKED:
+        return NextCommand(
+            command=command,
+            intent=intent,
+            status=NextCommandStatus.REFUSED,
+            precondition=precondition,
+            reason=(
+                f"intent {milestone.dispatch_intent_id or '?'} is parked for an operator decision"
+            ),
+            refusal_code="settled_adoption_dispatch_parked",
         )
     return NextCommand(
         command=command,
@@ -461,8 +502,8 @@ def _integrated_adoption(view: WorkUnitView, milestone: MilestoneView) -> NextCo
     """Attest that an already-integrated commit satisfies blocked work.
 
     Always UNPROVED. The commit sha and the acceptance rationale are facts the
-    operator holds and this view does not, and the verb additionally refuses
-    unless the attempt was provider-blocked.
+    operator holds and this view does not. The verb accepts either a provider
+    block or a DONE, staff-approved no-op missing only the integrated patch.
     """
 
     return NextCommand(
@@ -479,11 +520,11 @@ def _integrated_adoption(view: WorkUnitView, milestone: MilestoneView) -> NextCo
         intent="attest that a commit already in the project satisfies this milestone",
         status=NextCommandStatus.UNPROVED,
         precondition=(
-            "the attempt was provider-blocked, and the named commit is an "
-            "integrated ancestor of the project HEAD"
+            "the attempt was provider-blocked, or its DONE dispatch proved a "
+            "staff-approved no-op missing only source_patch; the named commit "
+            "must be an integrated ancestor of the project HEAD"
         ),
         reason="the commit sha and the acceptance rationale are yours to supply",
-        refusal_code="integrated_adoption_not_provider_blocked",
     )
 
 
@@ -552,7 +593,7 @@ def next_commands_for_view(view: WorkUnitView) -> NextCommandSet:
         commands.append(
             NextCommand(
                 command=_cmd("resume_work_unit", view.work_unit_id),
-                intent="re-drive the parked work; this spends another attempt from its budget",
+                intent="retry after resolving the cause; retry policy determines budget charges",
                 status=NextCommandStatus.READY,
                 precondition="the staffed harnesses can act, and the ledger has connections free",
             )
@@ -597,7 +638,11 @@ def _blocking_detail(view: WorkUnitView) -> str | None:
     for item in view.milestones:
         if item.stable_key not in keys:
             continue
-        failure = f" · {item.failure_code}" if item.failure_code else ""
+        failure = (
+            f" · dispatch failed: {item.dispatch_failure_summary}"
+            if item.dispatch_failure_summary
+            else (f" · {item.failure_code}" if item.failure_code else "")
+        )
         named.append(f'milestone {item.stable_key} "{item.title}"{failure}')
     detail = _BLOCKING_HEADLINES.get(view.blocking.kind, view.blocking.detail)
     return f"{detail}: {'; '.join(named)}" if named else detail

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -209,6 +210,19 @@ def _write_executable(path: Path, content: str) -> None:
     path.chmod(0o755)
 
 
+def _require_owned_temporary_files(root: Path) -> None:
+    """Use real mktemp while refusing its ambient per-UID directory selection."""
+
+    mktemp = shutil.which("mktemp")
+    assert mktemp is not None
+    _write_executable(
+        root / "bin" / "mktemp",
+        "#!/bin/sh\nset -eu\n"
+        '[ "$#" = 1 ] && [ "${1%/*}" = "$LOCAL_AGENT_DAEMON_DIR" ] || exit 96\n'
+        f'exec {shlex.quote(mktemp)} "$@"\n',
+    )
+
+
 def _fake_runtime(tmp_path: Path, *, activity_output: str, activity_exit: int = 0) -> Path:
     """A checkout whose stop script and activity command only record themselves.
 
@@ -220,6 +234,7 @@ def _fake_runtime(tmp_path: Path, *, activity_output: str, activity_exit: int = 
     root = tmp_path / "checkout"
     (root / "scripts").mkdir(parents=True)
     (root / "bin").mkdir()
+    _require_owned_temporary_files(root)
     hook = root / "scripts" / "pi_terminal_session.sh"
     hook.write_text(
         (REPO_ROOT / "scripts" / "pi_terminal_session.sh").read_text(encoding="utf-8"),
@@ -240,6 +255,7 @@ def _fake_runtime(tmp_path: Path, *, activity_output: str, activity_exit: int = 
         f"""#!/usr/bin/env bash
 set -euo pipefail
 case "$*" in
+  *session-flush*) printf 'flushed\\n'; exit 0 ;;
   *runtime-activity*)
     cat "{answer_file}"{stream}
     exit {activity_exit}
@@ -272,6 +288,9 @@ def _leave_last_terminal(tmp_path: Path, root: Path) -> tuple[Path, Path, str]:
         },
     )
     assert completed.returncode == 0, completed.stderr
+    assert (daemon_dir / "session-flush.log").read_text() == "flushed\n"
+    assert not list(daemon_dir.glob("sessions.*"))
+    assert not list(daemon_dir.glob("runtime-activity.*"))
     return stop_record, stop_log, completed.stderr
 
 
@@ -347,6 +366,7 @@ def _real_activity_checkout(tmp_path: Path) -> tuple[Path, Path, Path]:
     fake_bin = root / "bin"
     scripts.mkdir(parents=True)
     fake_bin.mkdir()
+    _require_owned_temporary_files(root)
     hook = scripts / "pi_terminal_session.sh"
     hook.write_bytes((REPO_ROOT / "scripts" / "pi_terminal_session.sh").read_bytes())
     hook.chmod(0o755)
@@ -469,6 +489,7 @@ def _fake_stop_checkout(tmp_path: Path, *, activity_output: str, activity_exit: 
     root = tmp_path / "checkout"
     (root / "scripts").mkdir(parents=True)
     (root / "bin").mkdir()
+    _require_owned_temporary_files(root)
     for name in ("stop-agent-runtime.sh", "resident-loop-owners.sh"):
         destination = root / "scripts" / name
         destination.write_text(
@@ -512,7 +533,6 @@ def _run_stop(
     tmp_path: Path, root: Path, *arguments: str
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     daemon_dir = tmp_path / "daemon"
-    daemon_dir.mkdir(exist_ok=True)
     ask_record = tmp_path / "ask-record"
     curl_record = tmp_path / "curl-record"
     completed = subprocess.run(
@@ -545,6 +565,26 @@ def test_the_stop_script_refuses_a_busy_ledger(tmp_path: Path) -> None:
     assert "Local agent runtime stopped." not in completed.stdout
     # The refusal came before the session memory flush, so nothing was written.
     assert not curl_record.exists()
+    assert (tmp_path / "daemon").is_dir()
+    assert not list((tmp_path / "daemon").iterdir())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the stop script is a bash script")
+def test_the_stop_script_refuses_when_diagnostic_storage_is_unavailable(tmp_path: Path) -> None:
+    root = _fake_stop_checkout(tmp_path, activity_output="idle\n")
+    # The runtime can create an absent diagnostic directory, but cannot treat
+    # an unusable state path as evidence that the ledger is idle.
+    state = tmp_path / "daemon"
+    state.write_text("existing non-directory state")
+
+    completed, ask_record, curl_record = _run_stop(tmp_path, root)
+
+    assert completed.returncode == 1
+    assert "Refusing to stop (unknown):" in completed.stderr
+    assert "diagnostic file could not be created" in completed.stderr
+    assert not ask_record.exists()
+    assert not curl_record.exists()
+    assert state.read_text() == "existing non-directory state"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the stop script is a bash script")

@@ -28,13 +28,13 @@
 # code. Update by hand from https://artificialanalysis.ai/leaderboards/models
 # and commit it like any other ruling.
 #
-# TWENTY of the twenty-three rows below are measured, read off the
-# leaderboard on 2026-08-30 and marked `anchor = true`.
+# Twenty-one of the twenty-four rows below are measured and marked
+# `anchor = true`: twenty from 2026-08-30, plus Astra high from 2026-09-04.
 #
 # Exactly THREE are operator estimates: `claude-sonnet-5` at xhigh and at
 # medium, and `gemma4`, which is not on the leaderboard at all. None of the
 # three can decide the top of the lattice - the highest of them is 54, below
-# nine measured rows - so an estimate cannot choose which pairing runs. That
+# the measured top band - so an estimate cannot choose which pairing runs. That
 # was not true earlier in the day, when the whole top band was guessed.
 #
 # `tests/test_pairing_lattice.py` asserts that every seating this operator has
@@ -45,8 +45,8 @@
 # are used.
 
 [source]
-name = "Artificial Analysis intelligence index (20 of 23 rows measured); the 3 estimates all score below the decisive band"
-derived_at = "2026-08-30"
+name = "Artificial Analysis intelligence index (21 of 24 rows measured); the 3 estimates all score below the decisive band"
+derived_at = "2026-09-04"
 rederive_from = "https://artificialanalysis.ai/leaderboards/models"
 
 [scoring]
@@ -161,6 +161,18 @@ quality = 48
 # and the second because it is a special-purpose approval model rather than a
 # seat candidate.
 #
+# Astra high: Intelligence Index 60, read 2026-09-04 from
+# https://artificialanalysis.ai/models/gpt-6-astra-high
+# The installed Codex model catalog confirms gpt-6-astra supports high.
+# Other rows retain their original evidence date; this is no global re-ranking.
+[[models]]
+harness = "codex"
+vendor = "openai"
+model = "gpt-6-astra"
+effort = "high"
+quality = 60
+anchor = true
+
 # Effort is not a monotonic dial across models: Sol at medium (56) outscores
 # Terra at xhigh (53), and Terra at max (57) ties Sol at high. That is the whole
 # argument for keying this chart on (model, effort).

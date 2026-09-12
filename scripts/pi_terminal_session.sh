@@ -3,16 +3,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STATE_DIR="${LOCAL_AGENT_DAEMON_DIR:-$HOME/.local-agent/daemon}"
+mkdir -p "$STATE_DIR"
+STATE_DIR="$(cd "$STATE_DIR" && pwd)"
 SESSIONS="$STATE_DIR/sessions"
 LOCK="$STATE_DIR/lock"
 SESSION_DAEMON_PID="$STATE_DIR/session-daemon.pid"
 SESSION_DAEMON_LOG="$STATE_DIR/session-daemon.log"
+SESSION_FLUSH_LOG="$STATE_DIR/session-flush.log"
+START_LOG="$STATE_DIR/start-agent-runtime.log"
 # One place answers what happened to the runtime on the last leave: either the
 # stop script's transcript, or the reason it was not run. It is a variable now
 # because two paths write it and a test has to be able to read it somewhere
 # other than the operator's own log.
-STOP_LOG="${LOCAL_AGENT_STOP_RUNTIME_LOG:-/tmp/local-agent-stop-agent-runtime.log}"
-mkdir -p "$STATE_DIR"
+STOP_LOG="${LOCAL_AGENT_STOP_RUNTIME_LOG:-$STATE_DIR/stop-agent-runtime.log}"
 
 action="${1:?enter or leave}"
 pid="${2:?shell pid}"
@@ -27,7 +30,9 @@ with_lock() {
 
 prune_sessions() {
   touch "$SESSIONS"
-  tmp="$(mktemp)"
+  # An explicit template keeps session state in its owned directory even when
+  # macOS selects a per-UID system temp directory ahead of TMPDIR.
+  tmp="$(mktemp "$STATE_DIR/sessions.XXXXXX")"
   while IFS= read -r existing; do
     [ -z "$existing" ] && continue
     if kill -0 "$existing" >/dev/null 2>&1; then
@@ -66,7 +71,7 @@ ensure_session_daemon() {
 flush_session_contexts() {
   (
     cd "$ROOT"
-    uv run local-agent session-flush "$@" >/tmp/local-agent-session-flush.log 2>&1
+    uv run local-agent session-flush "$@" >"$SESSION_FLUSH_LOG" 2>&1
   ) || true
 }
 
@@ -83,7 +88,7 @@ enter_session() {
   printf '%s\n' "$pid" >> "$SESSIONS"
   sort -u "$SESSIONS" -o "$SESSIONS"
   if [ "$before" = "0" ]; then
-    "$ROOT/scripts/start-agent-runtime.sh" >/tmp/local-agent-start-agent-runtime.log 2>&1 || cat /tmp/local-agent-start-agent-runtime.log >&2
+    "$ROOT/scripts/start-agent-runtime.sh" >"$START_LOG" 2>&1 || cat "$START_LOG" >&2
   fi
   ensure_session_daemon
 }
@@ -97,7 +102,7 @@ runtime_activity() {
   # The answer is stdout. Diagnostics the pool writes on its way to reporting an
   # unreachable ledger are not the answer, and folding them in would push the
   # word this hook branches on off the first line.
-  errors="$(mktemp)"
+  errors="$(mktemp "$STATE_DIR/runtime-activity.XXXXXX")"
   if report="$(cd "$ROOT" && uv run local-agent runtime-activity 2>"$errors")"; then
     printf '%s\n' "$report"
   else
@@ -153,7 +158,7 @@ stop_runtime_when_no_work_is_live() {
 leave_session() {
   flush_session_contexts --session-id "$session_id"
   prune_sessions
-  tmp="$(mktemp)"
+  tmp="$(mktemp "$STATE_DIR/sessions.XXXXXX")"
   grep -vxF "$pid" "$SESSIONS" > "$tmp" || true
   mv "$tmp" "$SESSIONS"
   remaining="$(wc -l < "$SESSIONS" | tr -d ' ')"

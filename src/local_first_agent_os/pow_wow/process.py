@@ -8,7 +8,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-import os
 import shlex
 import signal
 import subprocess
@@ -16,9 +15,11 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
 
+from ..constants import PROCESS_CANCELED_EXIT_CODE, PROCESS_TIMEOUT_EXIT_CODE
 from ..coordination.contracts import DispatchKind
+from ..process_ownership import prepare_process_launch
 from ..project_center import LinkedProject
-from ..toolchains import project_environment
+from ..toolchains import project_environment, unprivileged_process_environment
 from .types import (
     CommandRunCapture,
     ExecutionLeaseStatus,
@@ -36,7 +37,7 @@ def _decode_timeout_output(value: str | bytes | None) -> str:
     return value
 
 
-def _describe_command_timeout(value: str | bytes | None, timeout_seconds: int) -> str:
+def _describe_command_timeout(value: str | bytes | None, timeout_seconds: float) -> str:
     return f"{_decode_timeout_output(value)}Command timed out after {timeout_seconds}s"
 
 
@@ -44,35 +45,29 @@ def _run_reaped_process_group(
     command: str | list[str],
     cwd: Path,
     *,
-    shell: bool,
     environment: Mapping[str, str],
-    timeout_seconds: int,
+    timeout_seconds: float,
     display_command: str,
 ) -> CommandRunCapture:
-    """Run the command as its own process group; on timeout, reap the whole group.
+    """Capture an owned launch and revoke that ownership before draining on timeout.
 
-    `subprocess.run` kills only its direct child on timeout. With `shell=True`
-    that child is the shell, and with `shell=False` it is a launcher like `uv`,
-    so the process doing the work survives the kill as an orphan. An orphan
-    holding the output pipe blocks the post-kill drain until it exits on its own
-    schedule, which means a command whose clock has fired can hold the executor
-    for as long as the orphan pleases. A suite whose lingering threads keep the
-    interpreter alive after the summary prints is the recorded case: see the
-    incident in docs/completed/verification_gate_environment_design.md. The group kill is
-    what makes the timeout an actual bound rather than a request.
+    Outside verification, ownership is the process group.
+    Inside verification, the broker owns the group and a proxy connection revokes it.
     """
 
+    actual = ("/bin/sh", "-c", command) if isinstance(command, str) else tuple(command)
+    launch = prepare_process_launch(actual, cwd, unprivileged_process_environment(environment))
     try:
         proc = subprocess.Popen(
-            command,
+            launch.command,
             cwd=cwd,
-            shell=shell,
-            env=environment,
+            shell=False,
+            env=launch.environment,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            start_new_session=True,
+            start_new_session=launch.ownership.start_new_session,
         )
     except OSError as exc:
         return CommandRunCapture(
@@ -86,7 +81,7 @@ def _run_reaped_process_group(
         stdout, stderr = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired as exc:
         with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(proc.pid, signal.SIGKILL)
+            launch.ownership.send_signal(proc.pid, signal.SIGKILL)
         try:
             stdout, stderr = proc.communicate(timeout=5)
         except subprocess.TimeoutExpired:
@@ -100,7 +95,7 @@ def _run_reaped_process_group(
             cwd=str(cwd),
             stdout=stdout,
             stderr=_describe_command_timeout(stderr, timeout_seconds),
-            exit_code=124,
+            exit_code=PROCESS_TIMEOUT_EXIT_CODE,
         )
     return CommandRunCapture(
         command=display_command,
@@ -115,14 +110,13 @@ def run_captured_command(
     command: Sequence[str],
     cwd: Path,
     *,
-    timeout_seconds: int,
+    timeout_seconds: float,
     env: Mapping[str, str] | None = None,
     complete_environment: bool = False,
 ) -> CommandRunCapture:
     return _run_reaped_process_group(
         [str(part) for part in command],
         cwd,
-        shell=False,
         environment=(dict(env or {}) if complete_environment else project_environment(cwd, env)),
         timeout_seconds=timeout_seconds,
         display_command=shlex.join(str(part) for part in command),
@@ -139,7 +133,6 @@ def run_captured_shell_command(
     return _run_reaped_process_group(
         command,
         cwd,
-        shell=True,
         environment=environment if environment is not None else project_environment(cwd),
         timeout_seconds=timeout_seconds,
         display_command=command,
@@ -236,7 +229,7 @@ def warrants_provider_swap(reason: FrontierFallbackReason | None) -> bool:
 
 
 def infer_frontier_fallback_reason(capture: CommandRunCapture) -> FrontierFallbackReason | None:
-    if capture.exit_code == 124:
+    if capture.exit_code == PROCESS_TIMEOUT_EXIT_CODE:
         return "timeout"
     combined = f"{capture.stdout}\n{capture.stderr}".lower()
     if any(pattern in combined for pattern in _USAGE_LIMIT_PATTERNS):
@@ -285,7 +278,9 @@ def build_command_capture_from_lease_result(
             stderr=str(payload.get("stderr") or payload.get("stderr_tail") or ""),
             exit_code=int(payload.get("exit_code") or 0),
         )
-    exit_code = 0 if status == "COMPLETED" else 124 if status == "TIMED_OUT" else 1
+    exit_code = (
+        0 if status == "COMPLETED" else PROCESS_TIMEOUT_EXIT_CODE if status == "TIMED_OUT" else 1
+    )
     return CommandRunCapture(
         command=shlex.join(str(part) for part in fallback_command),
         cwd=str(cwd),
@@ -299,7 +294,7 @@ def classify_execution_lease_status(capture: CommandRunCapture) -> ExecutionLeas
     fallback_reason = infer_frontier_fallback_reason(capture)
     if fallback_reason == "timeout":
         return "TIMED_OUT"
-    if capture.exit_code == 130:
+    if capture.exit_code == PROCESS_CANCELED_EXIT_CODE:
         combined = f"{capture.stdout}\n{capture.stderr}".lower()
         if "cancel" in combined:
             return "CANCELED"

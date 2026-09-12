@@ -22,7 +22,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from work_unit_support import install_simulated_engine, settle_operator_decisions, start_inline
+from work_unit_support import (
+    install_simulated_engine,
+    register_document_target,
+    settle_operator_decisions,
+    start_inline,
+)
 
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units import service
@@ -53,6 +58,11 @@ pytestmark = pytest.mark.skipif(
 )
 MILESTONE_KEYS = ("0", "1", "2", "3", "4", "5")
 REVIEW_MILESTONE = "4"
+
+
+@pytest.fixture(autouse=True)
+def _registered_document_target(tmp_path: Path) -> None:
+    register_document_target(DOC_PATH.read_text(), tmp_path / "document-target")
 
 
 def _compile(design_doc_id: str) -> service.CompileResult:

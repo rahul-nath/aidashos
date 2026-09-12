@@ -4,75 +4,66 @@
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
-from .agent_adapters import (
-    AgentAdapterRegistry,
-    AgentResult,
-    AgentTask,
-    LocalLlamaAdapter,
+from .constants import (
+    DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
+    DEFAULT_DELEGATED_TASK_MAX_TOKENS,
 )
-from .constants import DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS
+from .contracts import ModelRole
+from .coordination.failures import FailureV1
+from .local_model_delegation import LocalModelAdapter, LocalModelResult, LocalModelTask
+
+if TYPE_CHECKING:
+    from .runtime import AppRuntime
 
 
-def agent_result_payload(result: AgentResult) -> dict[str, Any]:
+def agent_result_payload(result: LocalModelResult) -> dict[str, Any]:
+    artifact_ids = [
+        artifact.artifact_id
+        for artifact in (
+            result.provenance.prompt_artifact,
+            result.provenance.output_artifact,
+        )
+        if artifact is not None
+    ]
     return {
         "ok": result.success,
         "task_id": result.task_id,
         "output": result.output,
-        "artifacts": result.artifacts,
-        "error": result.error,
+        "artifact_ids": artifact_ids,
+        "error": result.error_text,
+        "error_code": result.error.error_code if isinstance(result.error, FailureV1) else None,
         "tokens_used": result.tokens_used,
-        "metadata": result.metadata,
+        "provenance": result.provenance.to_payload(),
     }
 
 
-async def delegate_agent_task(
-    runtime: Any,
+async def delegate_local_model_task(
+    runtime: AppRuntime,
     *,
     prompt: str,
-    tier: str = "weak",
-    adapter: str | None = None,
-    model_role: str = "general",
-    role: str = "delegate",
-    pow_wow_id: str | None = None,
-    saga_id: str | None = None,
+    model_role: ModelRole = ModelRole.GENERAL,
     task_id: str | None = None,
-    session_id: str | None = None,
-    max_tokens: int = 2048,
+    task_max_tokens: int = DEFAULT_DELEGATED_TASK_MAX_TOKENS,
     timeout_seconds: int = DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
-    model_params: dict[str, Any] | None = None,
-    metadata: dict[str, Any] | None = None,
-) -> AgentResult:
-    """Route a small task to an agent runtime.
+    model_params: Mapping[str, object] | None = None,
+    workflow_id: str | None = None,
+) -> LocalModelResult:
+    """Run a bounded task on the selected local-model role.
 
-    This is the package-level seam used by Pi, MCP, and future executor
-    integration. Local model offload should go through this service rather
-    than calling ModelManager directly from every harness.
+    Runtime-backend selection belongs to ModelManager and the installed model
+    configuration. This boundary cannot silently replace local work with a
+    frontier request.
     """
-    task = AgentTask(
+    task = LocalModelTask(
         task_id=task_id or str(uuid.uuid4()),
-        pow_wow_id=pow_wow_id or "",
-        saga_id=saga_id or "",
-        role=role,
         prompt=prompt,
-        max_tokens=max_tokens,
+        model_role=model_role,
+        task_max_tokens=task_max_tokens,
         timeout_seconds=timeout_seconds,
-        session_id=session_id,
-        metadata={
-            **(metadata or {}),
-            "model_role": model_role,
-            "model_params": model_params or {},
-        },
+        workflow_id=workflow_id,
+        model_params=model_params or {},
     )
-
-    if adapter == "local_llama":
-        return await LocalLlamaAdapter(runtime, model_role=model_role).run(task)
-
-    registry = AgentAdapterRegistry.from_settings(runtime.settings, runtime)
-    if adapter:
-        selected = registry.get(adapter)
-        result = await selected.run(task)
-        result.metadata.setdefault("adapter", adapter)
-        return result
-    return await registry.route(tier, task)
+    return await LocalModelAdapter(runtime).run(task)

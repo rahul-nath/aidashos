@@ -26,6 +26,8 @@ from .contracts import (
     ModelRole,
     ModelSpec,
 )
+from .coordination.failures import DurableFailureError, expected_failure
+from .coordination.outcomes import TerminalOutcome
 from .db import EMBEDDING_DIM
 from .ids import build_invocation_id, sha256_text
 from .model_registry import ModelRegistry
@@ -51,17 +53,23 @@ PROMOTABLE_GENERAL_ROLES: frozenset[ModelRole] = frozenset(
 ACTIVE_GENERAL_STATE_NAME = "active_general_role"
 
 
-class ModelNotLoadedError(RuntimeError):
+class ModelNotLoadedError(DurableFailureError):
     """Raised when a workflow needs a model that isn't loaded and autoload is denied."""
 
     def __init__(self, role: ModelRole):
         self.role = role
         super().__init__(
-            f"Model role '{role.value}' is not loaded. Auto-load is disabled to "
-            f"prevent surprise OOM. Load it with:\n"
-            f"    pi /start /{role.value}\n"
-            f"or list available models with:\n"
-            f"    local-agent models-help"
+            expected_failure(
+                TerminalOutcome.LOCAL_MODEL_NOT_LOADED,
+                operation="require_local_model",
+                message=(
+                    f"Model role '{role.value}' is not loaded. Auto-load is disabled to "
+                    f"prevent surprise OOM. Load it with:\n"
+                    f"    pi /start /{role.value}\n"
+                    f"or list available models with:\n"
+                    f"    local-agent models-help"
+                ),
+            )
         )
 
 
@@ -161,20 +169,31 @@ class ModelManager:
             state = self.repository.get_fallback_state(ACTIVE_GENERAL_STATE_NAME)
         except Exception:
             return
-        if state is None:
-            return
-        role_value = state.get("fallback_role")
-        if not role_value:
+        if state is None or not state.get("fallback_role"):
+            self.active_general_role = ModelRole.GENERAL
+            self.active_general_reason = None
             return
         try:
-            role = ModelRole(role_value)
+            role = ModelRole(str(state["fallback_role"]))
         except ValueError:
+            self.active_general_role = ModelRole.GENERAL
+            self.active_general_reason = None
             return
         if role in PROMOTABLE_GENERAL_ROLES:
             self.active_general_role = role
             self.active_general_reason = state.get("reason")
 
-    def effective_general_role(self) -> ModelRole:
+    def effective_general_role(self, *, refresh: bool = False) -> ModelRole:
+        """Return the operator's durable general-model selection.
+
+        Resident processes cache an ``AppRuntime`` while ``pi /start`` writes
+        the selection from a separate process. Callers at a dispatch boundary
+        request a refresh so the durable row, rather than process age, decides
+        which compatible local model runs.
+        """
+
+        if refresh:
+            self._restore_active_general_role()
         return self.active_general_role
 
     def set_active_general_role(self, role: ModelRole, reason: str | None = None) -> None:
@@ -435,6 +454,19 @@ class ModelManager:
             self._active_sessions.discard(role)
 
     def _mock_text_for(self, req: ModelCallRequest, input_text: str) -> dict[str, Any]:
+        from .work_units.plan_evidence import PLAN_REPORT_INSTRUCTION
+
+        if PLAN_REPORT_INSTRUCTION in input_text:
+            return {
+                "schema_version": "plan_result.v1",
+                "status": "PLANNED",
+                "plan_markdown": (
+                    "Deterministic model fixture only; no repository investigation occurred. "
+                    "Exercise the compiled milestone, approval, verification, and delivery "
+                    "boundaries in the test harness. "
+                    f"Prompt/input hash: {sha256_text(input_text)}."
+                ),
+            }
         if req.model_role in {ModelRole.OCR, ModelRole.HARD_OCR}:
             return {
                 "text": f"Mock OCR text extracted from {req.input_artifact_id}.",

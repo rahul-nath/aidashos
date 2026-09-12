@@ -311,15 +311,22 @@ def test_a_task_declaring_its_own_capabilities_is_still_bounded(tmp_path: Path) 
     ],
 )
 def test_codex_sandbox_modes_are_real_values(tmp_path: Path, posture: Any, expected: str) -> None:
-    """`codex exec -s` accepts read-only|workspace-write|danger-full-access.
-
-    Checked against the installed CLI rather than assumed; a wrong value is an
-    immediate non-zero exit inside a leased worktree.
-    """
+    """Inspection uses the local stdio app-server; supervised commands use exec."""
 
     command = _executor(tmp_path)._build_agent_cli_command(
         FrontierHarness.CODEX, None, "prompt", posture
     )
+    if isinstance(posture, ReadOnlyInspection):
+        from local_first_agent_os.codex_review_client import LocalFixtureModel, _client_command
+
+        native = _client_command(
+            str(tmp_path / "prepared-codex"),
+            LocalFixtureModel("fixture", "http://127.0.0.1:1"),
+        )
+        assert command[-1] == "app-server"
+        assert f'sandbox_mode="{expected}"' in native
+        assert native[-5:] == ["--enable", "code_mode_host", "--enable", "code_mode", "app-server"]
+        return
     assert command[command.index("-s") + 1] == expected
 
 
@@ -351,6 +358,9 @@ def test_the_prompt_stays_the_last_argument_under_every_posture(tmp_path: Path) 
     for harness in FrontierHarness:
         for posture in (ReadOnlyInspection(), SupervisedCommands(), UnattendedImplementation()):
             command = executor._build_agent_cli_command(harness, None, "THE PROMPT", posture)
+            if harness is FrontierHarness.CODEX and isinstance(posture, ReadOnlyInspection):
+                assert command == (executor.codex_bin, "app-server")
+                continue  # Typed inspection prompt preservation has its own launch contract test.
             assert command[-1] == "THE PROMPT"
 
 

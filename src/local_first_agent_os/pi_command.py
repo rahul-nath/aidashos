@@ -39,8 +39,9 @@ def _truthy(value: str | None) -> bool:
 
 
 def _requires_foreground_terminal(text: str) -> bool:
-    """Keep terminal-bound input and long result-bearing OCR in the caller."""
+    """Keep terminal-bound input and operator authority in the caller."""
     tokens = text.lower().split()
+    operator_authority = bool(tokens) and tokens[0] == "/approve-merge"
     microphone_capture = any(
         token == "/start" and next_token in {"/asr", "/audio"}
         for token, next_token in zip(tokens, tokens[1:], strict=False)
@@ -50,7 +51,7 @@ def _requires_foreground_terminal(text: str) -> bool:
         and (index == 0 or tokens[index - 1] not in {"/start", "/stop"})
         for index, token in enumerate(tokens)
     )
-    return microphone_capture or ocr_capture
+    return operator_authority or microphone_capture or ocr_capture
 
 
 def _is_ocr_capture_command(text: str) -> bool:
@@ -112,7 +113,12 @@ def main() -> None:
         if code:
             sys.exit(code)
         return
-    text = shlex.join(args.text)
+    # One shell argument is already the complete operator text. Re-quoting it
+    # turns `pi "/approve-merge ID"` into a string whose first character is a
+    # quote, so the directive parser mistakes it for an ordinary model query.
+    # Multiple arguments still need shell-safe reconstruction because a single
+    # directive value can itself contain spaces.
+    text = args.text[0] if len(args.text) == 1 else shlex.join(args.text)
     if _is_walkthru_command(text) and not args.json and sys.stdin.isatty():
         code = _run_walkthru_interview(
             text,

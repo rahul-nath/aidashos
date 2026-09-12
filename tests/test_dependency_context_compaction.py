@@ -13,15 +13,15 @@ from __future__ import annotations
 from pathlib import Path
 
 from local_first_agent_os import dependency_context_compactor
-from local_first_agent_os.agent_adapters import AgentResult
 from local_first_agent_os.constants import DELEGATED_TASK_RUN_ARTIFACT_TYPE
-from local_first_agent_os.contracts import WorkflowStatus, WorkflowType
+from local_first_agent_os.contracts import ModelRole, WorkflowStatus, WorkflowType
 from local_first_agent_os.coordination import DispatchKind
 from local_first_agent_os.dependency_context_compactor import (
     COMPACTION_WORKFLOW_ID,
     DEPENDENCY_COMPACTION_TIMEOUT_SECONDS,
     build_dependency_context_compactor,
 )
+from local_first_agent_os.local_model_delegation import LocalModelResult, LocalModelRunProvenance
 from local_first_agent_os.pi_prompts import PiPromptRegistry
 from local_first_agent_os.pow_wow.prompts import (
     build_agent_task_prompt,
@@ -210,10 +210,11 @@ def _summarising_delegate(calls: list[dict]):
 
     async def fake_delegate(_runtime, **kwargs):
         calls.append(kwargs)
-        return AgentResult(
+        return LocalModelResult(
             task_id="compaction-fake",
             success=True,
             output="task_0 through task_11 all completed; see changed files.",
+            provenance=LocalModelRunProvenance(ModelRole.COMPACTOR, COMPACTION_WORKFLOW_ID),
         )
 
     return fake_delegate
@@ -233,7 +234,7 @@ def test_the_runtime_compactor_registers_a_terminal_workflow_row(runtime, monkey
     runtime.settings.mock_models = False
     calls: list[dict] = []
     monkeypatch.setattr(
-        dependency_context_compactor, "delegate_agent_task", _summarising_delegate(calls)
+        dependency_context_compactor, "delegate_local_model_task", _summarising_delegate(calls)
     )
     compactor = build_dependency_context_compactor(runtime)
     assert not runtime.repository.workflow_run_exists(COMPACTION_WORKFLOW_ID)
@@ -262,7 +263,7 @@ def test_the_compaction_call_is_bounded_to_an_advisory_budget(runtime, monkeypat
     runtime.settings.mock_models = False
     calls: list[dict] = []
     monkeypatch.setattr(
-        dependency_context_compactor, "delegate_agent_task", _summarising_delegate(calls)
+        dependency_context_compactor, "delegate_local_model_task", _summarising_delegate(calls)
     )
     compactor = build_dependency_context_compactor(runtime)
 
@@ -285,7 +286,7 @@ def test_a_swept_compaction_row_is_healed_on_the_next_registration(runtime, monk
 
     runtime.settings.mock_models = False
     monkeypatch.setattr(
-        dependency_context_compactor, "delegate_agent_task", _summarising_delegate([])
+        dependency_context_compactor, "delegate_local_model_task", _summarising_delegate([])
     )
     runtime.repository.start_workflow_run(
         workflow_id=COMPACTION_WORKFLOW_ID,

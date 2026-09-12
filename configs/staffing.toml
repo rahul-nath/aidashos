@@ -1,63 +1,43 @@
-# Staffing plan: which model plays which tier, and how many can run at once.
-# This is the ONE place that maps tier -> concrete omni harness.
-#
-# The two frontier seats are declared TOGETHER, as a named pairing, and one
-# pairing is seated at a time. Implementer and reviewer are one decision - "who
-# reviews Opus" has no answer until you know what is implementing - and while
-# they were two independent tables an operator could change half of it. That is
-# not hypothetical here: the 2026-08-09 swap left four prose claims behind, and
-# POLICIES.md twice denied the implementer a write its own plan had granted,
-# because two declarations disagreed about who was seated. Swapping the seating
-# is now editing `seated_pairing` below, and the pair arrives whole.
-#
-# `FrontierPairing` refuses a pairing that names one model for both seats,
-# unconditionally. There is no acknowledgement flag: claude and codex each
-# offer multiple model tiers and the local registry serves three models, so a
-# second model always exists, and a rule with an escape hatch decays into the
-# thing it guards against (operator's ruling, 2026-08-23).
-#
-# A pairing may name other pairings in `fallback`, in order. When any vendor
-# the seated pairing depends on reports a spent quota, restaffing moves BOTH
-# seats to the first fallback pairing that avoids every spent vendor - the
-# pair moves whole, so the reviewer is always one that was declared against
-# the implementer it is reviewing. One hop: a fallback's own fallback is not
-# followed.
-#
-# Locked mapping: codex = senior, claude = staff, and gemma (via pi) = junior.
-# Both frontier seats on one vendor is a sanctioned outage seating - review
-# keeps a fresh pass and a different model, and loses provider diversity - not
-# a shared seat, which will not load.
-#
-# POLICIES.md is keyed on the seat, not the vendor, so swapping a pairing here
-# needs no edit there and no hash re-pin.
-#
-# Model ids below are passed to their CLI verbatim; nothing validates them at
-# load, so a typo surfaces as a dispatch failure at spawn time. Before writing
-# a new id here (say, restaffing during a subscription outage), prove it with a
-# one-line nonce against the CLI that will run it:
-#   claude --model <id> --print "Reply with exactly: ok"
-#   codex exec --skip-git-repo-check --model <id> "Reply with exactly: ok"
-# ./scripts/first-run-check.sh --probe-frontier-models runs that probe against
-# every id in the SEATED pairing. It does not probe fallback pairings: a
-# fallback names the vendor the seating escapes to, which during the outage
-# that makes it matter is the vendor that is out of quota, so probing it at
-# every start would raise an alarm about a provider nobody is running yet.
-# Prove fallback ids by hand.
+# Named pairs own model, effort, and per-tier capacity together.
+# Same-model review is allowed in a separate session with isolated planning
+# context and read-only final review; provider diversity is an optional preference.
+# POLICIES.md grants authority by seat, never by model or vendor.
+# Locked mapping: codex = senior, codex = staff; junior follows active-general.
 
-# The operator's matrix, 2026-08-23. Three declared seatings:
-#   cross-vendor (both vendors up):  senior gpt-5.6-sol/high, staff claude-opus-5/xhigh
-#   claude-only  (codex out):        senior claude-sonnet-5/xhigh, staff claude-opus-5/high
-#   codex-only   (claude out):       senior gpt-5.6-terra/max, staff gpt-5.6-sol/high
-# Both vendors out: nothing declared avoids it, both seats queue. The intended
-# answer there is a local fallback pairing; the compilable plan is
-# docs/local_fallback_seating_gawd.md.
-#
-# Seated today: the normal cross-vendor pair. Both CLIs and every model id in
-# the two same-vendor fallbacks were proved live on 2026-08-23, and the
-# claude-only pairing's re-seated ids again on 2026-08-30. A reported
-# single-vendor quota outage moves the whole pair to its declared fallback;
-# both vendors out leaves both frontier tiers queued.
-seated_pairing = "cross-vendor"
+# Used by unassigned dispatches, direct queries, and readiness checks.
+seated_pairing = "codex-only"
+# Direct /codex questions have no staff/senior role; retain their explicit Sol model.
+direct_query_models = { codex = "gpt-5.6-sol" }
+
+# WorkUnit attempts choose through this policy, not seated_pairing alone.
+# "auto" ranks model_quality.toml; "fixed" admits exactly the named pair.
+# "preferred" tries the named pair first, then only its explicit fallback policy.
+# Every mode retains availability checks and records resolution before dispatch.
+# An already-recorded attempt keeps its immutable assignment on replay.
+[work_unit_pairing]
+mode = "preferred"
+pairing = "codex-only"
+fallback = { mode = "explicit", pairings = ["claude-only"] }
+
+# Optional per-WorkUnit override, applied only to that WorkUnit's new attempts:
+# [work_unit_pairing_overrides."<work-unit-id>"]
+# mode = "auto"
+# Or use mode = "fixed" with pairing = "<declared-pair>".
+
+[pairings.codex-sol-recovery]
+fallback = []
+
+[pairings.codex-sol-recovery.senior]
+harness = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
+capacity = 1
+
+[pairings.codex-sol-recovery.staff]
+harness = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+capacity = 1
 
 # ------------------------------------------------------------------ pairings
 
@@ -147,9 +127,7 @@ reasoning_effort = "medium"
 
 [pairings.claude-only.staff]
 harness = "claude"
-# Opus on the dedicated review seat. Same vendor as senior during the codex
-# outage, but a different and stronger model, which is what keeps this review
-# rather than the author re-reading itself.
+# Opus on the dedicated review seat, sharing the implementer's provider quota.
 model = "claude-opus-5"
 # "high", down from the xhigh this seat runs in cross-vendor: both frontier
 # seats spend one claude subscription window here, so the top of the effort
@@ -166,28 +144,22 @@ capacity = 1
 model = "claude-sonnet-5"
 reasoning_effort = "medium"
 
-# The claude-outage seating: everything on codex, terra implementing at max
-# and sol reviewing at high (operator's matrix, 2026-08-23). Both ids have been
-# staffed in this repository before - sol on the senior seat, terra on the
-# senior reading workload, both until 2026-08-18.
-#
-# Probed live on 2026-08-23: both ids answered the one-line nonce, and
-# gpt-5.6-terra answered it again under `-c model_reasoning_effort=max`, which
-# is what admits `max` to the codex effort vocabulary here (`xhigh` was proved
-# against claude on 2026-08-13; this is the codex analogue).
+# Same-provider, separate-session pairing. WorkUnit fallback is declared above.
+# Sol implements at xhigh; Astra reviews at high. Both profiles are explicit
+# operator pins, independent of the optional automatic quality ranking.
 [pairings.codex-only]
-fallback = ["claude-only"]
+fallback = []
 
 [pairings.codex-only.senior]
 harness = "codex"
-model = "gpt-5.6-terra"
-reasoning_effort = "max"
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
 # One per tier; see the claude-only senior seat for the ruling.
 capacity = 1
 
 [pairings.codex-only.staff]
 harness = "codex"
-model = "gpt-5.6-sol"
+model = "gpt-6-astra"
 reasoning_effort = "high"
 capacity = 1
 
@@ -197,24 +169,7 @@ capacity = 1
 # is no second local model checking the first one's work at this tier.
 [bench.junior]
 harness = "pi"
-model = "gemma4"
 capacity = 4
-# Backup junior model(s) - kept for a local comparison eval (gemma4 vs qwen3.8).
-# The Pi harness routes through the local pi-daemon -> llama-server, so this is
-# a plain llama-server model id (no omni gateway prefix) and its harness is pi.
-# Restaffing never reaches it: a local harness has no quota to spend, and it is
-# refused as a replacement for a frontier seat.
-backup_models = [{ harness = "pi", model = "qwen3.8-27b-mtp" }]
-
-# The junior verification plan gets the heavier local model.
-#
-# gemma4 is the fast path and stays the junior seat, but this one task is the
-# junior's hypothesis pass over the senior's reading - it reasons rather than
-# reports, and gemma4 kept making calls above its paygrade on it. qwen3.8-27b
-# scores 52 at xhigh on the 2026-08-30 leaderboard, level with claude-opus-5 at
-# low effort, so this is not a consolation model.
-#
-# No effort knob: a local model has no per-token bill to economise against, so
-# it runs at its top setting by the operator's ruling.
-[bench.junior.workloads.verification_plan]
-model = "qwen3.8-27b-mtp"
+# A local seat with no model pin follows the durable active-general selection.
+# `pi /start /general` and `pi /start /qwen3.8` therefore select the model for
+# every junior workload without editing staffing policy or restarting dispatch.

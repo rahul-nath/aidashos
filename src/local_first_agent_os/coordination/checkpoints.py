@@ -12,15 +12,19 @@ import re
 import uuid
 from typing import Any
 
+from ..capabilities import Capability
 from ..contracts import (
     CheckpointStatus,
     DispatchIntentStatus,
     LeaseStatus,
     ProgressAssessmentStatus,
 )
+from ..runtime_metrics import EventTransaction, event_transaction
+from ..spawn_authority import SpawnAuthority
 from .contracts import DispatchKind
 from .dispatch import dispatch_intent_to_dict, notify_dispatch_status_change
 from .frontier_usage import project_frontier_event
+from .outcomes import CheckpointReason
 from .store import (
     connect,
     decode_json_object,
@@ -43,7 +47,7 @@ _DISPATCH_IN_REVIEW = sql_status_list(
 )
 
 
-_CHECKPOINT_REASONS = {"deadline", "operator_cancel", "supervisor_error", "stalled_progress"}
+_CHECKPOINT_REASONS = {reason.value for reason in CheckpointReason}
 _CHECKPOINT_STATUSES = {status.value for status in CheckpointStatus}
 # Recovery review only makes sense for a run that stopped, not one already decided.
 _RECOVERABLE_CHECKPOINTS = (CheckpointStatus.PAUSED, CheckpointStatus.FAILED)
@@ -96,7 +100,7 @@ def append_execution_event(
         )
     event_id = str(uuid.uuid5(_CHECKPOINT_NAMESPACE, f"event:{lease_id}:{sequence}"))
     t = now()
-    with tx() as c:
+    with event_transaction(EventTransaction.RAW_EVENT), tx() as c:
         lease = c.execute(
             "SELECT * FROM agent_execution_leases WHERE lease_id=?", (lease_id,)
         ).fetchone()
@@ -204,7 +208,7 @@ def append_execution_event(
         # The raw event is the evidence and has already committed. Projections
         # are idempotent derived state on a separate transaction so malformed
         # provider metadata cannot erase the event that lets us repair it.
-        with tx() as c:
+        with event_transaction(EventTransaction.USAGE_PROJECTION), tx() as c:
             project_frontier_event(
                 c,
                 lease=lease,
@@ -359,8 +363,8 @@ reasoning. Continuations cannot widen scope or remove approval gates."""
 def create_execution_checkpoint(
     lease_id: str,
     *,
-    reason: str,
-    status: str,
+    reason: CheckpointReason | str,
+    status: CheckpointStatus | str,
     saga_id: str | None = None,
     pow_wow_id: str | None = None,
     worktree_path: str | None = None,
@@ -377,12 +381,16 @@ def create_execution_checkpoint(
 ) -> dict[str, Any]:
     """Create one recovery checkpoint per lease and optionally enqueue review."""
 
-    if reason not in _CHECKPOINT_REASONS:
+    try:
+        reason = CheckpointReason(reason)
+    except ValueError:
         return err("invalid_reason", reason=reason, valid=sorted(_CHECKPOINT_REASONS))
-    if status not in _CHECKPOINT_STATUSES:
+    try:
+        status = CheckpointStatus(status)
+    except ValueError:
         return err("invalid_status", status=status, valid=sorted(_CHECKPOINT_STATUSES))
-    if submit_review and CheckpointStatus(str(status)) is not CheckpointStatus.PENDING_JUNIOR:
-        return err("review_requires_pending_junior", status=status)
+    if submit_review and status is not CheckpointStatus.PENDING_JUNIOR:
+        return err("review_requires_pending_junior", status=status.value)
     checkpoint_id = str(uuid.uuid5(_CHECKPOINT_NAMESPACE, f"checkpoint:{lease_id}"))
     review_intent_id = str(uuid.uuid5(_CHECKPOINT_NAMESPACE, f"review:{checkpoint_id}"))
     t = now()
@@ -518,6 +526,12 @@ def get_execution_checkpoint(checkpoint_id: str) -> dict[str, Any]:
     return ok(checkpoint=checkpoint_to_dict(row))
 
 
+def recovery_staff_review_source(checkpoint_id: str, retry_of: str | None = None) -> str:
+    """A retry has its own identity while retaining the original checkpoint."""
+    retry = f":retry:{uuid.UUID(retry_of)}" if retry_of is not None else ""
+    return f"execution_checkpoint:{checkpoint_id}{retry}:recovery_staff_review"
+
+
 def request_recovery_staff_review(
     checkpoint_id: str,
     *,
@@ -526,6 +540,7 @@ def request_recovery_staff_review(
     base_sha: str,
     commit_sha: str,
     milestone_id: str | None = None,
+    retry_of: str | None = None,
 ) -> dict[str, Any]:
     """Atomically enqueue one staff-only review for an exact retained commit."""
 
@@ -537,8 +552,14 @@ def request_recovery_staff_review(
         return err("invalid_base_sha", base_sha=base_sha)
     if not _FULL_SHA.fullmatch(commit_sha):
         return err("invalid_commit_sha", commit_sha=commit_sha)
-    source = f"execution_checkpoint:{checkpoint_id}:recovery_staff_review"
-    intent_id = str(uuid.uuid5(_CHECKPOINT_NAMESPACE, f"recovery-staff:{checkpoint_id}"))
+    try:
+        source = recovery_staff_review_source(checkpoint_id, retry_of)
+    except ValueError:
+        return err("invalid_recovery_retry_id")
+    identity = f"recovery-staff:{checkpoint_id}"
+    if retry_of is not None:
+        identity += f":retry:{uuid.UUID(retry_of)}"
+    intent_id = str(uuid.uuid5(_CHECKPOINT_NAMESPACE, identity))
     created = False
     with tx() as c:
         checkpoint = c.execute(
@@ -575,6 +596,18 @@ def request_recovery_staff_review(
                 checkpoint_target_project_id=original["target_project_id"],
                 requested_target_project_id=target_project_id,
             )
+        if original is None:
+            return err("recovery_source_intent_required", checkpoint_id=checkpoint_id)
+        try:
+            names = json.loads(original["permitted_capabilities"] or "[]")
+            if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+                raise ValueError("source authority is not a capability list")
+            authority = SpawnAuthority.from_names(names)
+        except (ValueError, TypeError):
+            return err("recovery_source_authority_invalid", checkpoint_id=checkpoint_id)
+        if not {Capability.READ_REPOSITORY, Capability.INVOKE_MODEL} <= authority.capabilities:
+            return err("recovery_source_authority_missing", checkpoint_id=checkpoint_id)
+        capabilities = json.dumps(authority.to_names())
         payload = {
             "schema_version": "recovery_staff_review_request.v1",
             "checkpoint_id": checkpoint_id,
@@ -587,6 +620,22 @@ def request_recovery_staff_review(
             "review_origin": "RECOVERY_STAFF",
             "permission_envelope": "read-only review; revisions only after BLOCK",
         }
+        if retry_of is not None:
+            previous = c.execute(
+                "SELECT * FROM dispatch_intents WHERE intent_id=?", (retry_of,)
+            ).fetchone()
+            previous_payload = decode_json_object(previous["prompt"]) if previous else {}
+            previous_payload.pop("retry_of", None)
+            if (
+                previous is None
+                or previous["status"] != DispatchIntentStatus.FAILED.value
+                or previous["checkpoint_id"] != checkpoint_id
+                or previous["parent_intent_id"] != checkpoint["intent_id"]
+                or previous_payload != payload
+                or previous["permitted_capabilities"] != capabilities
+            ):
+                return err("recovery_retry_requires_exact_failed_predecessor")
+            payload["retry_of"] = retry_of
         existing = c.execute(
             "SELECT * FROM dispatch_intents WHERE intent_id=? OR source=?",
             (intent_id, source),
@@ -596,7 +645,7 @@ def request_recovery_staff_review(
                 existing_payload = json.loads(existing["prompt"])
             except (json.JSONDecodeError, TypeError):
                 existing_payload = None
-            if existing_payload != payload:
+            if existing_payload != payload or existing["permitted_capabilities"] != capabilities:
                 return err(
                     "recovery_staff_review_conflict",
                     checkpoint_id=checkpoint_id,
@@ -610,10 +659,10 @@ def request_recovery_staff_review(
                 INSERT INTO dispatch_intents(
                     intent_id, tier, kind, prompt, target_project_id, source,
                     status, created_at, fanout, allow_tiers, reduce,
-                    parent_intent_id, intent_role, checkpoint_id
+                    parent_intent_id, intent_role, checkpoint_id, permitted_capabilities
                 ) VALUES (?, 'staff', 'code', ?, ?, ?,
                           '{DispatchIntentStatus.PENDING}', ?, 1, '[]',
-                          'none', ?, 'single', ?)
+                          'none', ?, 'single', ?, ?)
                 """,
                 (
                     intent_id,
@@ -623,6 +672,7 @@ def request_recovery_staff_review(
                     t,
                     checkpoint["intent_id"],
                     checkpoint_id,
+                    capabilities,
                 ),
             )
             intent = c.execute(

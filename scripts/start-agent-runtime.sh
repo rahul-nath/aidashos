@@ -19,7 +19,9 @@ load_dotenv_file() {
   # array such as ["--headless"] removes its inner quotes and corrupts values
   # consumed by pydantic-settings. Parse with python-dotenv, validate names, and
   # emit shell-escaped assignments without ever placing values in argv.
-  exports="$("$python_bin" - "$env_file" <<'PY'
+  # Bash 3.2 here-documents use system temp files without honoring TMPDIR.
+  # Only fixed parser code travels in argv; dotenv values remain file input.
+  exports="$("$python_bin" -c '
 import re
 import shlex
 import sys
@@ -32,8 +34,7 @@ for key, value in dotenv_values(env_file).items():
         raise SystemExit(f"invalid environment variable name in {env_file}: {key!r}")
     if value is not None:
         print(f"export {key}={shlex.quote(value)}")
-PY
-)"
+' "$env_file")"
   eval "$exports"
 }
 
@@ -119,9 +120,12 @@ export LOCAL_AGENT_WHISPER_THREADS="${LOCAL_AGENT_WHISPER_THREADS:-8}"
 
 mkdir -p .local_agent/logs .local_agent/run
 
+"$ROOT/scripts/initialize-operator-identity.sh"
+
 # The Docker infrastructure helper owns Postgres startup and DBOS database
 # creation. Observability remains opt-in through `pi /start /logging`.
 "$ROOT/scripts/start-docker-compose-infra.sh" postgres
+"$ROOT/scripts/start-verification-database.sh"
 
 uv run local-agent init-db
 
@@ -130,12 +134,18 @@ uv run local-agent init-db
 # so launchd does not load them at login and this loop is where they enter the
 # domain. The whisper/llama bring-up below short-circuits if these already
 # brought the ports up.
-LAUNCH_LABELS=(
+SERVICE_LAUNCH_LABELS=(
   com.rahul.local-first-agent.postgres-backup
   com.rahul.local-first-agent.lifecycle-maintenance
   com.rahul.local-first-agent.session-daemon
   com.rahul.local-first-agent.pi-daemon
   com.rahul.local-first-agent.llama
+)
+# These processes can advance durable work, so they are bootstrapped only after
+# the selected junior model has answered its readiness proof below. Starting
+# them beside the service daemons creates a race where a pending dispatch can
+# spend a WorkUnit attempt on ModelNotLoadedError while startup is still loading.
+WORK_LAUNCH_LABELS=(
   com.rahul.local-first-agent.enqueue-drainer
   com.rahul.local-first-agent.ledger-dispatcher
   com.rahul.local-first-agent.work-unit-crash-reconciler
@@ -144,7 +154,7 @@ LAUNCH_LABELS=(
 # Bootstrapping the whisper agent is a launch, so it belongs behind the same
 # gate as the manual bring-up below rather than happening unconditionally here.
 if [ "$START_ASR" = "true" ]; then
-  LAUNCH_LABELS+=(com.rahul.local-first-agent.whisper)
+  SERVICE_LAUNCH_LABELS+=(com.rahul.local-first-agent.whisper)
 fi
 LAUNCH_DOMAIN="gui/$(id -u)"
 . "$ROOT/scripts/launchd-agent-dir.sh"
@@ -159,29 +169,34 @@ LAUNCH_PLIST_DIR="$LOCAL_AGENT_LAUNCHD_DIR"
 # script that cannot bring a service up has failed at the one thing it does.
 # `already bootstrapped` (EALREADY, 37) stays benign: the guard above races with
 # a concurrent start, and losing that race is not an error.
-bootstrap_failures=()
-for label in "${LAUNCH_LABELS[@]}"; do
-  plist="$LAUNCH_PLIST_DIR/$label.plist"
-  if [ -f "$plist" ] && ! launchctl print "$LAUNCH_DOMAIN/$label" >/dev/null 2>&1; then
-    echo "Bootstrapping launchd agent: $label"
-    if ! bootstrap_error="$(launchctl bootstrap "$LAUNCH_DOMAIN" "$plist" 2>&1)"; then
-      if printf '%s' "$bootstrap_error" | grep -qi 'already bootstrapped'; then
-        echo "  already bootstrapped by another process; continuing."
-      else
-        echo "  bootstrap failed: ${bootstrap_error:-(no output)}" >&2
-        bootstrap_failures+=("$label")
+bootstrap_launch_agents() {
+  local bootstrap_error label plist
+  local bootstrap_failures=()
+  for label in "$@"; do
+    plist="$LAUNCH_PLIST_DIR/$label.plist"
+    if [ -f "$plist" ] && ! launchctl print "$LAUNCH_DOMAIN/$label" >/dev/null 2>&1; then
+      echo "Bootstrapping launchd agent: $label"
+      if ! bootstrap_error="$(launchctl bootstrap "$LAUNCH_DOMAIN" "$plist" 2>&1)"; then
+        if printf '%s' "$bootstrap_error" | grep -qi 'already bootstrapped'; then
+          echo "  already bootstrapped by another process; continuing."
+        else
+          echo "  bootstrap failed: ${bootstrap_error:-(no output)}" >&2
+          bootstrap_failures+=("$label")
+        fi
       fi
     fi
+  done
+  if [ "${#bootstrap_failures[@]}" -gt 0 ]; then
+    echo >&2
+    echo "Failed to bootstrap: ${bootstrap_failures[*]}" >&2
+    echo "The runtime is not up. Inspect a plist with:" >&2
+    echo "  plutil -p $LAUNCH_PLIST_DIR/${bootstrap_failures[0]}.plist" >&2
+    echo "A plist naming a binary that no longer exists is the usual cause." >&2
+    return 1
   fi
-done
-if [ "${#bootstrap_failures[@]}" -gt 0 ]; then
-  echo >&2
-  echo "Failed to bootstrap: ${bootstrap_failures[*]}" >&2
-  echo "The runtime is not up. Inspect a plist with:" >&2
-  echo "  plutil -p $LAUNCH_PLIST_DIR/${bootstrap_failures[0]}.plist" >&2
-  echo "A plist naming a binary that no longer exists is the usual cause." >&2
-  exit 1
-fi
+}
+
+bootstrap_launch_agents "${SERVICE_LAUNCH_LABELS[@]}"
 
 LLAMA_URL="${LOCAL_AGENT_LLAMA_BASE_URL:-http://127.0.0.1:8080}"
 LLAMA_LABEL="com.rahul.local-first-agent.llama"
@@ -295,28 +310,39 @@ else
   echo "Postgres/DBOS schema/llama/pi-daemon are ready (ASR off)."
 fi
 
-# The junior tier (general -> gemma4) is the first dependency of every
-# finalization pow-wow. Pre-load it so a fresh runtime can run intake without a
-# separate manual step; every other role stays load-on-demand. `pi` can return
-# zero for a completed-but-degraded workflow, so success is not inferred from
-# its exit code: the second command proves the exact router model answers.
-gemma_ready=false
+# The junior tier follows the operator's durable active-general selection.
+# Resolve it after Postgres is ready, then load and prove that exact model before
+# any work-moving resident can claim an intent. `pi` can return zero for a
+# completed-but-degraded workflow, so success is not inferred from its exit
+# code: the second command proves the exact router model answers.
+active_general_selection="$(uv run local-agent active-general-selection)"
+IFS=$'\t' read -r junior_role junior_model <<< "$active_general_selection"
+if [ -z "$junior_role" ] || [ -z "$junior_model" ]; then
+  echo "ERROR: the durable active-general selection is incomplete." >&2
+  exit 1
+fi
+junior_ready=false
 for _ in {1..3}; do
-  if uv run pi /start /gemma4 >/dev/null 2>&1 && \
+  if uv run pi /start "/$junior_role" >/dev/null 2>&1 && \
     uv run python -m local_first_agent_os.model_probe \
-      --base-url "$LLAMA_URL" --model gemma4 >/dev/null; then
-    gemma_ready=true
+      --base-url "$LLAMA_URL" --model "$junior_model" >/dev/null; then
+    junior_ready=true
     break
   fi
   sleep 2
 done
-if [ "$gemma_ready" = "true" ]; then
-  echo "Junior tier pre-loaded and answered readiness proof (general -> gemma4)."
+if [ "$junior_ready" = "true" ]; then
+  echo "Junior tier pre-loaded and answered readiness proof ($junior_role -> $junior_model)."
 else
-  echo "ERROR: gemma4 did not load and answer the readiness proof." >&2
-  echo "       Check $LLAMA_LOG, then retry: pi /start /gemma4" >&2
+  echo "ERROR: $junior_model did not load and answer the readiness proof." >&2
+  echo "       Check $LLAMA_LOG, then retry: pi /start /$junior_role" >&2
   exit 1
 fi
+
+# Work-moving residents cross the readiness boundary together. A fresh start
+# either proves the selected junior dependency and then launches all of them, or
+# launches none of them and exits with the model remedy above.
+bootstrap_launch_agents "${WORK_LAUNCH_LABELS[@]}"
 
 # Warn without blocking the runtime operators need to restaff unavailable tiers.
 if [ "$PROBE_FRONTIER" = "true" ]; then
@@ -402,7 +428,7 @@ start_resident_loop work-unit-enqueue-drainer \
   --interval-seconds 5
 
 start_resident_loop ledger-dispatcher \
-  uv run python agent_coordination_mcp.py --root "$ROOT" run_ledger_dispatcher \
+  uv run python -m local_first_agent_os.operator_dispatcher_host --root "$ROOT" \
   --interval-seconds 2
 
 uv run local-agent models-help

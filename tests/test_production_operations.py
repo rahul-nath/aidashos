@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -100,12 +101,11 @@ def test_recovery_and_refinery_residents_pin_their_authority() -> None:
     ]
 
 
-def test_bootstrap_inputs_and_ci_actions_are_immutable() -> None:
+def test_bootstrap_inputs_are_immutable() -> None:
     pins = (ROOT / "scripts/toolchain-pins.env").read_text(encoding="utf-8")
     bootstrap = (ROOT / "scripts/bootstrap.sh").read_text(encoding="utf-8")
     model_runtimes = (ROOT / "scripts/install-model-runtimes.sh").read_text(encoding="utf-8")
     frontier = (ROOT / "scripts/install-frontier-clis.sh").read_text(encoding="utf-8")
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
     assert "UV_SHA256_DARWIN_ARM64=" in pins
     assert "UV_SHA256_LINUX_X86_64=" in pins
@@ -114,6 +114,14 @@ def test_bootstrap_inputs_and_ci_actions_are_immutable() -> None:
     assert 'git clone --branch "$WHISPER_CPP_REF"' in model_runtimes
     assert '"@openai/codex@$CODEX_CLI_VERSION"' in frontier
     assert '"@anthropic-ai/claude-code@$CLAUDE_CODE_VERSION"' in frontier
+
+
+@pytest.mark.skipif(
+    not (ROOT / ".github/workflows/ci.yml").exists(),
+    reason="the private repository owns this CI workflow; public bootstrap checks still run",
+)
+def test_configured_ci_actions_are_immutable() -> None:
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     for line in workflow.splitlines():
         if "uses:" in line:
             reference = line.split("@", 1)[1].split()[0]

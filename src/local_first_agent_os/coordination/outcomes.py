@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import assert_never
 
 from ..contracts import ApprovalStatus
 
@@ -21,6 +22,8 @@ class BusinessFailure(StrEnum):
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
     DEPENDENCY_FAILED = "DEPENDENCY_FAILED"
     DELEGATE_REQUEST_REJECTED = "DELEGATE_REQUEST_REJECTED"
+    REVIEW_OUTPUT_MISSING = "REVIEW_OUTPUT_MISSING"
+    POLICY_DENIED = "POLICY_DENIED"
 
 
 class InfrastructureFailure(StrEnum):
@@ -28,6 +31,7 @@ class InfrastructureFailure(StrEnum):
 
     USAGE_LIMIT = "USAGE_LIMIT"
     AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED"
+    LOCAL_MODEL_NOT_LOADED = "LOCAL_MODEL_NOT_LOADED"
     TRANSPORT_INTERRUPTED = "TRANSPORT_INTERRUPTED"
     PROVIDER_OVERLOADED = "PROVIDER_OVERLOADED"
     ARGUMENT_LIST_TOO_LONG = "ARGUMENT_LIST_TOO_LONG"
@@ -36,6 +40,9 @@ class InfrastructureFailure(StrEnum):
     ORPHANED_LEASE_EXPIRED = "ORPHANED_LEASE_EXPIRED"
     SUPERVISOR_FAILED = "SUPERVISOR_FAILED"
     PROCESS_FAILED = "PROCESS_FAILED"
+    EXECUTION_ENVIRONMENT_LOST = "EXECUTION_ENVIRONMENT_LOST"
+    REVIEW_UNAVAILABLE = "REVIEW_UNAVAILABLE"
+    VERIFICATION_UNAVAILABLE = "VERIFICATION_UNAVAILABLE"
     ARTIFACT_WRITE_FAILED = "ARTIFACT_WRITE_FAILED"
     EVENT_WRITE_FAILED = "EVENT_WRITE_FAILED"
     CHECKPOINT_WRITE_FAILED = "CHECKPOINT_WRITE_FAILED"
@@ -83,17 +90,28 @@ class ProgressRecommendation(StrEnum):
     PAUSE_OPERATOR = "PAUSE_OPERATOR"
 
 
+class CheckpointReason(StrEnum):
+    DEADLINE = "deadline"
+    OPERATOR_CANCEL = "operator_cancel"
+    SUPERVISOR_ERROR = "supervisor_error"
+    STALLED_PROGRESS = "stalled_progress"
+
+
 class TerminalOutcome(StrEnum):
     AUTOMATED_COMPLETION = "AUTOMATED_COMPLETION"
     MANUAL_RECOVERY_COMPLETION = "MANUAL_RECOVERY_COMPLETION"
     OPERATOR_CANCELED = "OPERATOR_CANCELED"
+    VERIFICATION_CANCELED = "VERIFICATION_CANCELED"
     USAGE_LIMIT = "USAGE_LIMIT"
     AUTHENTICATION_FAILED = "AUTHENTICATION_FAILED"
+    LOCAL_MODEL_NOT_LOADED = "LOCAL_MODEL_NOT_LOADED"
     TRANSPORT_INTERRUPTED = "TRANSPORT_INTERRUPTED"
     PROVIDER_OVERLOADED = "PROVIDER_OVERLOADED"
     DELEGATE_REQUEST_REJECTED = "DELEGATE_REQUEST_REJECTED"
+    POLICY_DENIED = "POLICY_DENIED"
     ARGUMENT_LIST_TOO_LONG = "ARGUMENT_LIST_TOO_LONG"
     VERIFICATION_FAILED = "VERIFICATION_FAILED"
+    REVIEW_OUTPUT_MISSING = "REVIEW_OUTPUT_MISSING"
     INTERNAL_ASSERTION = "INTERNAL_ASSERTION"
     DEPENDENCY_FAILED = "DEPENDENCY_FAILED"
     DEADLINE_EXCEEDED = "DEADLINE_EXCEEDED"
@@ -106,6 +124,9 @@ class TerminalOutcome(StrEnum):
     SUPERVISOR_FAILED = "SUPERVISOR_FAILED"
     DUPLICATE_SUPPRESSED = "DUPLICATE_SUPPRESSED"
     PROCESS_FAILED = "PROCESS_FAILED"
+    EXECUTION_ENVIRONMENT_LOST = "EXECUTION_ENVIRONMENT_LOST"
+    REVIEW_UNAVAILABLE = "REVIEW_UNAVAILABLE"
+    VERIFICATION_UNAVAILABLE = "VERIFICATION_UNAVAILABLE"
     UNKNOWN_FAILURE = "UNKNOWN_FAILURE"
 
 
@@ -120,6 +141,7 @@ class DispatchResultOrigin(StrEnum):
 
     AUTOMATED = "AUTOMATED"
     AUTOMATED_RECOVERY = "AUTOMATED_RECOVERY"
+    RUNNER_CRASH = "runner_crash"
     MANUAL_RECOVERY = "MANUAL_RECOVERY"
     UNKNOWN = "UNKNOWN"
 
@@ -232,6 +254,15 @@ def classify_failure(text: str | None) -> TerminalOutcome:
         )
     ):
         return TerminalOutcome.AUTHENTICATION_FAILED
+    if any(
+        marker in normalized
+        for marker in (
+            "model is not loaded",
+            "model not loaded",
+            "no model loaded",
+        )
+    ):
+        return TerminalOutcome.LOCAL_MODEL_NOT_LOADED
     if "400 bad request" in normalized and "delegate" in normalized:
         return TerminalOutcome.DELEGATE_REQUEST_REJECTED
     if "verification failed" in normalized or "verification_failed" in normalized:
@@ -289,20 +320,65 @@ def classify_failure(text: str | None) -> TerminalOutcome:
         return TerminalOutcome.SUPERVISOR_FAILED
     if "timed out" in normalized or "deadline" in normalized:
         return TerminalOutcome.DEADLINE_EXCEEDED
-    if normalized:
-        return TerminalOutcome.PROCESS_FAILED
     return TerminalOutcome.UNKNOWN_FAILURE
+
+
+def _terminal_failure_category(outcome: TerminalOutcome) -> FailureCategory | None:
+    """Classify every terminal outcome without an omission-friendly default."""
+
+    match outcome:
+        case (
+            TerminalOutcome.DELEGATE_REQUEST_REJECTED
+            | TerminalOutcome.VERIFICATION_FAILED
+            | TerminalOutcome.DEPENDENCY_FAILED
+            | TerminalOutcome.REVIEW_OUTPUT_MISSING
+            | TerminalOutcome.POLICY_DENIED
+        ):
+            return FailureCategory.BUSINESS
+        case (
+            TerminalOutcome.USAGE_LIMIT
+            | TerminalOutcome.AUTHENTICATION_FAILED
+            | TerminalOutcome.LOCAL_MODEL_NOT_LOADED
+            | TerminalOutcome.TRANSPORT_INTERRUPTED
+            | TerminalOutcome.PROVIDER_OVERLOADED
+            | TerminalOutcome.ARGUMENT_LIST_TOO_LONG
+            | TerminalOutcome.INTERNAL_ASSERTION
+            | TerminalOutcome.DEADLINE_EXCEEDED
+            | TerminalOutcome.ORPHANED_LEASE_EXPIRED
+            | TerminalOutcome.SUPERVISOR_FAILED
+            | TerminalOutcome.PROCESS_FAILED
+            | TerminalOutcome.EXECUTION_ENVIRONMENT_LOST
+            | TerminalOutcome.REVIEW_UNAVAILABLE
+            | TerminalOutcome.VERIFICATION_UNAVAILABLE
+            | TerminalOutcome.UNKNOWN_FAILURE
+        ):
+            return FailureCategory.INFRASTRUCTURE
+        case (
+            TerminalOutcome.AUTOMATED_COMPLETION
+            | TerminalOutcome.MANUAL_RECOVERY_COMPLETION
+            | TerminalOutcome.OPERATOR_CANCELED
+            | TerminalOutcome.VERIFICATION_CANCELED
+            | TerminalOutcome.ORPHANED_CLAIM_EXPIRED
+            | TerminalOutcome.COMPENSATED
+            | TerminalOutcome.DUPLICATE_SUPPRESSED
+        ):
+            return None
+    assert_never(outcome)
 
 
 def failure_category(outcome: TerminalOutcome | str | None) -> FailureCategory | None:
     if outcome is None:
         return None
     value = outcome.value if isinstance(outcome, TerminalOutcome) else str(outcome)
-    if value in BusinessFailure._value2member_map_:
-        return FailureCategory.BUSINESS
-    if value in InfrastructureFailure._value2member_map_:
-        return FailureCategory.INFRASTRUCTURE
-    return None
+    try:
+        terminal_outcome = TerminalOutcome(value)
+    except ValueError:
+        if value in BusinessFailure._value2member_map_:
+            return FailureCategory.BUSINESS
+        if value in InfrastructureFailure._value2member_map_:
+            return FailureCategory.INFRASTRUCTURE
+        return None
+    return _terminal_failure_category(terminal_outcome)
 
 
 def classify_persistence_failure(error: BaseException | str) -> InfrastructureFailure:
@@ -325,6 +401,7 @@ def classify_persistence_failure(error: BaseException | str) -> InfrastructureFa
 __all__ = [
     "AgentStatus",
     "BusinessFailure",
+    "CheckpointReason",
     "DispatchPromotionState",
     "DispatchResultOrigin",
     "DispatchResultState",

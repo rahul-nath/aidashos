@@ -18,7 +18,6 @@ A field is listed here when it carries `feature_flag` in its `json_schema_extra`
 | `chrome_devtools_lazy_start` | `LOCAL_AGENT_CHROME_DEVTOOLS_LAZY_START` | `bool` | `True` | Let an observational action start a browser, rather than failing and requiring an explicit start. Decides failure semantics the operator sees. |
 | `chrome_devtools_transport` | `LOCAL_AGENT_CHROME_DEVTOOLS_TRANSPORT` | `Literal` | `mcp` | Which Chrome DevTools implementation to drive. The cli path exists as a diagnostic fallback; its honest end state is deletion, not documentation. |
 | `coordination_transport` | `LOCAL_AGENT_COORDINATION_TRANSPORT`<br>`AGENT_COORDINATION_TRANSPORT` | `CoordinationTransportKind` | `in_process` | _undescribed_ |
-| `governed_saga_door` | `LOCAL_AGENT_GOVERNED_SAGA_DOOR` | `GovernedSagaDoorPosture` | `retired` | Compatibility parser for the removed /start /approved-gawd governed execution lane. Every historical value now redirects to the compile_design_doc / start_work_unit path. Production WorkUnit 2f8e57d35257795531717cfc796ef3ac satisfied the retirement gate in docs/completed/governed_saga_door_retirement_gawd.md. |
 | `ledger_outbox` | `LOCAL_AGENT_LEDGER_OUTBOX` | `DisabledLedgerOutbox \| ConfiguredLedgerOutbox` | _derived_ | Whether ledger events are delivered to an external consumer. A discriminated union, so the disabled case cannot carry a half-filled consumer and topic. |
 | `lifecycle_sweep_session_artifacts` | `LOCAL_AGENT_LIFECYCLE_SWEEP_SESSION_ARTIFACTS` | `bool` | `False` | _undescribed_ |
 | `memory_profiling_enabled` | `LOCAL_AGENT_MEMORY_PROFILING_ENABLED` | `bool` | `False` | Run the tracemalloc collector. The test suite forces this off, because a live collector turns an ordinary run into a profiling workload. |
@@ -111,6 +110,7 @@ Endpoints, paths, credentials, and tuning values. Not flags: changing one moves 
 | `config_dir` | `LOCAL_AGENT_CONFIG_DIR` | _derived_ | - |
 | `cors_origins` | `LOCAL_AGENT_CORS_ORIGINS` | _derived_ | - |
 | `database_url` | `LOCAL_AGENT_DATABASE_URL` | `postgresql+psycopg://postgres:postgres@127.0.0.1:5432/local_agent` | - |
+| `dispatcher_metrics_port` | `LOCAL_AGENT_DISPATCHER_METRICS_PORT` | `8767` | - |
 | `env` | `LOCAL_AGENT_ENV` | `local` | - |
 | `git_operation_timeout_seconds` | `LOCAL_AGENT_GIT_OPERATION_TIMEOUT_SECONDS` | `30` | - |
 | `log_level` | `LOCAL_AGENT_LOG_LEVEL` | `INFO` | - |

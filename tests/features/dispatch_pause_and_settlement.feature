@@ -54,7 +54,7 @@ Feature: When a milestone may stop waiting on its dispatch intent
   Scenario: An intent still running when the clock runs out is a real timeout
     Given a milestone waiting on a dispatch intent
     When the wait expires while the intent is still claimed
-    Then the milestone is blocked with failure code "dispatch_wait_elapsed"
+    Then the milestone is blocked with failure code "DEADLINE_EXCEEDED"
 
   @settlement @notification
   Scenario Outline: Every transition a waiter can be parked on wakes it

@@ -12,9 +12,11 @@ cost, either of which can land a branch.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from local_first_agent_os.coordination.dispatch import (
+    claim_next_dispatch_intent,
     complete_dispatch_intent,
     submit_dispatch_intent,
 )
@@ -28,7 +30,7 @@ def _submit(key: str | None = KEY, **kwargs: Any) -> dict[str, Any]:
         "senior",
         "do the thing",
         "code",
-        None,
+        "local-first-agent-os",
         "work_unit:w1:milestone_execution:build",
         idempotency_key=key,
         **kwargs,
@@ -49,7 +51,20 @@ def test_a_deduplicated_submit_reports_the_incumbent_status() -> None:
     """Not 'PENDING' by default: the caller queued nothing and must not think it did."""
 
     first = _submit()
-    completed = complete_dispatch_intent(str(first["intent_id"]), "DONE", result="done")
+    claimed = claim_next_dispatch_intent("test-worker")
+    assert claimed["ok"] and claimed["intent"]["intent_id"] == first["intent_id"]
+    completed = complete_dispatch_intent(
+        str(first["intent_id"]),
+        "DONE",
+        result=json.dumps(
+            {
+                "schema_version": "dispatch_runner_result.v1",
+                "intent_id": first["intent_id"],
+                "target_project_id": "local-first-agent-os",
+                "run_result": {"status": "COMPLETED"},
+            }
+        ),
+    )
     assert completed["ok"], completed
 
     second = _submit()

@@ -266,12 +266,14 @@ def _approve_code_merge(
                     ),
                 },
                 {
-                    "action": "dispatch_next_ready_milestone",
+                    "action": "inspect_work_unit_progress",
                     "gawd_doc_id": gawd_doc_id or None,
                     "target_project_id": target_project_id or None,
                     "instruction": (
-                        "Run the approved-GAWD path again only after the merge and "
-                        "milestone completion are durable."
+                        "Inspect the owning WorkUnit with agent-ledger list_work_units. "
+                        "For a historical saga without a WorkUnit, finalize its remaining "
+                        "design document and use agent-ledger compile_design_doc, then "
+                        "the start_work_unit command it returns."
                     ),
                 },
             ]
@@ -309,15 +311,13 @@ def _approve_code_merge(
             "2. This approval has no milestone_id; do not invent a milestone "
             "transition after integration."
         )
-    if milestone_id and gawd_doc_id and target_project_id:
+    if milestone_id:
         report_lines.append(
-            "3. Dispatch the next dependency-ready milestone with: "
-            f"pi /start /approved-gawd {gawd_doc_id} --target-project "
-            f"{target_project_id}"
-        )
-    elif milestone_id:
-        report_lines.append(
-            "3. Re-run the approved-GAWD path to select the next dependency-ready milestone."
+            "3. Inspect progress with agent-ledger list_work_units. "
+            "The WorkUnit owns subsequent governed dispatch. "
+            "If this is historical saga work without a WorkUnit, compile the remaining "
+            "finalized design document with agent-ledger compile_design_doc and use "
+            "the start_work_unit command it returns."
         )
     return {
         "schema_version": "directive_result.v1",

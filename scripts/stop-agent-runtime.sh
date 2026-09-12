@@ -180,7 +180,12 @@ stop_repo_llama_processes() {
 # an exit status separately.
 runtime_activity() {
   local report errors
-  errors="$(mktemp)"
+  # Diagnostic storage belongs to this runtime, not the per-UID system temp
+  # directory that macOS may select ahead of TMPDIR. Failure is not idleness.
+  if ! errors="$(mkdir -p "$DAEMON_DIR" && cd "$DAEMON_DIR" && mktemp "$PWD/runtime-activity.XXXXXX")"; then
+    printf 'unknown\nthe runtime activity diagnostic file could not be created\n'
+    return
+  fi
   if report="$(uv run local-agent runtime-activity 2>"$errors")"; then
     printf '%s\n' "$report"
   else

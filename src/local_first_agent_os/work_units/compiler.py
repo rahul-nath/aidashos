@@ -25,6 +25,11 @@ from enum import StrEnum
 from typing import Final
 
 from ..capabilities import Capability
+from ..execution_admission import (
+    ExecutionAdmissionRefusal,
+    ExecutionContract,
+    admit_execution,
+)
 from .design_doc import (
     Diagnostic,
     DiagnosticSeverity,
@@ -38,6 +43,7 @@ from .executors import (
     ApprovalRequirement,
     ExecutorKind,
     default_executor_for_phase,
+    execution_driver_for,
     lookup_executor,
 )
 from .lifecycle import FailureClass, LifecyclePhase, phase_ordinal
@@ -524,11 +530,33 @@ def compile_design_doc(
             for capability in declaration.permitted_tools
             if capability.value in capability_ceiling
         )
-        stripped_act_capabilities = tuple(
-            capability
-            for capability in _ACT_CAPABILITIES
-            if capability in declaration.permitted_tools and capability.value not in permitted
+        from ..spawn_authority import SpawnAuthority
+
+        admission = admit_execution(
+            ExecutionContract(execution_driver_for(executor_kind)),
+            SpawnAuthority.from_names(permitted),
         )
+        missing_runtime_capabilities = (
+            admission.missing_capabilities
+            if isinstance(admission, ExecutionAdmissionRefusal)
+            else frozenset()
+        )
+        stripped_act_capabilities = tuple(
+            sorted(
+                missing_runtime_capabilities
+                | {
+                    capability
+                    for capability in _ACT_CAPABILITIES
+                    if capability in declaration.permitted_tools
+                    and capability.value not in permitted
+                },
+                key=lambda capability: capability.value,
+            )
+        )
+        if isinstance(admission, ExecutionAdmissionRefusal) and admission.forbidden_capabilities:
+            capability_blockers.append(
+                f"milestone {candidate.declared_key!r} ({executor_kind.value}): {admission.reason}"
+            )
         if stripped_act_capabilities:
             named = ", ".join(item.value for item in stripped_act_capabilities)
             fixes = ", ".join(

@@ -11,16 +11,31 @@ instead and never submitted an intent at all.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
+import pytest
 from work_unit_support import compile_acceptance_doc
 
+from local_first_agent_os import pairing_assignment as assignments
 from local_first_agent_os.contracts import (
     TERMINAL_DISPATCH_INTENT_STATUSES,
     DispatchIntentStatus,
 )
 from local_first_agent_os.coordination import DispatchKind
+from local_first_agent_os.coordination.dispatch import (
+    claim_next_dispatch_intent,
+    complete_dispatch_intent,
+    submit_dispatch_intent,
+)
+from local_first_agent_os.coordination.execution import (
+    complete_execution_lease,
+    open_execution_lease,
+)
+from local_first_agent_os.pairing_resolution import resolve_assignment
+from local_first_agent_os.settings import get_settings
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units.events import (
     DiagnosticArtifact,
@@ -29,9 +44,12 @@ from local_first_agent_os.work_units.events import (
 )
 from local_first_agent_os.work_units.execution import (
     DispatchBackedExecutorRuntime,
+    MilestoneAwaitingDispatch,
     MilestoneAwaitingIntegration,
     MilestoneContext,
+    MilestoneFailed,
 )
+from local_first_agent_os.work_units.lifecycle import FailureClass
 
 
 def _context() -> MilestoneContext:
@@ -71,6 +89,126 @@ class _Submitter:
         self.calls.append(args)
         self.keywords.append(kwargs)
         return {"ok": True, "intent_id": "intent-1"}
+
+
+def test_policy_change_affects_new_attempt_not_recorded_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    repo_root = Path(__file__).resolve().parents[1]
+    for name in ("staffing.toml", "model_quality.toml", "linked_projects.toml"):
+        (config_dir / name).write_text((repo_root / "configs" / name).read_text())
+    monkeypatch.setenv("LOCAL_AGENT_CONFIG_DIR", str(config_dir))
+    get_settings.cache_clear()
+    monkeypatch.setattr(assignments, "recent_dispatch_probe", lambda *a, **kw: (True, None))
+    runtime = DispatchBackedExecutorRuntime(
+        intent_submitter=submit_dispatch_intent,
+        pairing_selector=resolve_assignment,
+        target_project_id="local_first_agent_os",
+        fact_recorder=lambda *_: None,
+    )
+    context = _context()
+    first = runtime.submit(context)
+    incumbent = assignments.assignment_for_intent(first)
+    assert incumbent is not None
+    assert incumbent.pairing.staff.label == "codex:gpt-6-astra@high"
+
+    path = config_dir / "staffing.toml"
+    # A replay does not even read changed or temporarily invalid configuration.
+    fixed = path.read_text()
+    path.write_text("invalid TOML")
+    assert runtime.submit(context) == first
+    assert assignments.assignment_for_intent(first) == incumbent
+
+    path.write_text(
+        fixed.replace(
+            'mode = "preferred"\npairing = "codex-only"\n'
+            'fallback = { mode = "explicit", pairings = ["claude-only"] }',
+            'mode = "fixed"\npairing = "claude-only"',
+        )
+    )
+    second = runtime.submit(replace(context, attempt=2))
+    new_assignment = assignments.assignment_for_intent(second)
+    assert new_assignment is not None
+    assert second != first
+    assert new_assignment.pairing.staff.harness.value == "claude"
+    assert assignments.assignment_for_intent(first) == incumbent
+
+
+@pytest.mark.parametrize("strict", [False, True])
+def test_real_quota_evidence_drives_only_authorized_next_attempts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strict: bool
+) -> None:
+    config_dir = tmp_path / "configs"
+    config_dir.mkdir()
+    repo_root = Path(__file__).resolve().parents[1]
+    for name in ("staffing.toml", "model_quality.toml", "linked_projects.toml"):
+        (config_dir / name).write_text((repo_root / "configs" / name).read_text())
+    if strict:
+        path = config_dir / "staffing.toml"
+        path.write_text(
+            path.read_text().replace(
+                'mode = "preferred"\npairing = "codex-only"\n'
+                'fallback = { mode = "explicit", pairings = ["claude-only"] }',
+                'mode = "fixed"\npairing = "codex-only"',
+            )
+        )
+    monkeypatch.setenv("LOCAL_AGENT_CONFIG_DIR", str(config_dir))
+    get_settings.cache_clear()
+    runtime = DispatchBackedExecutorRuntime(
+        target_project_id="local_first_agent_os",
+        fact_recorder=lambda *_: None,
+    )
+    context = _context()
+    first = runtime.start(context)
+    assert isinstance(first, MilestoneAwaitingDispatch)
+    claimed = claim_next_dispatch_intent("test-worker")
+    assert claimed["ok"] and claimed["intent"]["intent_id"] == first.dispatch_intent_id
+    incumbent = assignments.assignment_for_intent(first.dispatch_intent_id)
+    assert incumbent is not None and incumbent.resolution_id
+    lease = open_execution_lease(
+        "quota-resolution-lease",
+        "test-worker",
+        intent_id=first.dispatch_intent_id,
+        agent_tier="senior",
+        agent_name="codex",
+        model="gpt-5.6-sol",
+    )
+    assert lease["ok"]
+    complete_execution_lease(
+        lease["lease"]["lease_id"],
+        "FAILED",
+        result_json=json.dumps({"agent_failure": "USAGE_LIMIT"}),
+        error="You've hit your session limit",
+    )
+    assignments.invalidate_assignment(
+        incumbent,
+        harness=incumbent.pairing.senior.harness,
+        model="gpt-5.6-sol",
+        reason="usage_limit",
+    )
+    complete_dispatch_intent(
+        first.dispatch_intent_id, "FAILED", error="You've hit your session limit"
+    )
+    settled = runtime.settle(context, first)
+    assert isinstance(settled, MilestoneFailed)
+    assert settled.failure_code == "USAGE_LIMIT"
+    assert settled.failure_class is (FailureClass.SCHEDULING if strict else FailureClass.TRANSIENT)
+    assert assignments.assignment_for_intent(first.dispatch_intent_id) == incumbent
+
+    next_attempt = runtime.start(replace(context, attempt=2))
+    if strict:
+        assert isinstance(next_attempt, MilestoneFailed)
+        assert next_attempt.failure_class is FailureClass.REQUIRES_OPERATOR
+        assert next_attempt.failure_code == "no_live_pairing"
+    else:
+        assert isinstance(next_attempt, MilestoneAwaitingDispatch)
+        replacement = assignments.assignment_for_intent(next_attempt.dispatch_intent_id)
+        assert replacement is not None
+        assert replacement.resolution_id != incumbent.resolution_id
+        assert replacement.pairing.senior.harness.value == "claude"
+        assert replacement.pairing.staff.harness.value == "claude"
 
 
 def test_a_code_intent_carries_a_target_project() -> None:
@@ -285,6 +423,8 @@ def test_a_reviewed_source_patch_waits_for_its_exact_landing() -> None:
         {
             "schema_version": "dispatch_runner_result.v1",
             "promotion_state": "MERGE_PENDING",
+            "intent_id": "intent-1",
+            "target_project_id": "proj",
             "run_result": {
                 "status": "COMPLETED",
                 "output_summary": "reviewed patch",
@@ -412,7 +552,9 @@ def test_a_crashed_runner_now_writes_a_traceback_a_reader_can_open() -> None:
     try:
         raise RuntimeError("boom")
     except RuntimeError as exc:
-        payload = json.loads(_runner_crash_payload("intent-1", exc))
+        payload = json.loads(
+            _runner_crash_payload("intent-1", exc, target_project_id="local-first-agent-os")
+        )
 
     assert payload["schema_version"] == "dispatch_runner_result.v1"
     assert payload["result_origin"] == "runner_crash"
@@ -431,7 +573,7 @@ def test_a_crashed_runners_payload_reaches_the_milestone_as_evidence() -> None:
     try:
         raise RuntimeError("boom")
     except RuntimeError as exc:
-        payload = _runner_crash_payload("intent-1", exc)
+        payload = _runner_crash_payload("intent-1", exc, target_project_id="local-first-agent-os")
 
     outcome = _run_with_settled(
         {

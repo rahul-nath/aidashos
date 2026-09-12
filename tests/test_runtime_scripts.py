@@ -129,7 +129,7 @@ def test_launchd_installer_waits_for_bootout_before_bootstrap(tmp_path: Path) ->
     assert events.count("bootout ") == len(labels)
     assert events.count("bootstrap ") == len(labels)
     for label in labels:
-        assert f"bootout gui/501/{label}" in events
+        assert f"bootout gui/{os.getuid()}/{label}" in events
 
 
 def test_launchd_installer_fails_closed_when_bootout_never_finishes(tmp_path: Path) -> None:
@@ -253,9 +253,9 @@ def test_every_loop_the_runtime_starts_is_also_supervised(tmp_path: Path) -> Non
     """
 
     script = (REPO_ROOT / "scripts" / "start-agent-runtime.sh").read_text(encoding="utf-8")
-    started = set(re.findall(r"agent_coordination_mcp\.py[^\n]*?\s(run_[a-z_]+)", script))
+    started = set(re.findall(r"start_resident_loop ([a-z-]+)\s+\\", script))
 
-    assert started == {"run_enqueue_drainer", "run_ledger_dispatcher"}
+    assert started == {"work-unit-enqueue-drainer", "ledger-dispatcher"}
     for _loop, label in SUPERVISED_LOOPS:
         assert (LAUNCHD_DIR / f"{label}.plist").exists()
 
@@ -303,14 +303,27 @@ def test_a_supervised_loop_polls_as_often_as_the_start_script_asks(tmp_path: Pat
     """
 
     script = (REPO_ROOT / "scripts" / "start-agent-runtime.sh").read_text(encoding="utf-8")
-    for command, label in (
-        ("run_enqueue_drainer", "com.rahul.local-first-agent.enqueue-drainer"),
-        ("run_ledger_dispatcher", "com.rahul.local-first-agent.ledger-dispatcher"),
+    for loop, label in (
+        ("work-unit-enqueue-drainer", "com.rahul.local-first-agent.enqueue-drainer"),
+        ("ledger-dispatcher", "com.rahul.local-first-agent.ledger-dispatcher"),
     ):
-        match = re.search(rf"{command}\s*\\?\s*\n?\s*--interval-seconds\s+(\d+)", script)
-        assert match is not None, f"{command} has no interval in the start script"
+        match = re.search(
+            rf"start_resident_loop {loop}[^\n]*\n[^\n]*\n\s*--interval-seconds\s+(\d+)",
+            script,
+        )
+        assert match is not None, f"{loop} has no interval in the start script"
         argv = _rendered_plist(label, tmp_path)["ProgramArguments"]
         assert argv[argv.index("--interval-seconds") + 1] == match.group(1)
+
+
+def test_both_dispatcher_startup_lanes_use_the_authenticated_host(tmp_path: Path) -> None:
+    script = (REPO_ROOT / "scripts" / "start-agent-runtime.sh").read_text(encoding="utf-8")
+    assert 'uv run python -m local_first_agent_os.operator_dispatcher_host --root "$ROOT"' in script
+    argv = _rendered_plist("com.rahul.local-first-agent.ledger-dispatcher", tmp_path)[
+        "ProgramArguments"
+    ]
+    assert argv[1:5] == ["run", "python", "-m", "local_first_agent_os.operator_dispatcher_host"]
+    assert "run_ledger_dispatcher" not in argv
 
 
 def test_a_supervised_loop_reaches_the_same_ledger_as_the_start_script(tmp_path: Path) -> None:

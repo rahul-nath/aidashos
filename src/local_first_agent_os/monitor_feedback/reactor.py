@@ -138,6 +138,14 @@ def _decide_one(
     snapshot: CycleSnapshot,
     now: float,
 ) -> FeedbackOutcome:
+    if signal.kind is LedgerFactKind.DISPATCH_CONTRACT_VIOLATION:
+        # Corrupt evidence cannot grant its own repair authority through a broad
+        # advisory rule. Inspection and any repair require an operator decision.
+        return FeedbackOutcome(
+            signal=signal,
+            decision=FeedbackDecision.ESCALATED_DIGEST,
+            reason="dispatch report contract violation requires operator inspection",
+        )
     rule = catalog.match(signal)
     if rule is None:
         return FeedbackOutcome(

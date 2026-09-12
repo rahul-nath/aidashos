@@ -111,14 +111,13 @@ temperature = 0.6
 top_k = 20
 top_p = 0.95
 
-# dflash, not mtp, and not the server default. `--spec-type` defaults to `none`,
-# so passing `-md` alone (as the model's generated README does) loads the draft
-# weights and speculates with none of them, paying ~1.5GB of RAM for nothing.
-# The draft file ships as `dflash-kquant.gguf`, which is what names the type.
-# Unmeasured on these weights: acceptance rate and whether 2 is the right depth.
+# DFlash needs both its algorithm and its separate draft weights. Its trained
+# block contains one anchor plus 15 proposals, so 15 uses the full draft width.
+# Verified faster than depth 2 on the 36 GiB Mac with the installed calibrated
+# target/draft pair. Workloads, measurements and limits: docs/glimmer_inference.md.
 [models.glimmer_deliberator.speculative]
 type = "draft-dflash"
-draft_n_max = 2
+draft_n_max = 15
 draft_gguf_path = "~/models/glimmer/draft.gguf"
 
 # This can point at the same local GGUF as the general model until a smaller
