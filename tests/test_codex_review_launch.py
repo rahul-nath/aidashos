@@ -14,6 +14,9 @@ import pytest
 
 from local_first_agent_os import codex_review_launch as launch
 from local_first_agent_os.capabilities import Capability
+from local_first_agent_os.codex_review_failure import inspection_process_failure
+from local_first_agent_os.contracts import ArtifactRef
+from local_first_agent_os.coordination.outcomes import TerminalOutcome
 from local_first_agent_os.execution_admission import ExecutionAdmissionRefusal
 from local_first_agent_os.pow_wow.process import extract_agent_cli_output
 from local_first_agent_os.process_containment import ContainedProcess, ProcessContainmentUnavailable
@@ -154,6 +157,33 @@ def test_failed_runner_emits_unavailable_not_approval(invocation, monkeypatch, c
     assert json.loads(captured)["failure_code"] == "REVIEW_UNAVAILABLE"
     assert extract_agent_cli_output(captured).startswith("CANNOT_REVIEW:")
     assert "fixture native worker closed" in captured
+    failure = inspection_process_failure(contained.command, stdout=captured, exit_code=status)
+    assert failure is not None
+    assert failure.error_code == TerminalOutcome.REVIEW_UNAVAILABLE
+
+
+@pytest.mark.parametrize(
+    ("error", "expected", "exit_code"),
+    [
+        (ValueError("invalid host contract"), TerminalOutcome.UNKNOWN_FAILURE, 125),
+        (asyncio.CancelledError(), TerminalOutcome.OPERATOR_CANCELED, 130),
+    ],
+)
+def test_host_bug_and_cancellation_are_not_reviewer_unavailability(
+    invocation, monkeypatch, capsys, error, expected, exit_code
+):
+    async def fail(_):
+        raise error
+
+    monkeypatch.setattr(launch, "_run", fail)
+    with launch.prepare_readonly_codex_launch(invocation) as contained:
+        status = launch.main(contained.command[3:])
+    assert status == exit_code
+    failure = inspection_process_failure(
+        contained.command, stdout=capsys.readouterr().out, exit_code=status
+    )
+    assert failure is not None
+    assert failure.error_code == expected
 
 
 def test_successful_runner_preserves_agent_jsonl_shape(invocation, monkeypatch, capsys):
@@ -164,7 +194,14 @@ def test_successful_runner_preserves_agent_jsonl_shape(invocation, monkeypatch, 
                 "item": {"type": "agent_message", "text": "APPROVE\nFixture proof only."},
             }
         )
-        launch._emit({"type": "turn.completed"})
+        launch._emit(
+            {
+                "type": "codex.app_server.turn.completed",
+                "threadId": "fixture-thread",
+                "turnId": "fixture-turn",
+                "usage_notification": None,
+            }
+        )
 
     monkeypatch.setattr(launch, "_run", run)
     with launch.prepare_readonly_codex_launch(invocation) as contained:
@@ -390,3 +427,81 @@ def test_request_contract_refuses_original_m6_authority_before_any_host_call(
             authority=SpawnAuthority.of((Capability.READ_REPOSITORY, Capability.RUN_COMMAND)),
             codex_bin=invocation.codex_bin,
         )
+
+
+def test_final_encoded_request_bound_is_typed_and_never_yields(invocation):
+    # The Unicode prompt itself fits; the exact JSON transport expands it.
+    prompt = "\u263a" * 400_000
+    assert len(prompt.encode()) < launch._MAX_REQUEST_BYTES
+    with (
+        pytest.raises(launch.CodexInspectionRequestTooLarge, match="exceeds the bound"),
+        launch.prepare_readonly_codex_launch(replace(invocation, prompt=prompt)),
+    ):
+        pytest.fail("oversized encoded request yielded a provider command")
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_request_bound_refusal_crosses_executor_without_agent_fault(tmp_path, monkeypatch, owned):
+    from local_first_agent_os.coordination.outcomes import (
+        AgentStatus,
+        PersistenceStatus,
+        SupervisorStatus,
+    )
+    from local_first_agent_os.pow_wow.executor import CliPowWowExecutor, _harness_failure
+    from local_first_agent_os.pow_wow.types import ExecutionAttemptLease
+    from local_first_agent_os.spawn_authority import ReadOnlyInspection
+
+    @contextmanager
+    def refused(*args, **kwargs):
+        raise launch.CodexInspectionRequestTooLarge("encoded request exceeded bound")
+        yield  # pragma: no cover - context-manager contract
+
+    class ForbiddenArtifacts:
+        def write_text(
+            self,
+            *,
+            role: str,
+            text: str,
+            workflow_id: str | None,
+            schema_version: str,
+            mime_type: str = "text/plain",
+        ) -> ArtifactRef:
+            pytest.fail("prelaunch refusal wrote an execution artifact")
+
+        def read_text(self, artifact_id: str) -> str:
+            pytest.fail("prelaunch refusal read an execution artifact")
+
+    executor = CliPowWowExecutor(worktree_root=tmp_path)
+    attempt = None
+    if owned:
+        executor.coordination_command = lambda command: pytest.fail(
+            "prelaunch refusal wrote a checkpoint"
+        )
+        executor.artifact_writer = ForbiddenArtifacts()
+        attempt = ExecutionAttemptLease(
+            idempotency_key="bound", worker_id="fixture", task_id="task", lease_id="lease"
+        )
+    monkeypatch.setattr(executor, "_prepared_frontier_process", refused)
+    capture, result = executor._run_frontier_command(
+        ("codex", "exec", "fixture prompt"),
+        tmp_path,
+        execution_attempt=attempt,
+        harness="codex",
+        env={},
+        source_repo_path=tmp_path,
+        base_head_sha="a" * 40,
+        saga_id="saga",
+        pow_wow_id="pow",
+        task_contract="fixture",
+        posture=ReadOnlyInspection(),
+    )
+    assert capture.exit_code == 125 and result is not None
+    assert result.agent_status is AgentStatus.PENDING
+    assert result.supervisor_status is SupervisorStatus.PENDING
+    assert result.persistence_status is PersistenceStatus.PENDING
+    assert result.checkpoint_id is None and result.event_count == 0
+    assert not result.allows_task_completion
+    failure = _harness_failure(
+        capture, operation="run_code_review", supervised_result=result
+    ).failure
+    assert failure.error_code == failure.terminal_outcome == "REVIEW_UNAVAILABLE"

@@ -10,13 +10,12 @@ import shlex
 import subprocess
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 from ..constants import AGENT_BRANCH_AUTO_MERGE, DEFAULT_DISPATCHER_NAME
 from ..contracts import (
-    ApprovalRequestType,
     ArtifactRef,
     ArtifactRole,
     DirectiveSpec,
@@ -28,7 +27,6 @@ from ..contracts import (
     WorkflowType,
 )
 from ..coordination import (
-    ApproveGawdDoc,
     AttachGawdDocToSaga,
     ClaimTask,
     CompletePowWow,
@@ -36,15 +34,10 @@ from ..coordination import (
     CreatePowWow,
     CreateSaga,
     DispatchKind,
-    DispatchTier,
-    GetGawdDoc,
-    ListApprovalRequests,
     ListSagaMilestones,
     ListSagas,
-    NextReadySagaMilestone,
     RetrySagaMilestone,
     SubmitArtifact,
-    SubmitDispatchIntent,
 )
 from ..coordination.projects import saga_content_digest
 from ..directives import DirectiveParser
@@ -54,10 +47,6 @@ from ..gawd_walkthru import (
 )
 from ..gawd_walkthru_runtime import GawdWalkthruSummarizer
 from ..ids import sha256_text
-from ..lifecycle_failure_harness import (
-    LifecycleTransitionPoint,
-    reach_lifecycle_transition,
-)
 from ..merge_review import (
     pending_code_merge_approval,
     render_merge_review_packet,
@@ -104,270 +93,30 @@ from ..pow_wow.ledger import (
     serialize_coordination_content_to_json,
 )
 from ..project_center import load_project_center, project_status_row
-from ..project_scaffold import (
-    scaffold_spec,
-    scaffold_target_project,
-)
+from ..project_scaffold import scaffold_spec
 from ..runtime import AppRuntime, get_runtime
 from .browser import BrowserWorkflowMixin
 from .core import (
     build_completed_workflow_result,
     build_event_workflow_id,
 )
-from .governed_door import governed_saga_door_notice, governed_saga_door_refusal
+from .governed_door import governed_saga_door_refusal
 from .graph import GraphWorkflowMixin
 from .knowledge import KnowledgeWorkflowMixin
 from .models import ModelWorkflowMixin
 from .saga import SagaWorkflowMixin
 from .saga_support import (
-    approve_next_dependency_ready_milestone,
-    build_approved_gawd_dispatch_prompt,
-    build_approved_gawd_milestone_dispatch_source,
     build_saga_executor,
-    build_target_project_scaffold_from_gawd_doc,
-    ensure_approved_gawd_milestones,
-    extract_target_project_id_from_gawd_doc,
-    find_existing_dispatch_intent_for_source,
     load_control_plane_target_project,
     map_pow_wow_run_status_to_ledger_status,
     persist_durable_workflow_milestones,
-    resolve_approved_gawd_target_project_id,
     resolve_project_repo_root,
-    resolve_target_project_from_gawd_dispatch_history,
     validate_approved_gawd_target_project,
 )
 from .whiteboard import WhiteboardIntentWorkflowMixin
 from .workspace import WorkspaceWorkflowMixin
 
 logger = logging.getLogger(__name__)
-
-
-def _git_contains_commit(repo: Path, commit_sha: str) -> bool:
-    try:
-        completed = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", commit_sha, "main"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return completed.returncode == 0
-
-
-def _build_no_ready_milestone_guidance(
-    *,
-    gawd_doc_id: str,
-    target_project_id: str,
-    target_project_path: Path,
-    coordination_root: Path,
-    saga_milestones: Sequence[object],
-    blocked_milestones: Sequence[object],
-    approved_requests: Sequence[object],
-) -> dict[str, Any]:
-    """Explain the exact durable transition blocking the next milestone."""
-
-    milestones: dict[str, Mapping[str, Any]] = {}
-    for item in saga_milestones:
-        if not isinstance(item, Mapping):
-            continue
-        milestone_id = str(item.get("milestone_id") or "").strip()
-        if milestone_id:
-            milestones[milestone_id] = item
-    blocked = [item for item in blocked_milestones if isinstance(item, Mapping)]
-    approved_merges = [
-        item
-        for item in approved_requests
-        if isinstance(item, Mapping)
-        and item.get("request_type") == ApprovalRequestType.CODE_MERGE.value
-    ]
-    blocker_details: list[dict[str, Any]] = []
-    next_actions: list[dict[str, Any]] = []
-    lines = ["no_ready_milestone: no milestone is currently runnable."]
-    next_step = "Resolve the listed milestone dependency or approval."
-
-    for candidate in blocked:
-        candidate_id = str(candidate.get("milestone_id") or "").strip()
-        unresolved_dependencies: list[dict[str, Any]] = []
-        for raw_dependency_id in candidate.get("depends_on") or ():
-            dependency_id = str(raw_dependency_id)
-            dependency = milestones.get(dependency_id, {})
-            dependency_status = str(dependency.get("status") or "MISSING")
-            if dependency_status != "COMPLETED":
-                unresolved_dependencies.append(
-                    {
-                        "milestone_id": dependency_id,
-                        "status": dependency_status,
-                    }
-                )
-        detail = {
-            "milestone_id": candidate_id,
-            "dependency_ready": bool(candidate.get("dependency_ready")),
-            "approval_ready": bool(candidate.get("approval_ready")),
-            "unresolved_dependencies": unresolved_dependencies,
-        }
-        blocker_details.append(detail)
-        if unresolved_dependencies:
-            rendered = ", ".join(
-                f"{item['milestone_id']} ({item['status']})" for item in unresolved_dependencies
-            )
-            lines.append(f"Candidate {candidate_id} is blocked by: {rendered}.")
-
-    unresolved = next(
-        (
-            dependency
-            for detail in blocker_details
-            for dependency in detail["unresolved_dependencies"]
-        ),
-        None,
-    )
-    rerun_command = shlex.join(
-        [
-            "pi",
-            "/start",
-            "/approved-gawd",
-            gawd_doc_id,
-            "--target-project",
-            target_project_id,
-        ]
-    )
-    if unresolved is not None:
-        dependency_id = str(unresolved["milestone_id"])
-        approval = next(
-            (
-                request
-                for request in approved_merges
-                if isinstance(request.get("payload"), Mapping)
-                and request["payload"].get("milestone_id") == dependency_id
-            ),
-            None,
-        )
-        raw_payload = approval.get("payload") if isinstance(approval, Mapping) else None
-        payload: Mapping[str, Any] = raw_payload if isinstance(raw_payload, Mapping) else {}
-        commit_sha = str(payload.get("commit_sha") or "").strip()
-        approval_id = str(approval.get("approval_id") or "").strip() if approval else ""
-        if commit_sha and _git_contains_commit(target_project_path, commit_sha):
-            outcome = (
-                "MANUAL_RECOVERY_COMPLETION"
-                if payload.get("manual_recovery")
-                else "AUTOMATED_COMPLETION"
-            )
-            evidence = json.dumps(
-                {
-                    "schema_version": "approved_merge_milestone_completion.v1",
-                    "approval_id": approval_id,
-                    "target_project_id": target_project_id,
-                    "approved_commit_sha": commit_sha,
-                    "promotion_state": "MERGED",
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            completion_command = "UV_CACHE_DIR=/tmp/uv-cache " + shlex.join(
-                [
-                    "uv",
-                    "run",
-                    "python",
-                    str(resolve_project_repo_root() / "agent_coordination_mcp.py"),
-                    "--root",
-                    str(coordination_root),
-                    "complete_saga_milestone",
-                    dependency_id,
-                    "--evidence-type",
-                    "summary",
-                    "--evidence-content",
-                    evidence,
-                    "--outcome",
-                    outcome,
-                ]
-            )
-            lines.extend(
-                [
-                    (
-                        f"Approved commit {commit_sha} from CODE_MERGE {approval_id} is "
-                        f"already contained in {target_project_id}/main."
-                    ),
-                    "The missing transition is ledger milestone completion:",
-                    completion_command,
-                    "Then rerun:",
-                    rerun_command,
-                ]
-            )
-            next_step = completion_command
-            next_actions.extend(
-                [
-                    {
-                        "action": "complete_merged_milestone",
-                        "milestone_id": dependency_id,
-                        "approval_id": approval_id,
-                        "commit_sha": commit_sha,
-                        "command": completion_command,
-                    },
-                    {
-                        "action": "dispatch_next_ready_milestone",
-                        "command": rerun_command,
-                    },
-                ]
-            )
-        elif commit_sha:
-            merge_command = shlex.join(
-                [
-                    "git",
-                    "-C",
-                    str(target_project_path),
-                    "merge",
-                    "--ff-only",
-                    commit_sha,
-                ]
-            )
-            lines.extend(
-                [
-                    f"CODE_MERGE {approval_id} is approved, but its commit is not in main.",
-                    "Merge the exact approved commit first:",
-                    merge_command,
-                ]
-            )
-            next_step = merge_command
-            next_actions.append(
-                {
-                    "action": "merge_exact_approved_commit",
-                    "milestone_id": dependency_id,
-                    "approval_id": approval_id,
-                    "commit_sha": commit_sha,
-                    "command": merge_command,
-                }
-            )
-        else:
-            lines.append(
-                f"Complete dependency milestone {dependency_id} before retrying this command."
-            )
-            next_step = f"Complete dependency milestone {dependency_id}."
-    elif blocked and not bool(blocked[0].get("approval_ready")):
-        candidate_id = str(blocked[0].get("milestone_id") or "").strip()
-        lines.append(f"Milestone {candidate_id} still requires its execution approval.")
-        next_step = f"Resolve the execution approval for milestone {candidate_id}."
-    else:
-        active = [
-            item for item in milestones.values() if item.get("status") in {"IN_PROGRESS", "BLOCKED"}
-        ]
-        if active:
-            lines.append(
-                "Active milestone(s): "
-                + ", ".join(f"{item.get('milestone_id')} ({item.get('status')})" for item in active)
-                + "."
-            )
-        else:
-            lines.append("There are no pending dependency-ready milestones to dispatch.")
-
-    return {
-        "blocker_details": blocker_details,
-        "next_actions": next_actions,
-        "next_step": next_step,
-        "note": "The GAWD doc is approved, but a durable milestone boundary is unresolved.",
-        "report": "\n".join(lines),
-    }
 
 
 def _saga_milestone_snapshot(settings: Any) -> list[tuple[dict[str, Any], list[dict[str, Any]]]]:
@@ -419,58 +168,6 @@ def _find_latest_retryable_milestone(settings: Any) -> dict[str, Any]:
         candidates,
         key=lambda item: (
             str(item["updated_at"]),
-            str(item["milestone_id"]),
-        ),
-    )
-
-
-def _find_latest_dependency_ready_gawd(settings: Any) -> dict[str, Any]:
-    candidates: list[dict[str, Any]] = []
-    for saga, milestones in _saga_milestone_snapshot(settings):
-        statuses = {
-            str(item.get("milestone_id")): item.get("status")
-            for item in milestones
-            if item.get("milestone_id")
-        }
-        ready = [
-            item
-            for item in milestones
-            if item.get("status") == "PENDING"
-            and all(statuses.get(str(dep)) == "COMPLETED" for dep in item.get("depends_on", []))
-        ]
-        if not ready:
-            continue
-        selected = min(
-            ready,
-            key=lambda item: (
-                int(item.get("sequence") or 0),
-                str(item.get("milestone_id") or ""),
-            ),
-        )
-        gawd_doc_id = str(selected.get("gawd_doc_id") or saga.get("gawd_doc_id") or "").strip()
-        if not gawd_doc_id:
-            continue
-        latest_activity = max(
-            (str(item.get("updated_at") or "") for item in milestones),
-            default=str(saga.get("updated_at") or ""),
-        )
-        candidates.append(
-            {
-                "saga_id": saga.get("saga_id"),
-                "gawd_doc_id": gawd_doc_id,
-                "milestone_id": selected.get("milestone_id"),
-                "milestone_name": selected.get("name"),
-                "milestone_sequence": selected.get("sequence"),
-                "activity_at": latest_activity,
-            }
-        )
-    if not candidates:
-        raise ValueError("/approve-most-recent found no dependency-ready PENDING milestone.")
-    return max(
-        candidates,
-        key=lambda item: (
-            str(item["activity_at"]),
-            str(item["saga_id"]),
             str(item["milestone_id"]),
         ),
     )
@@ -903,10 +600,12 @@ class WorkflowEngine(
             "resolution": resolution,
             "reason": reason,
             "milestone": retry.get("milestone"),
-            "next_step": "pi /approve-most-recent",
+            "next_step": "agent-ledger list_work_units",
             "note": (
                 "The terminal milestone was reopened as PENDING. No implementation "
-                "was enqueued or started by this command."
+                "was enqueued or started by this command. Inspect the owning WorkUnit; "
+                "for historical saga work without one, compile the remaining finalized "
+                "document with agent-ledger compile_design_doc."
             ),
         }
 
@@ -1237,9 +936,8 @@ class WorkflowEngine(
                     unresolved=draft.unresolved_questions,
                     acceptance_criteria=draft.acceptance_criteria(),
                 )
-                # Fail closed: a failed finalization creates no approvable final
-                # doc and persists no milestones, so /approved-gawd has nothing
-                # to act on until intake is re-run cleanly.
+                # A failed finalization creates no approvable final document
+                # or milestone contract. Intake must succeed before compilation.
                 final_doc = None
                 active_gawd_doc = None
                 saga_milestones: list[dict[str, Any]] = []
@@ -1353,18 +1051,9 @@ class WorkflowEngine(
                     available_targets = "(could not load configs/linked_projects.toml)"
                 if finalization_succeeded:
                     status_line = "finalized_pending_operator_approval"
-                    if implementation_target is not None:
-                        next_command = (
-                            f"pi /start /approved-gawd {final_gawd_doc_id} "
-                            f"--target-project {implementation_target.id}"
-                        )
-                    elif target_scaffold is not None:
-                        next_command = f"pi /start /approved-gawd {final_gawd_doc_id}"
-                    else:
-                        next_command = (
-                            f"pi /start /approved-gawd {final_gawd_doc_id} "
-                            "--target-project <project_id>"
-                        )
+                    next_command = shlex.join(
+                        ["agent-ledger", "compile_design_doc", str(finalized_path)]
+                    )
                 else:
                     status_line = "finalization_failed"
                     next_command = (
@@ -1425,6 +1114,7 @@ class WorkflowEngine(
                         str(executor_worktree_root) if executor_worktree_root else None
                     ),
                     "artifact_ids": artifact_ids,
+                    "next_step": next_command,
                     "approval_required": finalization_succeeded,
                     "approval_subject": "final_gawd_doc",
                     "approval_note": (
@@ -1558,7 +1248,7 @@ class WorkflowEngine(
         milestones = [dict(item) for item in raw_milestones if isinstance(item, Mapping)]
         pending = [item for item in milestones if str(item.get("status")) == "PENDING"]
         next_command = (
-            f"pi /start /approved-gawd {saga_data.get('gawd_doc_id')}"
+            shlex.join(["agent-ledger", "compile_design_doc", str(finalized_path)])
             if saga_data.get("gawd_doc_id")
             else f"pi /saga status {saga_id}"
         )
@@ -1725,354 +1415,17 @@ class WorkflowEngine(
         event: IngressEvent,
         spec: DirectiveSpec,
     ) -> WorkflowResult:
-        workflow_id = self._start(WorkflowType.MODEL_DIRECTIVE, event)
-        artifacts: list[ArtifactRef] = []
-        status = WorkflowStatus.COMPLETED
-        stage = Stage.COMPLETED
-        shortcut_resolution: dict[str, Any] | None = None
-        door = self.runtime.settings.governed_saga_door
+        """Refuse fresh calls and historical replay without changing retained records."""
 
-        try:
-            door_refusal = governed_saga_door_refusal(door)
-            if door_refusal is not None:
-                raise ValueError(door_refusal)
-            gawd_doc_id = (spec.query or "").strip()
-            if spec.action == "approve_most_recent":
-                shortcut_resolution = _find_latest_dependency_ready_gawd(self.runtime.settings)
-                gawd_doc_id = str(shortcut_resolution["gawd_doc_id"])
-            if not gawd_doc_id:
-                raise ValueError("/start /approved-gawd requires a final_gawd_doc_id.")
-            doc_data = run_coordination_command(
-                GetGawdDoc(gawd_doc_id),
-                timeout=15,
-                settings=self.runtime.settings,
-            )
-            gawd_doc = doc_data["gawd_doc"]
-            doc_status = str(gawd_doc.get("status") or "")
-            if doc_status not in {"DRAFT", "APPROVED"}:
-                raise ValueError(
-                    "Only DRAFT or APPROVED GAWD docs can start implementation; "
-                    f"{gawd_doc_id} is {doc_status or 'UNKNOWN'}."
-                )
-            saga_id = str(gawd_doc.get("saga_id") or "").strip()
-            if not saga_id:
-                raise ValueError("Approved GAWD doc must be attached to a saga before execution.")
-            target_scaffold = build_target_project_scaffold_from_gawd_doc(gawd_doc)
-            target_history: dict[str, Any] | None = None
-            if (
-                spec.action == "approve_most_recent"
-                and not spec.target_project_id
-                and not spec.create_target_id
-                and target_scaffold is None
-                and extract_target_project_id_from_gawd_doc(gawd_doc) is None
-            ):
-                target_history = resolve_target_project_from_gawd_dispatch_history(
-                    self.runtime.settings,
-                    gawd_doc_id,
-                )
-            target_project_id = resolve_approved_gawd_target_project_id(
-                spec,
-                gawd_doc,
-                inferred_target_project_id=(
-                    str(target_history["target_project_id"]) if target_history is not None else None
-                ),
-            )
-            if shortcut_resolution is not None:
-                shortcut_resolution["target_project_id"] = target_project_id
-                shortcut_resolution["target_resolution"] = target_history or {
-                    "target_project_id": target_project_id,
-                    "source": "approved_gawd_contract",
-                }
-            if target_scaffold is None and spec.create_target_id:
-                target_scaffold = scaffold_spec(
-                    self.runtime.settings,
-                    spec.create_target_id,
-                )
-            target_project = (
-                None
-                if target_scaffold is not None
-                else validate_approved_gawd_target_project(
-                    self.runtime.settings,
-                    target_project_id,
-                )
-            )
-            if doc_status == "DRAFT":
-                approval = run_coordination_command(
-                    ApproveGawdDoc(gawd_doc_id),
-                    timeout=15,
-                    settings=self.runtime.settings,
-                )
-                doc_data = run_coordination_command(
-                    GetGawdDoc(gawd_doc_id),
-                    timeout=15,
-                    settings=self.runtime.settings,
-                )
-                gawd_doc = doc_data["gawd_doc"]
-            else:
-                approval = {
-                    "ok": True,
-                    "gawd_doc_id": gawd_doc_id,
-                    "status": "APPROVED",
-                    "already_approved": True,
-                }
-            scaffold_result = None
-            if target_scaffold is not None:
-                task_graph = gawd_doc.get("task_graph")
-                finalized_path = (
-                    task_graph.get("finalized_path") if isinstance(task_graph, Mapping) else None
-                )
-                if not isinstance(finalized_path, str) or not finalized_path.strip():
-                    raise ValueError(
-                        "Approved scaffold contract is missing its finalized GAWD path."
-                    )
-                scaffold_result = scaffold_target_project(
-                    target_scaffold,
-                    settings=self.runtime.settings,
-                    finalized_gawd_path=Path(finalized_path).expanduser().resolve(),
-                )
-                target_project = validate_approved_gawd_target_project(
-                    self.runtime.settings,
-                    target_project_id,
-                )
-            if target_project is None:
-                raise RuntimeError("Approved GAWD target project was not prepared.")
-            active_gawd_doc = run_coordination_command(
-                AttachGawdDocToSaga(saga_id, gawd_doc_id),
-                timeout=15,
-                settings=self.runtime.settings,
-            )
-            saga_milestones = ensure_approved_gawd_milestones(
-                self.runtime.settings,
-                saga_id=saga_id,
-                gawd_doc=gawd_doc,
-            )
-            ready_milestone = run_coordination_command(
-                NextReadySagaMilestone(saga_id),
-                timeout=15,
-                settings=self.runtime.settings,
-            )
-            milestone_approval = None
-            if ready_milestone.get("milestone") is None:
-                milestone_approval = approve_next_dependency_ready_milestone(
-                    self.runtime.settings,
-                    saga_id=saga_id,
-                    gawd_doc_id=gawd_doc_id,
-                    target_project_id=target_project_id,
-                    blocked=ready_milestone.get("blocked", []),
-                )
-                if milestone_approval is not None:
-                    ready_milestone = run_coordination_command(
-                        NextReadySagaMilestone(saga_id),
-                        timeout=15,
-                        settings=self.runtime.settings,
-                    )
-            milestone = ready_milestone.get("milestone")
-            if milestone is None:
-                approved_merge_requests = run_coordination_command(
-                    ListApprovalRequests(saga_id=saga_id, status="APPROVED"),
-                    timeout=15,
-                    settings=self.runtime.settings,
-                ).get("requests", [])
-                guidance = _build_no_ready_milestone_guidance(
-                    gawd_doc_id=gawd_doc_id,
-                    target_project_id=target_project_id,
-                    target_project_path=target_project.expanded_path,
-                    coordination_root=self.runtime.settings.coordination_root.expanduser(),
-                    saga_milestones=saga_milestones,
-                    blocked_milestones=ready_milestone.get("blocked", []),
-                    approved_requests=approved_merge_requests,
-                )
-                result = {
-                    "schema_version": "directive_result.v1",
-                    "directive": spec.raw,
-                    "action": "approved_gawd",
-                    "requested_action": spec.action,
-                    "resolution": shortcut_resolution,
-                    "status": "no_ready_milestone",
-                    "gawd_doc_id": gawd_doc_id,
-                    "saga_id": saga_id,
-                    "approval": approval,
-                    "active_gawd_doc": active_gawd_doc,
-                    "target_project_id": target_project_id,
-                    "target_project": project_status_row(target_project, include_git=True),
-                    "target_project_scaffold_result": scaffold_result,
-                    "saga_milestones": saga_milestones,
-                    "milestone_approval": milestone_approval,
-                    "blocked_milestones": ready_milestone.get("blocked", []),
-                    "blocker_details": guidance["blocker_details"],
-                    "next_actions": guidance["next_actions"],
-                    "execution_enqueued": False,
-                    "execution_started": False,
-                    "next_step": guidance["next_step"],
-                    "note": guidance["note"],
-                    "report": guidance["report"],
-                }
-                early_door_notice = governed_saga_door_notice(door)
-                if early_door_notice is not None:
-                    result["governed_saga_door"] = early_door_notice
-                artifact = self.runtime.artifact_store.write_json(
-                    role=ArtifactRole.DIRECTIVE_RESULT.value,
-                    payload=result,
-                    workflow_id=workflow_id,
-                    schema_version="directive_result.v1",
-                )
-                artifacts.append(artifact)
-                self.runtime.repository.update_workflow(
-                    workflow_id,
-                    status=status,
-                    stage=stage,
-                    error=None,
-                )
-                return build_completed_workflow_result(
-                    workflow_id,
-                    WorkflowType.MODEL_DIRECTIVE,
-                    status,
-                    stage,
-                    artifacts,
-                )
-
-            reach_lifecycle_transition(
-                LifecycleTransitionPoint.AFTER_MILESTONE_SELECTED,
-                saga_id=saga_id,
-                milestone_id=str(milestone["milestone_id"]),
-                gawd_doc_id=gawd_doc_id,
-                target_project_id=target_project_id,
-            )
-            source = build_approved_gawd_milestone_dispatch_source(
-                gawd_doc_id,
-                str(milestone["milestone_id"]),
-            )
-            existing_intent = find_existing_dispatch_intent_for_source(
-                self.runtime.settings,
-                source,
-            )
-            if (
-                existing_intent is not None
-                and existing_intent.get("target_project_id") != target_project_id
-            ):
-                raise ValueError(
-                    "An active dispatch intent already exists for this approved GAWD "
-                    "milestone with "
-                    f"target_project_id={existing_intent.get('target_project_id')!r}. "
-                    "Cancel or supersede that intent before enqueueing a different target."
-                )
-            if existing_intent is None:
-                dispatch_intent = run_coordination_command(
-                    SubmitDispatchIntent(
-                        DispatchTier.SENIOR,
-                        build_approved_gawd_dispatch_prompt(gawd_doc, milestone),
-                        kind=DispatchKind.CODE,
-                        target_project_id=target_project_id,
-                        source=source,
-                        permitted_capabilities=(
-                            "invoke_model",
-                            "read_repository",
-                            "run_command",
-                            "write_repository",
-                        ),
-                    ),
-                    timeout=15,
-                    settings=self.runtime.settings,
-                )
-                reach_lifecycle_transition(
-                    LifecycleTransitionPoint.AFTER_INTENT_CREATED,
-                    intent_id=str(dispatch_intent["intent_id"]),
-                    milestone_id=str(milestone["milestone_id"]),
-                    saga_id=saga_id,
-                    target_project_id=target_project_id,
-                )
-                result_status = "approved_and_enqueued"
-                execution_enqueued = True
-            else:
-                dispatch_intent = existing_intent
-                result_status = "already_enqueued"
-                execution_enqueued = False
-
-            intent_status = str(dispatch_intent.get("status") or "PENDING")
-            if intent_status == "PENDING":
-                next_step = "pi /dispatch"
-                execution_note = "The intent is durable but unclaimed. Run the dispatcher once now."
-            else:
-                next_step = "pi /ledger"
-                execution_note = (
-                    f"The intent is already {intent_status}; inspect the ledger before "
-                    "starting another dispatcher."
-                )
-            ready_name = str(milestone.get("name") or milestone["milestone_id"])
-            report = "\n".join(
-                [
-                    f"{result_status}: {ready_name}",
-                    f"Milestone: {milestone['milestone_id']}",
-                    f"Dispatch intent: {dispatch_intent.get('intent_id')}",
-                    f"Intent status: {intent_status}",
-                    "Execution started: no",
-                    execution_note,
-                    f"Next: {next_step}",
-                ]
-            )
-
-            result = {
-                "schema_version": "directive_result.v1",
-                "directive": spec.raw,
-                "action": "approved_gawd",
-                "requested_action": spec.action,
-                "resolution": shortcut_resolution,
-                "status": result_status,
-                "gawd_doc_id": gawd_doc_id,
-                "saga_id": saga_id,
-                "approval": approval,
-                "active_gawd_doc": active_gawd_doc,
-                "target_project_id": target_project_id,
-                "target_project": project_status_row(target_project, include_git=True),
-                "target_project_scaffold_result": scaffold_result,
-                "dispatch_source": source,
-                "dispatch_intent": dispatch_intent,
-                "dispatch_intent_id": dispatch_intent.get("intent_id"),
-                "saga_milestones": saga_milestones,
-                "milestone_approval": milestone_approval,
-                "ready_milestone": milestone,
-                "execution_enqueued": execution_enqueued,
-                "execution_started": False,
-                "next_step": next_step,
-                "note": execution_note,
-                "report": report,
-            }
-        except Exception as exc:
-            status = WorkflowStatus.FAILED_PERMANENT
-            result = {
-                "schema_version": "directive_result.v1",
-                "directive": spec.raw,
-                "action": "approved_gawd",
-                "requested_action": spec.action,
-                "resolution": shortcut_resolution,
-                "status": "failed",
-                "error": str(exc),
-                "help": help_payload(DirectiveParser(self.runtime.settings), spec.raw, str(exc)),
-            }
-
-        door_notice = governed_saga_door_notice(door)
-        if door_notice is not None:
-            result["governed_saga_door"] = door_notice
-        artifact = self.runtime.artifact_store.write_json(
-            role=ArtifactRole.DIRECTIVE_RESULT.value,
-            payload=result,
-            workflow_id=workflow_id,
-            schema_version="directive_result.v1",
-        )
-        artifacts.append(artifact)
-        self.runtime.repository.update_workflow(
-            workflow_id,
-            status=status,
-            stage=stage,
-            error=result.get("error"),
-        )
+        refusal = governed_saga_door_refusal()
         return build_completed_workflow_result(
-            workflow_id,
+            build_event_workflow_id(WorkflowType.MODEL_DIRECTIVE, event),
             WorkflowType.MODEL_DIRECTIVE,
-            status,
-            stage,
-            artifacts,
-            help=result.get("help"),
+            WorkflowStatus.FAILED_PERMANENT,
+            Stage.COMPLETED,
+            [],
+            manual_review_reason=refusal,
+            help=help_payload(DirectiveParser(self.runtime.settings), spec.raw, refusal),
         )
 
     def _observability_directive(self, spec: DirectiveSpec) -> dict[str, Any]:

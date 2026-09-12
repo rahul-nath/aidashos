@@ -129,7 +129,7 @@ def test_launchd_installer_waits_for_bootout_before_bootstrap(tmp_path: Path) ->
     assert events.count("bootout ") == len(labels)
     assert events.count("bootstrap ") == len(labels)
     for label in labels:
-        assert f"bootout gui/501/{label}" in events
+        assert f"bootout gui/{os.getuid()}/{label}" in events
 
 
 def test_launchd_installer_fails_closed_when_bootout_never_finishes(tmp_path: Path) -> None:

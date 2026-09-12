@@ -426,9 +426,7 @@ def resume_work_unit(
     }
 
 
-def retry_override_request_id(
-    work_unit_id: str, milestone_key: str, execution_ordinal: int
-) -> str:
+def retry_override_request_id(work_unit_id: str, milestone_key: str, execution_ordinal: int) -> str:
     """One decision permits retry after exactly one failed execution ordinal."""
 
     if type(execution_ordinal) is not int or execution_ordinal < 1:
@@ -440,9 +438,7 @@ def retry_override_request_id(
     return f"wud_{digest[:24]}"
 
 
-def _retry_request_for_execution(
-    work_unit_id: str, execution: repo.MilestoneExecutionRow
-) -> str:
+def _retry_request_for_execution(work_unit_id: str, execution: repo.MilestoneExecutionRow) -> str:
     """Honor a legacy request only at the ordinal its immutable event names."""
 
     legacy_digest = sha256_text(

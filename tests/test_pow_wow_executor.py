@@ -815,6 +815,9 @@ def test_cli_executor_runs_claude_and_codex_directly(tmp_path: Path) -> None:
         _FAKE_AGENT_PREAMBLE + "import os, sys, json\n"
         "from pathlib import Path\n"
         "prompt = sys.argv[-1]\n"
+        "git_dir = Path('.git').read_text().removeprefix('gitdir: ').strip()\n"
+        "print(json.dumps({'fixture_launch': {'argv': sys.argv, 'cwd': os.getcwd(), "
+        "'git_dir': git_dir}}), flush=True)\n"
         "if 'reate a file' in prompt:\n"
         "    Path('NEXT_STEP.md').write_text('- add feature X\\n')\n"
         "assigned = os.environ.get('LOCAL_AGENT_ASSIGNED_WORKTREE', '')\n"
@@ -869,12 +872,16 @@ def test_cli_executor_runs_claude_and_codex_directly(tmp_path: Path) -> None:
     assert impl.status == "completed" and implementer_run_capture["harness"] == _senior_vendor()
     assert implementer_run_capture["changed_files"] == ["NEXT_STEP.md"]
     assert implementer_run_capture["is_review"] is False
-    assert (
-        implementer_run_capture["worktree"]["worktree_path"]
-        in implementer_run_capture["command"]["command"]
+    observed_launch = next(
+        payload["fixture_launch"]
+        for line in implementer_run_capture["command"]["stdout"].splitlines()
+        if "fixture_launch" in (payload := json.loads(line))
     )
-    assert str(repo / "README.md") not in implementer_run_capture["command"]["command"]
-    assert str(repo / ".git") in implementer_run_capture["command"]["command"]
+    logical_command = shlex.join(observed_launch["argv"])
+    assert implementer_run_capture["worktree"]["worktree_path"] in logical_command
+    assert observed_launch["cwd"] == implementer_run_capture["worktree"]["worktree_path"]
+    assert str(repo / "README.md") not in logical_command
+    assert Path(observed_launch["git_dir"]).is_relative_to(repo / ".git")
     assert implementer_run_capture["worktree"]["worktree_path"] in (
         implementer_run_capture["output"] or ""
     )
@@ -954,12 +961,12 @@ def test_cli_executor_records_harness_commit_and_keeps_merge_gate_signal(tmp_pat
     ).dispatch_pow_wow("pow-direct-commit", _target(repo), (task,), _context(_target(repo)))
 
     task_result = result.tasks[0]
+    assert result.status == "COMPLETED", (task_result.summary, task_result.risks)
     checkpoint = next(
         artifact
         for artifact in task_result.artifacts
         if artifact.artifact_type == "worktree_commit_checkpoint"
     )
-    assert result.status == "COMPLETED"
     assert result.changed_files == ("DIRECT_COMMIT.md",)
     assert checkpoint.content["commit_created"] is False
     assert checkpoint.content["changed_from_base"] is True
@@ -1445,9 +1452,7 @@ def test_governed_pairing_never_swaps_one_provider_mid_attempt(tmp_path: Path) -
     ].failure.message
     assert "session limit" in result.tasks[0].failure.message
     reported_seat = f"{bench[DispatchTier.SENIOR].harness.value} reported"
-    assert any(
-        reported_seat in risk and "resets 9:20pm" in risk for risk in result.tasks[0].risks
-    )
+    assert any(reported_seat in risk and "resets 9:20pm" in risk for risk in result.tasks[0].risks)
     assert result.tasks[0].to_payload()["failure"]["retryable"] is True
     assert all(
         artifact.artifact_type != "frontier_fallback_run" for artifact in result.tasks[0].artifacts
@@ -1713,6 +1718,13 @@ def test_empty_junior_delegate_output_blocks_dependent_task(tmp_path: Path) -> N
     def empty_delegate(**_kwargs):
         return {"ok": True, "output": ""}
 
+    reviewer = tmp_path / "reviewer-must-not-run.py"
+    reviewer_called = tmp_path / "reviewer-called"
+    reviewer.write_text(
+        _FAKE_AGENT_PREAMBLE + f"from pathlib import Path\nPath({str(reviewer_called)!r}).touch()\n"
+        "raise SystemExit('a failed dependency must not start its reviewer')\n"
+    )
+    reviewer.chmod(0o755)
     tasks = (
         PowWowTaskSpec(
             task_name="gemma_empty",
@@ -1733,6 +1745,7 @@ def test_empty_junior_delegate_output_blocks_dependent_task(tmp_path: Path) -> N
     executor = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
         delegate_fn=empty_delegate,
+        codex_bin=str(reviewer),
         readonly_codex_preflight=lambda *_: None,
     )
 
@@ -1753,6 +1766,7 @@ def test_empty_junior_delegate_output_blocks_dependent_task(tmp_path: Path) -> N
     assert junior.failure.message == "delegate returned ok with empty output"
     assert review.status == "blocked"
     assert "dependencies did not complete" in review.risks[0]
+    assert not reviewer_called.exists()
     assert review.failure is junior.failure
 
 
@@ -2157,6 +2171,20 @@ def test_review_block_triggers_revision_loop_and_converges(tmp_path: Path) -> No
     re_review = next(tr for tr in result.tasks if tr.task_name == "review_next_step_r1")
     verdict = next(a.content["verdict"] for a in re_review.artifacts if a.content.get("verdict"))
     assert verdict.startswith("APPROVE")
+    first_candidate, revised_candidate = (
+        next(
+            a.content for a in reviewed.artifacts if a.artifact_type == "candidate_review_evidence"
+        )
+        for reviewed in (initial_review, re_review)
+    )
+    assert first_candidate["candidate"]["producer_task_name"] == "implement_next_step"
+    assert revised_candidate["candidate"]["producer_task_name"] == "implement_next_step_revision_r1"
+    assert (
+        first_candidate["candidate"]["source"]["commit"]
+        != revised_candidate["candidate"]["source"]["commit"]
+    )
+    assert "+- guardrail" not in first_candidate["candidate"]["source"]["patch"]
+    assert "+- guardrail" in revised_candidate["candidate"]["source"]["patch"]
     # The full reviewed patch survives worktree cleanup as a ledger artifact.
     patch = next(a for a in result.artifacts if a.artifact_type == "code_patch")
     assert patch.content["truncated"] is False
@@ -2172,6 +2200,36 @@ def test_review_block_triggers_revision_loop_and_converges(tmp_path: Path) -> No
     )
 
 
+def _owned_review_context(target, tasks):
+    """Keep real reviewer ownership behind the tests' injected execution ports."""
+    from local_first_agent_os.coordination.pow_wows import claim_task, create_pow_wow
+    from local_first_agent_os.coordination.projects import create_saga
+
+    saga_id = create_saga("Review fixture")["saga_id"]
+    pow_wow_id = create_pow_wow(saga_id, "implementation", "Review source", "Approved")[
+        "pow_wow_id"
+    ]
+    task_ids = {
+        task.task_name: claim_task(pow_wow_id, task.task_name, task.description)["task_id"]
+        for task in tasks
+    }
+    return pow_wow_id, replace(_context(target), saga_id=saga_id, task_ids_by_name=task_ids)
+
+
+def _owned_review_claim(command):
+    from local_first_agent_os.coordination.pow_wows import claim_task
+
+    return parse_coordination_result(
+        command,
+        claim_task(
+            command.pow_wow_id,
+            command.task_name,
+            command.description,
+            blocked_by=list(command.blocked_by),
+        ),
+    )
+
+
 def test_block_context_is_durable_before_revision_process_starts(tmp_path: Path) -> None:
     from local_first_agent_os.pow_wow import CliPowWowExecutor
     from local_first_agent_os.pow_wow.protocol import ReviewOrigin
@@ -2184,6 +2242,7 @@ def test_block_context_is_durable_before_revision_process_starts(tmp_path: Path)
         ],
     )
     target = _review_loop_target(repo)
+    pow_wow_id, owned_context = _owned_review_context(target, tasks)
     calls: list[CoordinationCommand] = []
     submitted_ids: dict[str, str] = {}
 
@@ -2215,10 +2274,7 @@ def test_block_context_is_durable_before_revision_process_starts(tmp_path: Path)
                 },
             )
         if isinstance(command, ClaimTask):
-            return parse_coordination_result(
-                command,
-                {"ok": True, "task_id": f"task-{len(calls)}"},
-            )
+            return _owned_review_claim(command)
         if isinstance(command, SubmitArtifact):
             artifact_id = f"artifact-{len(submitted_ids) + 1}"
             submitted_ids[command.artifact_type] = artifact_id
@@ -2229,7 +2285,7 @@ def test_block_context_is_durable_before_revision_process_starts(tmp_path: Path)
         raise AssertionError(f"unexpected coordination command: {command}")
 
     recovery_context = replace(
-        _context(target),
+        owned_context,
         review_origin=ReviewOrigin.RECOVERY_STAFF,
         recovery_retained_branch="agent/original-retained",
         recovery_original_task_contract="Implement only recovery milestone M3.",
@@ -2240,7 +2296,7 @@ def test_block_context_is_durable_before_revision_process_starts(tmp_path: Path)
         **_seated(implementer=claude_bin, reviewer=codex_bin),
         max_review_rounds=2,
         coordination_command=fake_coordination_command,
-    ).dispatch_pow_wow("pow-review-durable", target, tasks, recovery_context)
+    ).dispatch_pow_wow(pow_wow_id, target, tasks, recovery_context)
 
     assert result.status == "COMPLETED"
     initial_review = next(task for task in result.tasks if task.task_name == "review_next_step")
@@ -2290,6 +2346,7 @@ def test_revision_fails_closed_when_context_cannot_be_persisted(tmp_path: Path) 
         codex_verdicts=["BLOCK - persistence must succeed before revision"],
     )
     target = _review_loop_target(repo)
+    pow_wow_id, owned_context = _owned_review_context(target, tasks)
     calls: list[CoordinationCommand] = []
 
     def fake_coordination_command(command: CoordinationCommand) -> CoordinationResult:
@@ -2332,7 +2389,7 @@ def test_revision_fails_closed_when_context_cannot_be_persisted(tmp_path: Path) 
         worktree_root=tmp_path / "wt",
         **_seated(implementer=claude_bin, reviewer=codex_bin),
         coordination_command=fake_coordination_command,
-    ).dispatch_pow_wow("pow-review-persist-failure", target, tasks, _context(target))
+    ).dispatch_pow_wow(pow_wow_id, target, tasks, owned_context)
 
     assert result.status == "FAILED"
     assert any(
@@ -2482,7 +2539,7 @@ def _escalation_coordination_fake() -> tuple[list[CoordinationCommand], Any]:
                 },
             )
         if isinstance(command, ClaimTask):
-            return parse_coordination_result(command, {"ok": True, "task_id": f"task-{len(calls)}"})
+            return _owned_review_claim(command)
         if isinstance(command, SubmitArtifact):
             return parse_coordination_result(
                 command, {"ok": True, "artifact_id": f"artifact-{len(calls)}"}
@@ -2504,6 +2561,7 @@ def test_round_zero_escalation_skips_revision_and_reaches_the_operator(tmp_path:
         tmp_path, codex_verdicts=[escalate_verdict]
     )
     target = _review_loop_target(repo)
+    pow_wow_id, owned_context = _owned_review_context(target, tasks)
     calls, fake_coordination_command = _escalation_coordination_fake()
     progress: list[dict[str, object]] = []
     with progress_event_sink(progress.append):
@@ -2512,7 +2570,7 @@ def test_round_zero_escalation_skips_revision_and_reaches_the_operator(tmp_path:
             **_seated(implementer=claude_bin, reviewer=codex_bin),
             max_review_rounds=2,
             coordination_command=fake_coordination_command,
-        ).dispatch_pow_wow("pow-review-escalate-r0", target, tasks, _context(target))
+        ).dispatch_pow_wow(pow_wow_id, target, tasks, owned_context)
 
     names = [task_result.task_name for task_result in result.tasks]
     assert result.status == "FAILED"
@@ -2532,7 +2590,7 @@ def test_round_zero_escalation_skips_revision_and_reaches_the_operator(tmp_path:
     assert escalation["review_text"] == escalate_verdict
     submitted = next(command for command in calls if isinstance(command, SubmitApprovalRequest))
     assert submitted.request_type == "REVIEW_ESCALATION"
-    assert submitted.saga_id == "saga-1"
+    assert submitted.saga_id == owned_context.saga_id
     assert submitted.payload is not None
     assert submitted.payload["review_text"] == escalate_verdict
     assert submitted.payload["review_task_name"] == "review_next_step"
@@ -2557,13 +2615,14 @@ def test_re_review_escalation_is_not_converged_and_reaches_the_operator(tmp_path
         ],
     )
     target = _review_loop_target(repo)
+    pow_wow_id, owned_context = _owned_review_context(target, tasks)
     calls, fake_coordination_command = _escalation_coordination_fake()
     result = CliPowWowExecutor(
         worktree_root=tmp_path / "wt",
         **_seated(implementer=claude_bin, reviewer=codex_bin),
         max_review_rounds=3,
         coordination_command=fake_coordination_command,
-    ).dispatch_pow_wow("pow-review-escalate-r1", target, tasks, _context(target))
+    ).dispatch_pow_wow(pow_wow_id, target, tasks, owned_context)
 
     names = [task_result.task_name for task_result in result.tasks]
     assert result.status == "FAILED"
@@ -2801,32 +2860,49 @@ def test_the_verification_clock_is_not_the_agents(tmp_path: Path) -> None:
 
 
 def test_the_verification_clock_reaps_the_whole_process_group(tmp_path: Path) -> None:
-    """A timed-out command must not hold the gate hostage through its orphans.
+    """Leader-exit UID cleanup or the group deadline must reap the pipe-holding child."""
 
-    `subprocess.run` kills only its direct child on timeout - the shell, under
-    `shell=True` - and then drains the pipes, which blocks until every process
-    holding them exits. So a suite that spawns anything, or lingers itself, kept
-    the gate alive for as long as it pleased after the clock fired: the recorded
-    incident held a gate for 26 minutes past its summary. This pins the group
-    kill: a parent that exits immediately but leaves a 60-second child on the
-    pipe must come back at the clock, not at the child's.
-    """
-
+    import fcntl
     import time
 
+    from local_first_agent_os.native_verification_broker import authenticated_contained_client
     from local_first_agent_os.pow_wow.process import run_captured_shell_command
 
+    contained = authenticated_contained_client()
+    lock_path = tmp_path / "orphan.lock"
+    child = tmp_path / "linger.py"
+    child.write_text(
+        "import fcntl,sys,time\n"
+        "with open(sys.argv[1], 'w') as lock:\n"
+        "    fcntl.flock(lock, fcntl.LOCK_EX)\n"
+        "    print('child holds lock', flush=True)\n"
+        "    time.sleep(60)\n"
+    )
+    parent = tmp_path / "spawn_linger.py"
+    parent.write_text(
+        "import subprocess,sys\n"
+        "child = subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]], "
+        "stdout=subprocess.PIPE, text=True)\n"
+        "assert child.stdout.readline() == 'child holds lock\\n'\n"
+        "print('suite summary printed', flush=True)\n"
+    )
+    # The child retains inherited stderr and its lock until exit. The handshake
+    # proves that an unlocked file after capture is actual cleanup, not a race.
     linger = (
-        f"{shlex.quote(sys.executable)} -c "
-        '"import subprocess, sys; '
-        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
-        "print('suite summary printed')\""
+        f"{shlex.quote(sys.executable)} {shlex.quote(str(parent))} "
+        f"{shlex.quote(str(child))} {shlex.quote(str(lock_path))}"
     )
     started = time.monotonic()
     capture = run_captured_shell_command(linger, tmp_path, timeout_seconds=2)
     elapsed = time.monotonic() - started
 
     assert elapsed < 30, f"the gate waited {elapsed:.0f}s on an orphan the clock had condemned"
-    assert capture.exit_code == 124, "held-open output past the clock is a timeout, not a pass"
+    assert capture.exit_code == (0 if contained else 124)
     assert "suite summary printed" in capture.stdout, "partial evidence must survive the reap"
-    assert "timed out after 2s" in capture.stderr
+    if contained:
+        assert capture.stderr == ""
+    else:
+        assert "timed out after 2s" in capture.stderr
+    with lock_path.open("r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock, fcntl.LOCK_UN)

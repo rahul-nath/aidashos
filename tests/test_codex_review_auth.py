@@ -38,7 +38,9 @@ def _write_auth(
 
 
 def test_external_login_cannot_rotate_or_copy_refresh_authority(tmp_path: Path) -> None:
-    auth = tmp_path / "auth.json"
+    owner = tmp_path / "subscription-owner"
+    owner.mkdir()
+    auth = owner / "auth.json"
     before = _write_auth(auth)
     subscription = _ExternalSubscription(auth)
     assert subscription.login() == {
@@ -47,7 +49,7 @@ def test_external_login_cannot_rotate_or_copy_refresh_authority(tmp_path: Path) 
         "chatgptAccountId": "fixture-account",
     }
     assert auth.read_bytes() == before
-    assert list(tmp_path.iterdir()) == [auth]
+    assert list(owner.iterdir()) == [auth]
 
 
 def test_refresh_consumes_only_a_new_access_token_from_the_same_owner(tmp_path: Path) -> None:

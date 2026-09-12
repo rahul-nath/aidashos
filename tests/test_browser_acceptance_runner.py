@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import shlex
+import socket
 import sys
 import threading
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+from host_test_scope import require_uncontained_scope
 
 from local_first_agent_os.browser_acceptance import (
     BrowserAcceptanceRequest,
@@ -19,6 +22,29 @@ from local_first_agent_os.browser_acceptance import (
     LocalPreviewSession,
     PreviewStartError,
 )
+
+
+@pytest.fixture
+def host_browser() -> None:
+    """Real HTTP and Chromium are host integration prerequisites, not child grants."""
+    require_uncontained_scope(
+        reason="real HTTP/Chromium acceptance requires host network outside a leased gate",
+        required_flag="AIDASHOS_REQUIRE_HOST_BROWSER",
+    )
+    # Outside the declared contained scope, a broken prerequisite remains a failure.
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+
+
+@pytest.fixture
+def unused_preview_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pure controls never serve HTTP; the unused port is not an execution grant."""
+    monkeypatch.setattr(LocalPreviewSession, "_available_port", staticmethod(lambda: 49152))
+
+    def unavailable_readiness(*_args, **_kwargs):
+        raise httpx.ConnectError("this process-only fixture has no HTTP readiness server")
+
+    monkeypatch.setattr("local_first_agent_os.browser_acceptance.httpx.get", unavailable_readiness)
 
 
 def _server_command() -> str:
@@ -54,7 +80,7 @@ def _request(
     )
 
 
-def test_complete_local_preview_persists_every_capture(runtime, tmp_path) -> None:
+def test_complete_local_preview_persists_every_capture(host_browser, runtime, tmp_path) -> None:
     _write_page(
         tmp_path,
         "<header><div id='logo'>Fixture logo</div></header><main>Ready</main>",
@@ -106,7 +132,7 @@ def test_complete_local_preview_persists_every_capture(runtime, tmp_path) -> Non
     ],
 )
 def test_visual_and_console_failures_are_terminal(
-    runtime, tmp_path, body: str, expected: str
+    host_browser, runtime, tmp_path, body: str, expected: str
 ) -> None:
     _write_page(tmp_path, body)
     session = LocalPreviewSession(command_template=_server_command(), cwd=tmp_path)
@@ -121,7 +147,7 @@ def test_visual_and_console_failures_are_terminal(
     assert expected in payload
 
 
-def test_failed_http_resource_is_recorded(runtime, tmp_path) -> None:
+def test_failed_http_resource_is_recorded(host_browser, runtime, tmp_path) -> None:
     _write_page(
         tmp_path,
         "<div id='logo'>Logo</div><main><img src='/missing.png'></main>",
@@ -137,7 +163,7 @@ def test_failed_http_resource_is_recorded(runtime, tmp_path) -> None:
     assert any(capture.failed_requests for capture in run.evidence.captures)
 
 
-def test_uncaught_page_exception_is_terminal(runtime, tmp_path) -> None:
+def test_uncaught_page_exception_is_terminal(host_browser, runtime, tmp_path) -> None:
     _write_page(
         tmp_path,
         "<div id='logo'>Logo</div><main>Hydration</main>"
@@ -155,7 +181,7 @@ def test_uncaught_page_exception_is_terminal(runtime, tmp_path) -> None:
     assert any("hydration exploded" in value for value in run.evidence.captures[0].page_errors)
 
 
-def test_redirect_outside_allowlist_is_terminal(runtime, tmp_path) -> None:
+def test_redirect_outside_allowlist_is_terminal(host_browser, runtime, tmp_path) -> None:
     _write_page(
         tmp_path,
         "<div id='logo'>Logo</div><main>Redirecting</main>"
@@ -172,7 +198,7 @@ def test_redirect_outside_allowlist_is_terminal(runtime, tmp_path) -> None:
     assert "blocked navigation outside allowlist" in run.evidence.model_dump_json()
 
 
-def test_capture_timeout_is_terminal(runtime, tmp_path) -> None:
+def test_capture_timeout_is_terminal(host_browser, runtime, tmp_path) -> None:
     server = tmp_path / "slow_server.py"
     server.write_text(
         """from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -220,7 +246,9 @@ ThreadingHTTPServer(('127.0.0.1', int(sys.argv[1])), Handler).serve_forever()
     assert "Timeout" in run.evidence.model_dump_json()
 
 
-def test_cancellation_stops_before_remaining_captures(runtime, tmp_path, monkeypatch) -> None:
+def test_cancellation_stops_before_remaining_captures(
+    host_browser, runtime, tmp_path, monkeypatch
+) -> None:
     _write_page(tmp_path, "<div id='logo'>Logo</div><main>Ready</main>")
     _write_page(
         tmp_path,
@@ -250,7 +278,7 @@ def test_cancellation_stops_before_remaining_captures(runtime, tmp_path, monkeyp
     assert run.evidence.captures[0].trace_artifact_id is not None
 
 
-def test_trace_persistence_failure_cannot_pass(runtime, tmp_path) -> None:
+def test_trace_persistence_failure_cannot_pass(host_browser, runtime, tmp_path) -> None:
     _write_page(tmp_path, "<div id='logo'>Logo</div><main>Ready</main>")
 
     class _FailingTraceWriter:
@@ -275,7 +303,7 @@ def test_trace_persistence_failure_cannot_pass(runtime, tmp_path) -> None:
     assert "trace persistence failed" in run.evidence.model_dump_json()
 
 
-def test_screenshot_persistence_failure_cannot_pass(runtime, tmp_path) -> None:
+def test_screenshot_persistence_failure_cannot_pass(host_browser, runtime, tmp_path) -> None:
     _write_page(tmp_path, "<div id='logo'>Logo</div><main>Ready</main>")
 
     class _FailingScreenshotWriter:
@@ -297,7 +325,7 @@ def test_screenshot_persistence_failure_cannot_pass(runtime, tmp_path) -> None:
     assert "screenshot failed" in run.evidence.model_dump_json()
 
 
-def test_preview_process_death_is_bounded_and_reaped(tmp_path) -> None:
+def test_preview_process_death_is_bounded_and_reaped(unused_preview_port, tmp_path) -> None:
     command = f"{shlex.quote(sys.executable)} -c 'raise SystemExit(7)'"
     session = LocalPreviewSession(
         command_template=command,
@@ -315,7 +343,7 @@ def test_preview_process_death_is_bounded_and_reaped(tmp_path) -> None:
     assert evidence.process_group_reaped is True
 
 
-def test_preview_environment_rejects_credential_shaped_keys(tmp_path) -> None:
+def test_preview_environment_rejects_credential_shaped_keys(unused_preview_port, tmp_path) -> None:
     with pytest.raises(ValueError, match="VERCEL_TOKEN"):
         LocalPreviewSession(
             command_template=_server_command(),

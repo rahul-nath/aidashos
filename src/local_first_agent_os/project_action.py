@@ -726,20 +726,23 @@ def _build_project_action_snapshot(
         summary = "Every durable saga milestone is complete."
     else:
         gawd_doc_id = str(saga.get("gawd_doc_id") or "")
-        milestone_text = " ".join(
-            str((milestone or {}).get(field) or "") for field in ("name", "description")
-        ).lower()
-        if any(token in milestone_text for token in ("deploy", "hosted preview", "vercel")):
-            action = ProjectActionKind.DEPLOY_APPROVAL_REQUIRED
-            summary = "The hosted-preview boundary is waiting for explicit deploy approval."
+        action = ProjectActionKind.HUMAN_DECISION_REQUIRED
+        if gawd_doc_id:
+            summary = (
+                "This historical saga cannot dispatch new governed milestones. "
+                "Inspect its retained contract, finalize the remaining design document, "
+                "then use agent-ledger compile_design_doc and the start_work_unit "
+                "command it returns."
+            )
+            next_command = shlex.join(["agent-ledger", "get_gawd_doc", gawd_doc_id])
         else:
-            action = ProjectActionKind.HUMAN_DECISION_REQUIRED
             summary = "The next dependency-ready milestone is waiting for operator approval."
-        next_command = (
-            f"pi /start /approved-gawd {gawd_doc_id} --target-project {project_id}"
-            if gawd_doc_id
-            else None
-        )
+            milestone_text = " ".join(
+                str((milestone or {}).get(field) or "") for field in ("name", "description")
+            ).lower()
+            if any(token in milestone_text for token in ("deploy", "hosted preview", "vercel")):
+                action = ProjectActionKind.DEPLOY_APPROVAL_REQUIRED
+                summary = "The hosted-preview boundary is waiting for explicit deploy approval."
 
     if unrecognized:
         # This overrides whatever the chain concluded, because the chain reasoned

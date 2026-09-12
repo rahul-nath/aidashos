@@ -13,7 +13,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..constants import CLI_AGENT_RUN_ARTIFACT_TYPE, DELEGATED_TASK_RUN_ARTIFACT_TYPE
 from ..coordination.contracts import DispatchKind
@@ -23,6 +23,9 @@ from ..vocabulary import DispatchTier
 from .protocol import PlanningPhase, ReferencePack, TaskPurpose
 from .repo_audit import AUDIT_EMISSION_INSTRUCTION
 from .types import PowWowExecutionContext, PowWowTaskResult, PowWowTaskSpec
+
+if TYPE_CHECKING:
+    from .candidate_review import CandidateReviewView
 from .views import ViewCompactor, build_bounded_view_block
 
 _DEPENDENCY_OUTPUT_CHAR_LIMIT = 2500
@@ -175,6 +178,7 @@ def build_agent_task_prompt(
     dependency_results: Sequence[PowWowTaskResult] = (),
     dependency_compactor: ViewCompactor | None = None,
     audit_context_block: str = "",
+    candidate_review: CandidateReviewView | None = None,
 ) -> str:
     # Ordered stable-prefix-first, and the ordering is load-bearing rather than
     # cosmetic. Prompt caching is keyed on a *prefix*: two dispatches share a
@@ -269,6 +273,10 @@ def build_agent_task_prompt(
     )
     if dependency_block:
         lines.append(dependency_block)
+    if candidate_review is not None:
+        # Host identities and complete source bytes cannot enter the lossy
+        # model-prose compactor used for ordinary dependency output.
+        lines.append(candidate_review.render())
     # The predecessor's partitioned repository audit sits beside the dependency
     # context: both are host-supplied evidence about prior work, and both vary
     # per dispatch, so neither may precede the stable cacheable blocks above.

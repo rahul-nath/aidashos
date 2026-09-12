@@ -532,8 +532,9 @@ def test_the_two_halted_dispatch_failure_codes_are_distinct() -> None:
     with pytest.MonkeyPatch().context() as patch:
         patch.setattr(
             "local_first_agent_os.work_units.root_workflow.record_dispatch_wait_halt_step",
-            lambda *args, **kwargs: recorded.append({"args": args, "kwargs": kwargs})
-            or {"status": "BLOCKED"},
+            lambda *args, **kwargs: (
+                recorded.append({"args": args, "kwargs": kwargs}) or {"status": "BLOCKED"}
+            ),
         )
         from local_first_agent_os.work_units.lifecycle import LifecyclePhase
 

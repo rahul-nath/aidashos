@@ -13,7 +13,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from local_first_agent_os import dependency_context_compactor
-from local_first_agent_os.agent_adapters import AgentResult, LocalModelRunProvenance
 from local_first_agent_os.constants import DELEGATED_TASK_RUN_ARTIFACT_TYPE
 from local_first_agent_os.contracts import ModelRole, WorkflowStatus, WorkflowType
 from local_first_agent_os.coordination import DispatchKind
@@ -22,6 +21,7 @@ from local_first_agent_os.dependency_context_compactor import (
     DEPENDENCY_COMPACTION_TIMEOUT_SECONDS,
     build_dependency_context_compactor,
 )
+from local_first_agent_os.local_model_delegation import LocalModelResult, LocalModelRunProvenance
 from local_first_agent_os.pi_prompts import PiPromptRegistry
 from local_first_agent_os.pow_wow.prompts import (
     build_agent_task_prompt,
@@ -210,7 +210,7 @@ def _summarising_delegate(calls: list[dict]):
 
     async def fake_delegate(_runtime, **kwargs):
         calls.append(kwargs)
-        return AgentResult(
+        return LocalModelResult(
             task_id="compaction-fake",
             success=True,
             output="task_0 through task_11 all completed; see changed files.",

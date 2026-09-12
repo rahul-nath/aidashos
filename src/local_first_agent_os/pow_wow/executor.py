@@ -38,8 +38,10 @@ from ..browser_acceptance import (
 )
 from ..capabilities import Capability, gated_capabilities
 from ..capability_gate import AgentCaller, CapabilityDenied, check_capability
+from ..codex_review_failure import inspection_process_failure
 from ..codex_review_launch import (
     CodexInspectionRequest,
+    CodexInspectionRequestTooLarge,
     preflight_configured_codex_review,
     prepare_configured_codex_review,
 )
@@ -142,6 +144,13 @@ from ..toolchains import (
 )
 from ..vocabulary import DispatchTier
 from ..worktree_observation import WorktreeLost, WorktreeUsable, observe_worktree
+from .candidate_review import (
+    CandidateReviewReady,
+    CandidateReviewUnavailable,
+    CandidateReviewView,
+    persist_candidate_review,
+    prepare_candidate_review,
+)
 from .dry_run import DryRunPowWowExecutor
 from .failure_classifier import JuniorFailureClassifier
 from .git_ops import (
@@ -547,6 +556,29 @@ def _harness_failure(
             ),
             source=FailureClassificationSource.EXPLICIT,
         )
+    inspection_failure = inspection_process_failure(
+        capture.command, stdout=capture.stdout, exit_code=capture.exit_code
+    )
+    if inspection_failure is not None and (
+        supervised_result is None
+        or supervised_result.agent_failure == inspection_failure.error_code
+    ):
+        if supervised_result is not None and (
+            supervised_result.cancel_requested
+            or supervised_result.deadline_reached
+            or supervised_result.checkpoint_reason is not None
+            or supervised_result.persistence_status is PersistenceStatus.FAILED
+            or supervised_result.supervisor_status is SupervisorStatus.FAILED
+        ):
+            # The lease retains the worker refusal on its own dimension. Failed
+            # host evidence or termination cannot receive its no-fault exemption.
+            return _supervised_completion_failure(
+                replace(supervised_result, agent_failure=None), operation=operation
+            )
+        return FailureClassification(
+            failure=inspection_failure,
+            source=FailureClassificationSource.EXPLICIT,
+        )
     if (
         supervised_result is not None
         and supervised_result.agent_failure
@@ -574,6 +606,56 @@ def _harness_failure(
         ),
         source=FailureClassificationSource.EXPLICIT,
     )
+
+
+def _candidate_review_refusal(
+    task: PowWowTaskSpec, refusal: CandidateReviewUnavailable
+) -> PowWowTaskResult:
+    return PowWowTaskResult(
+        task_name=task.task_name,
+        role=task.role,
+        status="failed",
+        summary=f"Candidate review unavailable: {refusal.reason}",
+        risks=(refusal.reason,),
+        artifacts=(
+            PowWowArtifact(
+                artifact_type="candidate_review_unavailable",
+                schema_version="candidate_review_unavailable.v1",
+                task_name=task.task_name,
+                content={"cause": refusal.cause.value, "reason": refusal.reason},
+            ),
+        ),
+        failure=expected_failure(
+            TerminalOutcome.REVIEW_UNAVAILABLE,
+            operation=f"candidate_review.{refusal.cause.value}",
+            message=refusal.reason,
+        ),
+    )
+
+
+def _request_bound_refusal(
+    command: Sequence[str], cwd: Path, error: CodexInspectionRequestTooLarge
+) -> tuple[CommandRunCapture, SupervisedCommandResult]:
+    capture = CommandRunCapture(
+        command=shlex.join(command), cwd=str(cwd), stdout="", stderr=str(error), exit_code=125
+    )
+    # No model or supervisor started. Preserve the structural host refusal
+    # without inventing a worker transcript or a successful persistence event.
+    result = SupervisedCommandResult(
+        capture=capture,
+        deadline_reached=False,
+        cancel_requested=False,
+        transcript_artifact_id=None,
+        checkpoint_id=None,
+        checkpoint_artifact_ids=(),
+        checkpoint_reason=None,
+        preserve_worktree=True,
+        event_count=0,
+        agent_status=AgentStatus.PENDING,
+        agent_failure=TerminalOutcome.REVIEW_UNAVAILABLE,
+        agent_failure_category=FailureCategory.INFRASTRUCTURE,
+    )
+    return capture, result
 
 
 def _failed_cli_task(
@@ -1108,6 +1190,18 @@ class _WorktreePowWowExecutorBase:
         payload: dict[str, Any] = {}
         failure: FailureV1 | None = None
         delegate_attempts = 0
+        from ..work_units.plan_evidence import PLAN_REPORT_INSTRUCTION, observe_local_plan_source
+
+        task_id = (context.task_ids_by_name or {}).get(task.task_name)
+        execution_subject = {
+            "intent_id": context.dispatch_intent_id,
+            "task_id": task_id,
+            "source_revision": (
+                observe_local_plan_source(target_project.expanded_path)
+                if PLAN_REPORT_INSTRUCTION in prompt and context.dispatch_intent_id and task_id
+                else None
+            ),
+        }
         for attempt in range(2):
             delegate_attempts = attempt + 1
             attempt_prompt = prompt
@@ -1161,6 +1255,7 @@ class _WorktreePowWowExecutorBase:
             task_name=task.task_name,
             content={
                 "schema_version": "delegated_task_run.v2",
+                "execution_subject": execution_subject,
                 "mode": "delegate",
                 "tier": task.judgment.tier.value,
                 "model": slot.model,
@@ -1963,7 +2058,14 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 status = "TIMED_OUT"
             else:
                 status = "FAILED"
-        inferred_failure = classify_failure(f"{capture.stderr}\n{capture.stdout}")
+        inspection_failure = inspection_process_failure(
+            capture.command, stdout=capture.stdout, exit_code=capture.exit_code
+        )
+        inferred_failure = (
+            TerminalOutcome(inspection_failure.terminal_outcome)
+            if inspection_failure is not None
+            else classify_failure(f"{capture.stderr}\n{capture.stdout}")
+        )
         agent_status = (
             supervised_result.agent_status.value
             if supervised_result
@@ -2038,6 +2140,14 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             status=status,
             timeout_seconds=self.timeout_seconds,
         )
+        if (
+            inspection_failure is not None
+            and agent_failure == inspection_failure.error_code
+            and failure_category(agent_failure) is not None
+        ):
+            result["agent_failure_record"] = inspection_failure.to_dict()
+            if status == "FAILED":
+                error = inspection_failure.message
         if completion_failure is not None:
             error = completion_failure.failure.message
         complete_command = CompleteExecutionLease(
@@ -2389,6 +2499,8 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                         ),
                         None,
                     )
+            except CodexInspectionRequestTooLarge as exc:
+                return _request_bound_refusal(command, cwd, exc)
             except Exception as exc:  # noqa: BLE001 - fail the process closed
                 return (
                     CommandRunCapture(
@@ -2451,6 +2563,8 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                             task_contract=task_contract,
                         )
                     )
+        except CodexInspectionRequestTooLarge as exc:
+            return _request_bound_refusal(command, cwd, exc)
         except Exception as exc:  # noqa: BLE001 - convert supervisor failure to recovery state
             error = f"streaming supervisor failed: {type(exc).__name__}: {exc}"
             # The allocation can disappear before the process starts, so the
@@ -2661,6 +2775,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         worktree: WorktreeAllocation | None,
         changed_files: tuple[str, ...] = (),
         diff_summary: Mapping[str, Any] | None = None,
+        candidate_review: CandidateReviewView | None = None,
     ) -> PowWowTaskResult | None:
         if context.pairing_assignment_id is not None and task.judgment is not None:
             if failure_reason == "usage_limit" and context.dispatch_intent_id:
@@ -2693,6 +2808,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 context,
                 dependency_results=dependency_results,
                 dependency_compactor=self.dependency_compactor,
+                candidate_review=candidate_review,
                 audit_context_block=self._audit_context_block_for(
                     task,
                     target_project=target_project,
@@ -3100,6 +3216,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         task: PowWowTaskSpec,
         context: PowWowExecutionContext,
         dependency_results: Sequence[PowWowTaskResult] = (),
+        candidate_results: Sequence[PowWowTaskResult] = (),
         worktree: WorktreeAllocation,
         cleanup_worktree: bool = True,
     ) -> PowWowTaskResult:
@@ -3137,6 +3254,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         reviewed_commit_sha = (
             run_git_command_for_output(worktree_path, ("rev-parse", "HEAD")).strip()
             if is_review
+            and self._resolve_task_dispatch_kind(task, context) is not DispatchKind.CODE
             else None
         )
         if frontier is FrontierHarness.CODEX and not self._has_valid_codex_authentication():
@@ -3177,6 +3295,41 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     message=message,
                 ),
             )
+        candidate: CandidateReviewReady | None = None
+        if is_review and self._resolve_task_dispatch_kind(task, context) is DispatchKind.CODE:
+            prepared = prepare_candidate_review(
+                context=context,
+                pow_wow_id=pow_wow_id,
+                review_task_name=task.task_name,
+                dependencies=tuple(candidate_results),
+                repository=worktree_path,
+                source_repository=source_repo,
+            )
+            if isinstance(prepared, CandidateReviewUnavailable):
+                return _candidate_review_refusal(task, prepared)
+            review_task_id = self._resolve_execution_task_id(
+                pow_wow_id=pow_wow_id,
+                task=task,
+                context=worktree_context,
+            )
+            persisted = persist_candidate_review(
+                prepared,
+                pow_wow_id=pow_wow_id,
+                review_task_id=review_task_id,
+                coordination_command=self.coordination_command,
+            )
+            if isinstance(persisted, CandidateReviewUnavailable):
+                return _candidate_review_refusal(task, persisted)
+            candidate = persisted
+            reviewed_commit_sha = candidate.view.source.commit
+            if review_task_id is not None:
+                worktree_context = replace(
+                    worktree_context,
+                    task_ids_by_name={
+                        **(worktree_context.task_ids_by_name or {}),
+                        task.task_name: review_task_id,
+                    },
+                )
         launch_decision = self._frontier_launch_decision(
             pow_wow_id=pow_wow_id,
             target_project=target_project,
@@ -3208,6 +3361,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                         target_project=target_project,
                         repo_path=worktree_path,
                     ),
+                    candidate_review=candidate.view if candidate else None,
                 )
         command = self._build_agent_cli_command(
             frontier,
@@ -3302,9 +3456,16 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                     worktree=worktree,
                     changed_files=changed_files,
                     diff_summary=diff_summary,
+                    candidate_review=candidate.view if candidate else None,
                 )
                 if fallback_result is not None:
-                    return fallback_result
+                    return replace(
+                        fallback_result,
+                        artifacts=(
+                            *((candidate.artifact,) if candidate else ()),
+                            *fallback_result.artifacts,
+                        ),
+                    )
             declared_verification = self._select_verification_commands(target_project)
             if declared_verification and _allows_task_completion(
                 command_capture, supervised_result
@@ -3477,6 +3638,14 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             "model": model,
             "is_review": is_review,
             "launch_decision": _launch_decision_payload(launch_decision),
+            "candidate_review_evidence": (
+                {
+                    "artifact_id": candidate.artifact.persisted_artifact_id,
+                    "view_sha256": candidate.artifact.content["view_sha256"],
+                }
+                if candidate
+                else None
+            ),
             "agent_session": _inspection_session_metadata(harness, posture),
             "spawn_posture": describe_posture(posture),
             "permitted_capabilities": list(self._task_spawn_authority(task).to_names()),
@@ -3555,7 +3724,9 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                         ),
                         "task_id": execution_attempt.task_id if execution_attempt else None,
                         "reviewed_commit_sha": reviewed_commit_sha,
-                        "base_sha": context.review_base_sha or worktree.head_sha,
+                        "base_sha": candidate.view.source.base
+                        if candidate
+                        else context.review_base_sha or worktree.head_sha,
                         "attempt_number": attempt_number,
                         "completion_status": (
                             ReviewCompletionStatus.COMPLETED.value
@@ -3580,6 +3751,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             verification_output=verification_output,
             risks=tuple(risks),
             artifacts=(
+                *((candidate.artifact,) if candidate else ()),
                 *protected_verification_artifacts,
                 PowWowArtifact(
                     artifact_type="worktree_allocation",
@@ -4183,6 +4355,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
         task: PowWowTaskSpec,
         context: PowWowExecutionContext,
         dependency_results: Sequence[PowWowTaskResult],
+        candidate_results: Sequence[PowWowTaskResult],
         code_worktrees: dict[str, _CodeWorktreeLease],
         code_worktree_lock: threading.Lock,
     ) -> PowWowTaskResult:
@@ -4373,6 +4546,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
             task=task,
             context=context,
             dependency_results=dependency_results,
+            candidate_results=candidate_results,
             worktree=lease.allocation,
             cleanup_worktree=False,
         )
@@ -4504,6 +4678,16 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                         task=task,
                         context=context,
                         dependency_results=tuple(resolved_deps),
+                        # Source evidence follows host-owned worktree history,
+                        # independently of the declared model-prose visibility.
+                        candidate_results=tuple(
+                            result
+                            for name, result in results.items()
+                            if self._resolve_task_dispatch_kind(task_by_name[name], context)
+                            is DispatchKind.CODE
+                            and self._resolve_task_worktree_group(task_by_name[name])
+                            == self._resolve_task_worktree_group(task)
+                        ),
                         code_worktrees=code_worktrees,
                         code_worktree_lock=code_worktree_lock,
                     )
@@ -5076,6 +5260,7 @@ class CliPowWowExecutor(_WorktreePowWowExecutorBase):
                 task=re_review_task,
                 context=context,
                 dependency_results=re_review_dependencies,
+                candidate_results=(revision_result,),
                 worktree=lease.allocation,
                 cleanup_worktree=False,
             )

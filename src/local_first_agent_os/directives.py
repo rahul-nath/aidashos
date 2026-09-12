@@ -10,10 +10,10 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any, cast
 
+from .agent_query_retirement import RETIRED_AGENT_QUERY_ALIASES, retired_agent_query_alias
 from .constants import DEFAULT_DISPATCHER_NAME
 from .contracts import (
     GRAPH_SUBCOMMANDS,
-    AgentHarness,
     DirectiveSpec,
     GraphSubcommand,
     ModelRole,
@@ -109,15 +109,8 @@ DISPATCH_ALIAS = "/dispatch"
 REVIEW_MERGE_ALIAS = "/review-merge"
 APPROVE_MERGE_ALIAS = "/approve-merge"
 
-AGENT_QUERY_ALIASES: dict[str, AgentHarness] = {
-    "/claude": AgentHarness.CLAUDE_CODE,
-    "/cc": AgentHarness.CLAUDE_CODE,
-    "/codex": AgentHarness.CODEX_CLI,
-}
-
-# Unioned rather than listed, so adding a harness alias above cannot leave the
-# help surface calling it unrecognized.
-TOP_LEVEL_DIRECTIVES = set(AGENT_QUERY_ALIASES) | {
+# Retired aliases remain recognized so operators receive their explicit refusal.
+TOP_LEVEL_DIRECTIVES = set(RETIRED_AGENT_QUERY_ALIASES) | {
     "/start",
     "/stop",
     "/status",
@@ -254,6 +247,8 @@ class DirectiveParser(Parser):
         self.default_max_window_tokens = int(default_window or 32768)
 
     def parse(self, raw: str) -> DirectiveSpec:
+        if alias := retired_agent_query_alias(raw):
+            return DirectiveSpec(raw=raw, action="agent_query", alias=alias)
         command, tail = self._split(raw)
         if not command.startswith("/"):
             raise ValueError(
@@ -289,8 +284,6 @@ class DirectiveParser(Parser):
         if command in {"/ocr", "/hard-ocr"}:
             role = ModelRole.HARD_OCR if command == "/hard-ocr" else ModelRole.OCR
             return self._parse_ocr(raw, tail, alias=command, model_role=role)
-        if command in AGENT_QUERY_ALIASES:
-            return self._parse_agent_query(raw, tail, alias=command)
         if command == "/send-to-wf":
             return self._parse_send_to_wf(raw, tail)
         if command == "/done":
@@ -422,18 +415,6 @@ class DirectiveParser(Parser):
             alias="/chrome",
             chrome_action=action,
             chrome_args=tuple(tail[1:]),
-        )
-
-    def _parse_agent_query(self, raw: str, tail: list[str], *, alias: str) -> DirectiveSpec:
-        query = self._truncate_text_to_tail(tail)
-        if not query:
-            raise ValueError(f"{alias} requires a query, for example {alias} explain this repo.")
-        return DirectiveSpec(
-            raw=raw,
-            action="agent_query",
-            alias=alias,
-            agent_harness=AGENT_QUERY_ALIASES[alias],
-            query=query,
         )
 
     def _parse_send_to_wf(self, raw: str, tail: list[str]) -> DirectiveSpec:

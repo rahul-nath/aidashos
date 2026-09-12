@@ -284,18 +284,27 @@ def test_done_status_alone_does_not_prove_settled_adoption_readiness() -> None:
     assert "recorded artifacts" in (adoption.reason or "")
 
 
-@pytest.mark.parametrize("status", [
-    DispatchIntentStatus.PENDING, DispatchIntentStatus.CLAIMED, DispatchIntentStatus.IN_PROGRESS,
-])
+@pytest.mark.parametrize(
+    "status",
+    [
+        DispatchIntentStatus.PENDING,
+        DispatchIntentStatus.CLAIMED,
+        DispatchIntentStatus.IN_PROGRESS,
+    ],
+)
 def test_active_dispatch_preview_matches_the_adoption_boundary(status) -> None:
     view = _view(
         status=WorkUnitStatus.BLOCKED,
         blocking=BlockingCondition(kind="BLOCKED_MILESTONE", detail="", milestone_keys=("1",)),
-        milestones=(_milestone(
-            "1", status=MilestoneExecutionStatus.BLOCKED,
-            failure_code=DISPATCH_WAIT_FAILURE_CODE,
-            dispatch_status=status, dispatch_intent_id="intent-1",
-        ),),
+        milestones=(
+            _milestone(
+                "1",
+                status=MilestoneExecutionStatus.BLOCKED,
+                failure_code=DISPATCH_WAIT_FAILURE_CODE,
+                dispatch_status=status,
+                dispatch_intent_id="intent-1",
+            ),
+        ),
     )
     adoption = _find(next_commands_for_view(view).commands, "adopt_settled_work_unit_dispatch")
     assert adoption.status is NextCommandStatus.REFUSED

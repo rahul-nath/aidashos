@@ -95,6 +95,7 @@ def _refused_local_task(
             target_project_read_only=False,
         ),
         dependency_results=(),
+        candidate_results=(),
         code_worktrees={},
         code_worktree_lock=threading.Lock(),
     )

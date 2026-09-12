@@ -382,12 +382,8 @@ class Staffing:
     solo: Bench
     work_unit_pairing: PairingSelection = field(default_factory=AutoRanked)
     work_unit_pairing_overrides: Mapping[str, PairingSelection] = field(default_factory=dict)
-    direct_query_models: Mapping[Harness, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for harness, model in self.direct_query_models.items():
-            if harness not in {Harness.CODEX, Harness.CLAUDE} or not model.strip():
-                raise ValueError("direct queries require a frontier harness and nonempty model")
         if self.pairings.get(self.seated.name) is not self.seated:
             raise ValueError(f"seated pairing {self.seated.name!r} is not among the declared ones")
         for pairing in self.pairings.values():
@@ -888,11 +884,6 @@ def load_staffing(config_path: Path) -> Staffing:
     overrides = data.get("work_unit_pairing_overrides", {})
     if not isinstance(overrides, dict) or any(not key.strip() for key in overrides):
         raise ValueError("work_unit_pairing_overrides must map nonempty WorkUnit IDs to policies")
-    query_models = data.get("direct_query_models", {})
-    if not isinstance(query_models, dict) or any(
-        not isinstance(model, str) for model in query_models.values()
-    ):
-        raise ValueError("direct_query_models must map frontier harness names to model strings")
     return Staffing(
         pairings=pairings,
         seated=_seated_pairing(data, pairings),
@@ -903,7 +894,6 @@ def load_staffing(config_path: Path) -> Staffing:
         work_unit_pairing_overrides={
             key: pairing_selection_from_payload(value) for key, value in overrides.items()
         },
-        direct_query_models={Harness(name): model for name, model in query_models.items()},
     )
 
 

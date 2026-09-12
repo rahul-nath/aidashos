@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from host_test_scope import require_uncontained_scope
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import Server
 from websockets.exceptions import ConnectionClosed
@@ -240,7 +241,11 @@ class _FakeBoundary:
 
 
 def _fixture_worker(repository: Path) -> CodexToolWorker:
-    """The local double replaces only the native boundary at this test seam."""
+    """The native worker is a double; the real host TCP relay remains under test."""
+    require_uncontained_scope(
+        reason="Codex host relay tests require an uncontained loopback listener",
+        required_flag="LOCAL_AGENT_REQUIRE_CODEX_HOST_TESTS",
+    )
     return CodexToolWorker(
         cast(ReadOnlyToolWorker, _FakeBoundary(repository)), "/bin/false", _AUTHORITY
     )
@@ -391,6 +396,10 @@ def test_non_utf8_file_is_a_tool_denial(tmp_path):
 
 
 def test_real_codex_worker_read_port(tmp_path):
+    require_uncontained_scope(
+        reason="Native Codex/SRT host integration cannot run inside a verification child",
+        required_flag="LOCAL_AGENT_REQUIRE_CODEX_HOST_TESTS",
+    )
     root = os.environ.get("LOCAL_AGENT_SRT_PROBE_ROOT")
     node = os.environ.get("LOCAL_AGENT_SRT_PROBE_NODE")
     if platform.system() != "Darwin" or not root or not node:

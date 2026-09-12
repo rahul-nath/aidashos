@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import json
+import shlex
 import subprocess
 import tomllib
 from pathlib import Path
@@ -40,12 +41,7 @@ from local_first_agent_os.pow_wow import run_coordination_command
 from local_first_agent_os.session_memory import SessionMemoryStore
 from local_first_agent_os.settings import get_settings
 from local_first_agent_os.workflow import WorkflowEngine
-from local_first_agent_os.workflow.engine import _build_no_ready_milestone_guidance
 from local_first_agent_os.workflow.knowledge import KnowledgeWorkflowMixin
-from local_first_agent_os.workflow.saga_support import (
-    build_approved_gawd_dispatch_prompt,
-    find_existing_dispatch_intent_for_source,
-)
 
 
 def stub_session_memory(monkeypatch, context: str = "") -> None:
@@ -1469,8 +1465,13 @@ def test_try_milestone_routes_checkpointed_failure_to_recovery(runtime, tmp_path
         settings=runtime.settings,
     )
 
-    retained_intent = find_existing_dispatch_intent_for_source(runtime.settings, source)
-    assert retained_intent is not None
+    retained_intent = next(
+        row
+        for row in run_coordination_command(["list_dispatch_intents"], settings=runtime.settings)[
+            "intents"
+        ]
+        if row["intent_id"] == intent["intent_id"]
+    )
     assert retained_intent["status"] == "PAUSED"
 
     event = normalize_scheduled_event(
@@ -1532,7 +1533,7 @@ def test_try_milestone_retries_only_the_most_recent_terminal_milestone(runtime, 
     assert payload["resolution"]["milestone_id"] == "newer-failure"
     assert payload["resolution"]["previous_status"] == "FAILED"
     assert payload["milestone"]["status"] == "PENDING"
-    assert payload["next_step"] == "pi /approve-most-recent"
+    assert payload["next_step"] == "agent-ledger list_work_units"
 
     older = run_coordination_command(
         ["get_saga_milestone", "older-failure"], settings=runtime.settings
@@ -1875,6 +1876,9 @@ def test_a_repeated_ingest_reports_already_ingested(runtime, tmp_path, monkeypat
     assert second_payload["status"] == "already_ingested"
     assert second_payload["replayed"] is True
     assert second_payload["saga_id"] == first_payload["saga_id"]
+    expected_next_command = ["agent-ledger", "compile_design_doc", first_payload["finalized_path"]]
+    assert shlex.split(first_payload["next_step"]) == expected_next_command
+    assert shlex.split(second_payload["next_step"]) == expected_next_command
     # The read-back is the point: a bare refusal would not say where it stands.
     assert [item["milestone_id"] for item in second_payload["saga_milestones"]] == [
         item["milestone_id"] for item in first_payload["saga_milestones"]
@@ -1965,7 +1969,7 @@ def test_start_new_project_ingests_draft_and_finalizes(runtime, tmp_path, monkey
     )
     runtime.settings.coordination_root = tmp_path / "coordination-root"
     runtime.settings.saga_executor_backend = "dry_run"
-    draft_file = create_sparse_gawd_draft_file(tmp_path)
+    draft_file = create_sparse_gawd_draft_file(tmp_path / "draft with spaces")
     draft_file.path.write_text(
         INTAKE_DRAFT_BODY,
         encoding="utf-8",
@@ -1974,7 +1978,7 @@ def test_start_new_project_ingests_draft_and_finalizes(runtime, tmp_path, monkey
         source_type=SourceType.MANUAL,
         workspace_id=WorkspaceId.GENERAL.value,
         event_type="pi.directive",
-        payload={"directive": f"/start /new-project {draft_file.path}"},
+        payload={"directive": f"/start /new-project {shlex.quote(str(draft_file.path))}"},
     )
 
     result = WorkflowEngine(runtime).model_directive(event)
@@ -1986,6 +1990,11 @@ def test_start_new_project_ingests_draft_and_finalizes(runtime, tmp_path, monkey
     permissions_path = Path(payload["permissions_path"])
     assert payload["status"] == "finalized_pending_operator_approval"
     assert payload["execution_started"] is False
+    assert shlex.split(payload["next_step"]) == [
+        "agent-ledger",
+        "compile_design_doc",
+        str(finalized_path),
+    ]
     assert payload["approval_required"] is True
     assert payload["durable_workflow_plan"]["schema_version"] == "durable_workflow_plan.v1"
     assert payload["durable_workflow_plan"]["steps"]
@@ -2052,390 +2061,6 @@ def test_start_new_project_ingests_draft_and_finalizes(runtime, tmp_path, monkey
         "durable_workflow_plan",
         "durable_workflow_plan_model_refinement",
     } <= artifact_types
-
-
-def _legacy_start_approved_gawd_approves_and_enqueues_once(runtime, tmp_path) -> None:
-    runtime.settings.coordination_root = tmp_path / "coordination-root"
-    target_path = tmp_path / "target"
-    target_path.mkdir()
-    write_linked_projects_config(runtime.settings.config_dir, target_path)
-    saga = run_coordination_command(
-        ["create_saga", "Build from finalized GAWD"],
-        settings=runtime.settings,
-    )
-    doc = run_coordination_command(
-        [
-            "create_gawd_doc",
-            "Build from finalized GAWD",
-            "--saga-id",
-            saga["saga_id"],
-            "--constraints",
-            "No deploy.",
-            "--success-criteria",
-            "Tests pass.",
-            "--acceptance-criteria",
-            "Implementation stays in scope.",
-            "--task-graph-json",
-            '{"schema_version":"new_project_task_graph.v1"}',
-        ],
-        settings=runtime.settings,
-    )
-    gawd_doc_id = doc["gawd_doc_id"]
-    gated_milestone_id = f"{saga['saga_id']}:m01_gated"
-    run_coordination_command(
-        [
-            "create_saga_milestone",
-            saga["saga_id"],
-            "First gated milestone",
-            "--sequence",
-            "1",
-            "--milestone-id",
-            gated_milestone_id,
-            "--gawd-doc-id",
-            gawd_doc_id,
-            "--required-artifact",
-            "test_log",
-            "--approval-required",
-        ],
-        settings=runtime.settings,
-    )
-    directive = f"/start /approved-gawd {gawd_doc_id} --target-project target"
-    first_event = normalize_scheduled_event(
-        source_type=SourceType.MANUAL,
-        workspace_id=WorkspaceId.GENERAL.value,
-        event_type="pi.directive",
-        payload={"directive": directive},
-    )
-
-    first_result = WorkflowEngine(runtime).model_directive(first_event)
-
-    assert first_result.status == WorkflowStatus.COMPLETED
-    first_artifact = next(a for a in first_result.artifacts if str(a.role) == "directive_result")
-    first_payload = runtime.artifact_store.read_json(first_artifact.artifact_id)
-    assert first_payload["status"] == "approved_and_enqueued"
-    assert first_payload["execution_enqueued"] is True
-    assert first_payload["execution_started"] is False
-    ready_milestone_id = first_payload["ready_milestone"]["milestone_id"]
-    assert ready_milestone_id == gated_milestone_id
-    assert first_payload["milestone_approval"]["resolution"]["status"] == "APPROVED"
-    assert first_payload["saga_milestones"][0]["milestone_id"] == ready_milestone_id
-    assert first_payload["dispatch_source"] == (
-        f"approved_gawd:{gawd_doc_id}:milestone:{ready_milestone_id}"
-    )
-    assert first_payload["target_project_id"] == "target"
-    assert first_payload["dispatch_intent"]["target_project_id"] == "target"
-    assert "Dispatch intent:" in first_payload["report"]
-    assert "Intent status: PENDING" in first_payload["report"]
-    assert "Next: pi /dispatch" in first_payload["report"]
-
-    second_event = normalize_scheduled_event(
-        source_type=SourceType.MANUAL,
-        workspace_id=WorkspaceId.GENERAL.value,
-        event_type="pi.directive",
-        payload={"directive": directive},
-    )
-    second_result = WorkflowEngine(runtime).model_directive(second_event)
-    second_artifact = next(a for a in second_result.artifacts if str(a.role) == "directive_result")
-    second_payload = runtime.artifact_store.read_json(second_artifact.artifact_id)
-    assert second_payload["status"] == "already_enqueued"
-    assert second_payload["dispatch_intent_id"] == first_payload["dispatch_intent_id"]
-
-    with tx() as conn:
-        doc_status = conn.execute(
-            "SELECT status FROM gawd_docs WHERE gawd_doc_id = ?",
-            (gawd_doc_id,),
-        ).fetchone()["status"]
-        dispatch_intents = conn.execute(
-            "SELECT tier, kind, source, status, prompt, target_project_id FROM dispatch_intents"
-        ).fetchall()
-        milestones = conn.execute(
-            "SELECT milestone_id, status, required_artifacts_json FROM saga_milestones"
-        ).fetchall()
-        milestone_approvals = conn.execute(
-            """
-            SELECT request_type, status, payload_json
-            FROM approval_requests
-            WHERE saga_id = ?
-            """,
-            (saga["saga_id"],),
-        ).fetchall()
-
-    assert doc_status == "APPROVED"
-    assert len(dispatch_intents) == 1
-    intent = dispatch_intents[0]
-    assert (intent["tier"], intent["kind"], intent["source"], intent["status"]) == (
-        "senior",
-        "code",
-        f"approved_gawd:{gawd_doc_id}:milestone:{ready_milestone_id}",
-        "PENDING",
-    )
-    assert "Implement the next approved saga milestone." in intent["prompt"]
-    assert ready_milestone_id in intent["prompt"]
-    assert intent["target_project_id"] == "target"
-    assert [
-        (row["milestone_id"], row["status"], row["required_artifacts_json"]) for row in milestones
-    ] == [(ready_milestone_id, "PENDING", '["test_log"]')]
-    assert len(milestone_approvals) == 1
-    approval = milestone_approvals[0]
-    assert (approval["request_type"], approval["status"]) == ("GENERAL", "APPROVED")
-    assert ready_milestone_id in approval["payload_json"]
-
-
-def _legacy_start_approved_gawd_requires_target_project(runtime, tmp_path) -> None:
-    runtime.settings.coordination_root = tmp_path / "coordination-root"
-    target_path = tmp_path / "target"
-    target_path.mkdir()
-    write_linked_projects_config(runtime.settings.config_dir, target_path)
-    saga = run_coordination_command(
-        ["create_saga", "Build from finalized GAWD"],
-        settings=runtime.settings,
-    )
-    doc = run_coordination_command(
-        [
-            "create_gawd_doc",
-            "Build from finalized GAWD",
-            "--saga-id",
-            saga["saga_id"],
-            "--success-criteria",
-            "Tests pass.",
-            "--task-graph-json",
-            '{"schema_version":"new_project_task_graph.v1"}',
-        ],
-        settings=runtime.settings,
-    )
-    event = normalize_scheduled_event(
-        source_type=SourceType.MANUAL,
-        workspace_id=WorkspaceId.GENERAL.value,
-        event_type="pi.directive",
-        payload={"directive": f"/start /approved-gawd {doc['gawd_doc_id']}"},
-    )
-
-    result = WorkflowEngine(runtime).model_directive(event)
-
-    assert result.status == WorkflowStatus.FAILED_PERMANENT
-    artifact = next(a for a in result.artifacts if str(a.role) == "directive_result")
-    payload = runtime.artifact_store.read_json(artifact.artifact_id)
-    assert "requires an explicit target project" in payload["error"]
-
-    with tx() as conn:
-        dispatch_count = conn.execute("SELECT COUNT(*) AS count FROM dispatch_intents").fetchone()[
-            "count"
-        ]
-        doc_status = conn.execute(
-            "SELECT status FROM gawd_docs WHERE gawd_doc_id = ?",
-            (doc["gawd_doc_id"],),
-        ).fetchone()["status"]
-    assert dispatch_count == 0
-    assert doc_status == "DRAFT"
-
-
-def _legacy_start_approved_gawd_uses_target_embedded_during_intake(runtime, tmp_path) -> None:
-    runtime.settings.coordination_root = tmp_path / "coordination-root"
-    target_path = tmp_path / "target"
-    target_path.mkdir()
-    write_linked_projects_config(runtime.settings.config_dir, target_path)
-    saga = run_coordination_command(
-        ["create_saga", "Build against intake target"],
-        settings=runtime.settings,
-    )
-    doc = run_coordination_command(
-        [
-            "create_gawd_doc",
-            "Build against intake target",
-            "--saga-id",
-            saga["saga_id"],
-            "--success-criteria",
-            "Tests pass.",
-            "--task-graph-json",
-            '{"schema_version":"new_project_task_graph.v1","target_project_id":"target"}',
-        ],
-        settings=runtime.settings,
-    )
-    event = normalize_scheduled_event(
-        source_type=SourceType.MANUAL,
-        workspace_id=WorkspaceId.GENERAL.value,
-        event_type="pi.directive",
-        payload={"directive": f"/start /approved-gawd {doc['gawd_doc_id']}"},
-    )
-
-    result = WorkflowEngine(runtime).model_directive(event)
-
-    artifact = next(a for a in result.artifacts if str(a.role) == "directive_result")
-    payload = runtime.artifact_store.read_json(artifact.artifact_id)
-    assert result.status == WorkflowStatus.COMPLETED
-    assert payload["status"] == "approved_and_enqueued"
-    assert payload["target_project_id"] == "target"
-    assert payload["dispatch_intent"]["target_project_id"] == "target"
-
-
-def _legacy_approve_most_recent_resolves_gawd_target_and_enqueues(runtime, tmp_path) -> None:
-    runtime.settings.coordination_root = tmp_path / "coordination-root"
-    target_path = tmp_path / "target"
-    target_path.mkdir()
-    write_linked_projects_config(runtime.settings.config_dir, target_path)
-    saga = run_coordination_command(["create_saga", "Shortcut approval"], settings=runtime.settings)
-    doc = run_coordination_command(
-        [
-            "create_gawd_doc",
-            "Shortcut approval",
-            "--saga-id",
-            saga["saga_id"],
-            "--success-criteria",
-            "Tests pass.",
-            "--task-graph-json",
-            '{"schema_version":"new_project_task_graph.v1"}',
-        ],
-        settings=runtime.settings,
-    )
-    milestone_id = f"{saga['saga_id']}:m01"
-    run_coordination_command(
-        [
-            "create_saga_milestone",
-            saga["saga_id"],
-            "First gated milestone",
-            "--sequence",
-            "1",
-            "--milestone-id",
-            milestone_id,
-            "--gawd-doc-id",
-            doc["gawd_doc_id"],
-            "--approval-required",
-        ],
-        settings=runtime.settings,
-    )
-    prior_intent = run_coordination_command(
-        [
-            "submit_dispatch_intent",
-            "senior",
-            "Historical target provenance",
-            "--kind",
-            "code",
-            "--target-project-id",
-            "target",
-            "--source",
-            f"approved_gawd:{doc['gawd_doc_id']}:milestone:completed-prior",
-        ],
-        settings=runtime.settings,
-    )
-    event = normalize_scheduled_event(
-        source_type=SourceType.MANUAL,
-        workspace_id=WorkspaceId.GENERAL.value,
-        event_type="pi.directive",
-        payload={"directive": "/approve-most-recent"},
-    )
-
-    result = WorkflowEngine(runtime).model_directive(event)
-
-    artifact = next(a for a in result.artifacts if str(a.role) == "directive_result")
-    payload = runtime.artifact_store.read_json(artifact.artifact_id)
-    assert result.status == WorkflowStatus.COMPLETED, payload
-    assert payload["requested_action"] == "approve_most_recent"
-    assert payload["resolution"]["saga_id"] == saga["saga_id"]
-    assert payload["resolution"]["milestone_id"] == milestone_id
-    assert payload["gawd_doc_id"] == doc["gawd_doc_id"]
-    assert payload["target_project_id"] == "target"
-    assert payload["resolution"]["target_resolution"] == {
-        "target_project_id": "target",
-        "source": "prior_gawd_dispatch_intents",
-        "intent_ids": [prior_intent["intent_id"]],
-    }
-    assert payload["status"] == "approved_and_enqueued"
-    assert payload["next_step"] == "pi /dispatch"
-
-
-def _legacy_approve_most_recent_refuses_ambiguous_historical_targets(runtime, tmp_path) -> None:
-    runtime.settings.coordination_root = tmp_path / "coordination-root"
-    saga = run_coordination_command(
-        ["create_saga", "Ambiguous shortcut target"], settings=runtime.settings
-    )
-    doc = run_coordination_command(
-        [
-            "create_gawd_doc",
-            "Ambiguous shortcut target",
-            "--saga-id",
-            saga["saga_id"],
-            "--task-graph-json",
-            "{}",
-        ],
-        settings=runtime.settings,
-    )
-    milestone_id = f"{saga['saga_id']}:m01"
-    run_coordination_command(
-        [
-            "create_saga_milestone",
-            saga["saga_id"],
-            "Ambiguous gated milestone",
-            "--sequence",
-            "1",
-            "--milestone-id",
-            milestone_id,
-            "--gawd-doc-id",
-            doc["gawd_doc_id"],
-            "--approval-required",
-        ],
-        settings=runtime.settings,
-    )
-    for target in ("target-a", "target-b"):
-        run_coordination_command(
-            [
-                "submit_dispatch_intent",
-                "senior",
-                f"Historical target {target}",
-                "--kind",
-                "code",
-                "--target-project-id",
-                target,
-                "--source",
-                f"approved_gawd:{doc['gawd_doc_id']}:milestone:prior-{target}",
-            ],
-            settings=runtime.settings,
-        )
-    event = normalize_scheduled_event(
-        source_type=SourceType.MANUAL,
-        workspace_id=WorkspaceId.GENERAL.value,
-        event_type="pi.directive",
-        payload={"directive": "/approve-most-recent"},
-    )
-
-    result = WorkflowEngine(runtime).model_directive(event)
-
-    artifact = next(a for a in result.artifacts if str(a.role) == "directive_result")
-    payload = runtime.artifact_store.read_json(artifact.artifact_id)
-    assert result.status == WorkflowStatus.FAILED_PERMANENT
-    assert "multiple target projects" in payload["error"]
-    approvals = run_coordination_command(
-        ["list_approval_requests", "--saga-id", saga["saga_id"]],
-        settings=runtime.settings,
-    )
-    assert approvals["requests"] == []
-
-
-@pytest.mark.parametrize(
-    "directive",
-    (
-        "/start /approved-gawd historical-doc --target-project target",
-        "/approve-most-recent",
-    ),
-)
-def test_governed_saga_entrypoints_redirect_to_work_units(runtime, directive: str) -> None:
-    event = normalize_scheduled_event(
-        source_type=SourceType.MANUAL,
-        workspace_id=WorkspaceId.GENERAL.value,
-        event_type="pi.directive",
-        payload={"directive": directive},
-    )
-
-    result = WorkflowEngine(runtime).model_directive(event)
-
-    assert result.status == WorkflowStatus.FAILED_PERMANENT
-    artifact = next(a for a in result.artifacts if str(a.role) == "directive_result")
-    payload = runtime.artifact_store.read_json(artifact.artifact_id)
-    assert "standalone saga door for governed work is retired" in payload["error"]
-    assert "agent-ledger compile_design_doc" in payload["error"]
-    with tx() as conn:
-        assert (
-            conn.execute("SELECT COUNT(*) AS count FROM dispatch_intents").fetchone()["count"] == 0
-        )
 
 
 def test_dispatcher_directive_reports_completed_poll_count(runtime, monkeypatch) -> None:
@@ -2744,7 +2369,7 @@ def test_review_merge_hydrates_legacy_packet_without_approving(
     assert [action["action"] for action in approved["next_actions"]] == [
         "merge_exact_approved_commit",
         "complete_milestone_after_merge",
-        "dispatch_next_ready_milestone",
+        "inspect_work_unit_progress",
     ]
     assert "Next required transition: MERGE_APPROVED -> MERGED" in approved["report"]
     # The directive that used to end at "no code was merged by this command" now
@@ -2763,114 +2388,14 @@ def test_review_merge_hydrates_legacy_packet_without_approving(
     assert queued[0].subject.approval_id == approval["approval_id"]
     assert f"then merge exact commit {commit_sha}" in approved["report"]
     assert "complete milestone milestone-3" in approved["report"]
-    assert "Re-run the approved-GAWD path" in approved["report"]
+    assert "agent-ledger list_work_units" in approved["report"]
+    assert "start_work_unit" in approved["report"]
+    assert "pi /start /approved-gawd" not in approved["report"]
     requests = run_coordination_command(
         ["list_approval_requests", "--saga-id", saga["saga_id"]],
         settings=runtime.settings,
     )
     assert requests["requests"][0]["status"] == "APPROVED"
-
-
-def test_no_ready_milestone_reports_merged_dependency_completion_command(
-    tmp_path: Path,
-) -> None:
-    target = tmp_path / "target"
-    target.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "milestone@example.com"],
-        cwd=target,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "config", "user.name", "Milestone Test"],
-        cwd=target,
-        check=True,
-    )
-    (target / "feature.py").write_text("READY = True\n", encoding="utf-8")
-    subprocess.run(["git", "add", "feature.py"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "approved change"], cwd=target, check=True)
-    commit_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=target,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
-
-    guidance = _build_no_ready_milestone_guidance(
-        gawd_doc_id="gawd-1",
-        target_project_id="target",
-        target_project_path=target,
-        coordination_root=tmp_path / "coordination",
-        saga_milestones=[
-            {"milestone_id": "m3", "status": "IN_PROGRESS"},
-            {"milestone_id": "m4", "status": "PENDING", "depends_on": ["m3"]},
-        ],
-        blocked_milestones=[
-            {
-                "milestone_id": "m4",
-                "dependency_ready": False,
-                "approval_ready": False,
-                "depends_on": ["m3"],
-            }
-        ],
-        approved_requests=[
-            {
-                "approval_id": "approval-3",
-                "request_type": "CODE_MERGE",
-                "payload": {
-                    "milestone_id": "m3",
-                    "commit_sha": commit_sha,
-                    "manual_recovery": True,
-                },
-            }
-        ],
-    )
-
-    assert guidance["blocker_details"][0]["unresolved_dependencies"] == [
-        {"milestone_id": "m3", "status": "IN_PROGRESS"}
-    ]
-    assert [action["action"] for action in guidance["next_actions"]] == [
-        "complete_merged_milestone",
-        "dispatch_next_ready_milestone",
-    ]
-    assert guidance["next_step"].startswith("UV_CACHE_DIR=/tmp/uv-cache uv run python")
-    assert "complete_saga_milestone m3" in guidance["report"]
-    assert f"--root {tmp_path / 'coordination'}" in guidance["report"]
-    assert "--outcome MANUAL_RECOVERY_COMPLETION" in guidance["report"]
-    assert commit_sha in guidance["report"]
-    assert "pi /start /approved-gawd gawd-1 --target-project target" in guidance["report"]
-
-
-def test_approved_gawd_dispatch_brief_excludes_redundant_full_task_graph() -> None:
-    graph_sentinel = "full-planner-graph-must-stay-in-the-ledger" * 5_000
-    prompt = build_approved_gawd_dispatch_prompt(
-        {
-            "gawd_doc_id": "gawd-1",
-            "saga_id": "saga-1",
-            "goal": "Build the bounded milestone.",
-            "constraints": ["Do not deploy."],
-            "success_criteria": ["Tests pass."],
-            "acceptance_criteria": ["No scope drift."],
-            "task_graph": {"large_planner_detail": graph_sentinel},
-        },
-        {
-            "milestone_id": "saga-1:m01",
-            "sequence": 1,
-            "name": "Bounded milestone",
-            "description": "Implement only the first milestone.",
-            "entry_criteria": ["Approved worktree."],
-            "exit_criteria": ["Evidence recorded."],
-            "required_artifacts": ["test_log"],
-        },
-    )
-
-    assert "Task graph:" not in prompt
-    assert graph_sentinel not in prompt
-    assert "Durable plan reference:" in prompt
-    assert "saga-1:m01" in prompt
-    assert len(prompt) < 4_000
 
 
 def test_bare_stop_shuts_down_whisper_service(runtime, monkeypatch) -> None:

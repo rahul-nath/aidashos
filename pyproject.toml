@@ -213,6 +213,10 @@ target-version = "py313"
 # left behind, and it makes the format gate fail on every future attachment.
 extend-exclude = ["potential_directions", "docs/handoffs/attachments"]
 
+[tool.ruff.per-file-target-version]
+# Privileged code uses the installed isolated system Python, never the project venv.
+"scripts/verifier_uid/*.py" = "py39"
+
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -12,6 +13,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from host_test_scope import require_uncontained_scope
 
 from local_first_agent_os.process_containment import (
     _command_read_paths,
@@ -219,6 +221,10 @@ def test_read_only_process_cannot_write_its_checkout(tmp_path: Path) -> None:
 
 
 def test_agent_process_cannot_read_the_operator_token(tmp_path: Path) -> None:
+    require_uncontained_scope(
+        reason="operator-token fixture and policy owner must share the same operator identity",
+        required_flag="AIDASHOS_REQUIRE_HOST_CONTAINMENT_TESTS",
+    )
     from local_first_agent_os.operator_identity import operator_token_file
 
     token_file = operator_token_file()
@@ -255,6 +261,10 @@ def test_agent_process_cannot_read_an_undeclared_host_file(tmp_path: Path) -> No
 
 
 def test_only_the_reader_database_endpoint_enters_the_network_boundary(tmp_path: Path) -> None:
+    require_uncontained_scope(
+        reason="reader/writer endpoint isolation needs host-owned listening sockets",
+        required_flag="LOCAL_AGENT_REQUIRE_HOST_NETWORK_TESTS",
+    )
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     with socket.socket() as reader, socket.socket() as writer:
@@ -266,12 +276,23 @@ def test_only_the_reader_database_endpoint_enters_the_network_boundary(tmp_path:
         writer_port = writer.getsockname()[1]
         reader_url = f"postgresql://ledger_reader@127.0.0.1:{reader_port}/ledger"
         overrides = {"LOCAL_AGENT_LEDGER_READER_DATABASE_URL": reader_url}
+        # This oracle uses only stdlib sockets. Its executable and base library
+        # are the declared runtime; it must not load the test runner's venv site.
+        python = str(Path(sys.executable).resolve(strict=True))
 
         def connect(port: int) -> tuple[str, ...]:
             return (
-                sys.executable,
+                python,
+                "-I",
+                "-S",
                 "-c",
-                f"import socket; socket.create_connection(('127.0.0.1', {port}), 1).close()",
+                "import json, socket\n"
+                "try:\n"
+                f"    socket.create_connection(('127.0.0.1', {port}), 1).close()\n"
+                "except OSError as error:\n"
+                "    print(json.dumps({'connected': False, 'errno': error.errno}))\n"
+                "    raise SystemExit(1)\n"
+                "print(json.dumps({'connected': True}))\n",
             )
 
         with contained_frontier_process(
@@ -294,5 +315,9 @@ def test_only_the_reader_database_endpoint_enters_the_network_boundary(tmp_path:
 
     assert environment["AGENT_COORDINATION_DATABASE_URL"] == reader_url
     assert environment["LOCAL_AGENT_COORDINATION_DATABASE_URL"] == reader_url
-    assert reader_result.returncode == 0
-    assert writer_result.returncode != 0
+    assert reader_result.returncode == 0, reader_result.stderr
+    assert json.loads(reader_result.stdout) == {"connected": True}
+    assert writer_result.returncode == 1, writer_result.stderr
+    refused = json.loads(writer_result.stdout)
+    assert refused["connected"] is False
+    assert refused["errno"] in (errno.EPERM, errno.EACCES)

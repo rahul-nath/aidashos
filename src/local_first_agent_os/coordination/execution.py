@@ -11,6 +11,8 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
+
 from local_first_agent_os.constants import (
     AGENT_BRANCH_AUTO_MERGE,
     DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
@@ -19,6 +21,7 @@ from local_first_agent_os.constants import (
 
 from ..contracts import DispatchIntentStatus, LeaseStatus, LedgerEventStatus, TaskStatus
 from .contracts import ExecutionLeaseTerminalStatus
+from .failures import FAILURE_SCHEMA_VERSION, FailureV1
 from .outcomes import (
     AgentStatus,
     ExecutionActivityStatus,
@@ -325,6 +328,30 @@ def complete_execution_lease(
     next_action = result_data.get("next_action")
     if category is not None and str(category) not in FailureCategory._value2member_map_:
         return err("invalid_failure_category", category=category)
+    if "agent_failure_record" in result_data:
+        # The supervised worker dimension is structured evidence. A diagnostic
+        # stderr warning must not replace it when the lease is settled.
+        try:
+            reported_failure = TypeAdapter(FailureV1).validate_json(
+                json.dumps(result_data["agent_failure_record"]), strict=True
+            )
+            reported_outcome = TerminalOutcome(reported_failure.terminal_outcome)
+        except (ValidationError, TypeError, ValueError):
+            return err("invalid_agent_failure_record")
+        reported_category = failure_category(reported_outcome)
+        if (
+            reported_failure.schema_version != FAILURE_SCHEMA_VERSION
+            or reported_failure.error_code != reported_outcome.value
+            or reported_failure.error_code != agent_failure
+            or reported_failure.category is not reported_category
+            or status == ExecutionLeaseTerminalStatus.COMPLETED
+            or agent_status != AgentStatus.FAILED.value
+            or reported_category is None
+            or reported_category.value != category
+        ):
+            return err("invalid_agent_failure_record")
+        if status == ExecutionLeaseTerminalStatus.FAILED:
+            outcome = reported_outcome
     t = now()
     with tx() as c:
         row = c.execute(

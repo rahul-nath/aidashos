@@ -150,6 +150,7 @@ def _route(executor: CliPowWowExecutor, target: LinkedProject, task: PowWowTaskS
         task=task,
         context=_context(target),
         dependency_results=(),
+        candidate_results=(),
         code_worktrees={},
         code_worktree_lock=threading.Lock(),
     )

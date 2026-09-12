@@ -9,9 +9,9 @@ import hashlib
 import json
 import os
 import subprocess
-import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import test_host_verification_receipts
@@ -227,22 +227,84 @@ def test_git_object_installation_never_rewrites_existing_identity(
             assert path.is_symlink()
 
 
+def test_expired_staging_closes_owner_without_preparing_a_launch(
+    gate_fixture: GateFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = []
+    source = tmp_path / "owned-source"
+    source.mkdir()
+    toolchain = tmp_path / "owned-toolchain"
+    toolchain.mkdir()
+
+    class Owner:
+        staging = SimpleNamespace(source=source, toolchain=toolchain)
+
+        def __init__(self, **_arguments):
+            self.closed = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exception):
+            self.close()
+
+        def prepare(self, **_arguments):
+            pytest.fail("expired staging must not contact a closed helper")
+
+        def close(self):
+            if not self.closed:
+                events.append("owner_closed")
+                self.closed = True
+
+    class Staged:
+        toolchain = object()
+
+        def cleanup_after(self, owner):
+            assert owner.closed
+            events.append("staging_cleaned")
+
+    def stage(*_args, **_kwargs):
+        events.append("staged")
+        monkeypatch.setattr(host, "monotonic", lambda: 101.0)
+        return Staged()
+
+    monkeypatch.setattr(host, "monotonic", lambda: 90.0)
+    monkeypatch.setattr(host, "UidVerifierClient", Owner)
+    monkeypatch.setattr(host, "stage_installed_toolchain", stage)
+    subject, lease = host._subject_and_lease(
+        gate_fixture.intent_id, gate_fixture.lease_id, "host-gate-worker"
+    )
+    result = host._observe_gate(
+        host.load_project_center().projects[0],
+        subject,
+        lease,
+        gate_fixture.repository,
+        gate_fixture.commit,
+        gate_fixture.commit,
+        ("must not execute",),
+        100.0,
+        host.VerificationResourcesAbsent(),
+    )
+    assert result == host.VerificationUnavailable(
+        "verification deadline expired during preparation"
+    )
+    assert events == ["staged", "owner_closed", "staging_cleaned"]
+
+
 def test_gate_deadline_retains_only_started_processes(
     gate_fixture: GateFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     repository = gate_fixture.repository
     (repository / "first.py").write_text("import time\ntime.sleep(0.5)\nprint('first completed')\n")
     (repository / "slow.py").write_text(
-        "import time\nprint('slow started', flush=True)\ntime.sleep(10)\n"
+        "import time\nprint('slow started', flush=True)\ntime.sleep(300)\n"
     )
     (repository / "never.py").write_text("raise AssertionError('deadline must prevent launch')\n")
     commit = _commit(repository)
     center = host.load_project_center()
     project = replace(
         center.projects[0],
-        verification_commands=[
-            f"{sys.executable} -I {name}.py" for name in ("first", "slow", "never")
-        ],
+        verification_commands=[f"python -I {name}.py" for name in ("first", "slow", "never")],
     )
     monkeypatch.setattr(host, "load_project_center", lambda: replace(center, projects=(project,)))
     outcome = host.run_registered_verification(
@@ -252,7 +314,7 @@ def test_gate_deadline_retains_only_started_processes(
         source_repository=repository,
         source_commit=commit,
         base_commit=commit,
-        timeout_seconds=3,
+        timeout_seconds=180,
     )
     assert isinstance(outcome, host.VerificationFailed), outcome
     assert len(outcome.captures) == 2

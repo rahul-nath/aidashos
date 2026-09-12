@@ -10,6 +10,8 @@ from threading import Event, Thread
 from typing import Any, cast
 
 import httpx
+import pytest
+from host_test_scope import require_uncontained_scope
 
 from local_first_agent_os import pi_command
 from local_first_agent_os.pi_daemon import (
@@ -18,6 +20,15 @@ from local_first_agent_os.pi_daemon import (
     build_pi_daemon_http_handler,
 )
 from local_first_agent_os.progress_events import emit_progress
+
+
+@pytest.fixture
+def host_pi_tcp() -> None:
+    """The daemon's real HTTP protocol needs the host's listener authority."""
+    require_uncontained_scope(
+        reason="Pi HTTP streaming integration requires a host listener outside a leased gate",
+        required_flag="LOCAL_AGENT_REQUIRE_HOST_NETWORK_TESTS",
+    )
 
 
 class _Settings:
@@ -38,7 +49,7 @@ class _SilentHandler(BaseHTTPRequestHandler):
         return
 
 
-def test_pi_daemon_client_streams_query_events() -> None:
+def test_pi_daemon_client_streams_query_events(host_pi_tcp) -> None:
     captured: dict[str, Any] = {}
 
     def runner(text, **kwargs):
@@ -90,7 +101,7 @@ def test_pi_daemon_client_streams_query_events() -> None:
     ]
 
 
-def test_pi_daemon_projects_in_process_progress_events() -> None:
+def test_pi_daemon_projects_in_process_progress_events(host_pi_tcp) -> None:
     def runner(_text, **_kwargs):
         emit_progress(
             "starting staff turn: review_change",
@@ -126,7 +137,7 @@ def test_pi_daemon_projects_in_process_progress_events() -> None:
     assert projected["tier"] == "staff"
 
 
-def test_pi_daemon_streams_status_while_dispatch_is_blocked() -> None:
+def test_pi_daemon_streams_status_while_dispatch_is_blocked(host_pi_tcp) -> None:
     release = Event()
 
     def runner(_text, **_kwargs):
@@ -173,7 +184,7 @@ def test_pi_daemon_streams_status_while_dispatch_is_blocked() -> None:
         thread.join(timeout=2)
 
 
-def test_pi_client_fails_when_daemon_stream_is_silent() -> None:
+def test_pi_client_fails_when_daemon_stream_is_silent(host_pi_tcp) -> None:
     server = _PiHTTPServer(("127.0.0.1", 0), _SilentHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -212,7 +223,7 @@ def test_pi_client_renders_status_to_stdout(capsys) -> None:
     assert capsys.readouterr().out == "[pi] dispatch active\n"
 
 
-def test_pi_daemon_health_exposes_runtime_backend() -> None:
+def test_pi_daemon_health_exposes_runtime_backend(host_pi_tcp) -> None:
     handler = build_pi_daemon_http_handler(
         lambda *_args, **_kwargs: iter(()),
         lambda result: str(result),
@@ -235,7 +246,7 @@ def test_pi_daemon_health_exposes_runtime_backend() -> None:
     }
 
 
-def test_pi_daemon_exposes_prometheus_metrics() -> None:
+def test_pi_daemon_exposes_prometheus_metrics(host_pi_tcp) -> None:
     handler = build_pi_daemon_http_handler(
         lambda *_args, **_kwargs: iter(()),
         lambda result: str(result),
@@ -255,7 +266,7 @@ def test_pi_daemon_exposes_prometheus_metrics() -> None:
     assert "# HELP" in response.text
 
 
-def test_inspection_directives_bypass_long_running_dispatch_lock() -> None:
+def test_inspection_directives_bypass_long_running_dispatch_lock(host_pi_tcp) -> None:
     dispatch_started = Event()
     release_dispatch = Event()
 
@@ -311,7 +322,7 @@ def test_inspection_directives_bypass_long_running_dispatch_lock() -> None:
         server_thread.join(timeout=2)
 
 
-def test_chained_or_mutating_queries_remain_serialized_behind_dispatch() -> None:
+def test_chained_or_mutating_queries_remain_serialized_behind_dispatch(host_pi_tcp) -> None:
     dispatch_started = Event()
     release_dispatch = Event()
 

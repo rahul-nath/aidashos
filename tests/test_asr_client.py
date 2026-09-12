@@ -86,10 +86,12 @@ def test_dump_transcript_writes_accumulated_lines(
 def test_dump_transcript_returns_none_when_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    transcript_directory = tmp_path / "transcripts"
+    transcript_directory.mkdir()
+    monkeypatch.chdir(transcript_directory)
     assert _dump_transcript([]) is None
     assert _dump_transcript(["  ", ""]) is None
-    assert list(tmp_path.iterdir()) == []
+    assert list(transcript_directory.iterdir()) == []
 
 
 # --- session bounding -------------------------------------------------------

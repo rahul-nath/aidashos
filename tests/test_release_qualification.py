@@ -172,21 +172,35 @@ def test_previous_client_contracts_remain_compatible():
     # compatibility gate or replacing the immutable previous-release fixture.
     retry = current["cli"]["command:request_recovery_staff_review"].pop("argument:retry_of")
     assert retry == {
-        "options": ["--retry-of"], "nargs": None, "required": False,
-        "choices": None, "type": None, "action": "_StoreAction",
+        "options": ["--retry-of"],
+        "nargs": None,
+        "required": False,
+        "choices": None,
+        "type": None,
+        "action": "_StoreAction",
     }
     recovery_input = current["mcp"]["request_recovery_staff_review"]["inputSchema"]
     assert "retry_of" not in recovery_input["required"]
     assert recovery_input["properties"].pop("retry_of") == {
-        "anyOf": [{"type": "string"}, {"type": "null"}], "default": None,
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "default": None,
     }
     # This output enum extension is intentionally pre-release: an unavailable
     # reviewer must not be represented as a request to revise implementation.
     assert baseline["http_models"]["ReviewDisposition"]["enum"] == [
-        "approve", "request_changes", "reject", "escalate", "unclassified",
+        "approve",
+        "request_changes",
+        "reject",
+        "escalate",
+        "unclassified",
     ]
     assert current["http_models"]["ReviewDisposition"]["enum"] == [
-        "approve", "request_changes", "reject", "escalate", "unavailable", "unclassified",
+        "approve",
+        "request_changes",
+        "reject",
+        "escalate",
+        "unavailable",
+        "unclassified",
     ]
     current["http_models"]["ReviewDisposition"]["enum"].remove("unavailable")
     assert compatibility_changes(baseline, current) == ()

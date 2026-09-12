@@ -1,29 +1,16 @@
 # SPDX-FileCopyrightText: 2026 Rahul Nath <https://github.com/rahul-nath>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""Approved-GAWD and saga dispatch support operations."""
+"""Active saga execution, document intake and milestone persistence support."""
 
 from __future__ import annotations
 
 import asyncio
-import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from ..contracts import (
-    DirectiveSpec,
-)
-from ..coordination import (
-    ApprovalDecision,
-    CreateSagaMilestone,
-    ListApprovalRequests,
-    ListDispatchIntents,
-    ListSagaMilestones,
-    ResolveApprovalRequest,
-    SubmitApprovalRequest,
-)
-from ..coordination.milestones import SAGA_MILESTONE_SOURCE_MARKER
+from ..coordination import CreateSagaMilestone
 from ..pow_wow import (
     CliPowWowExecutor,
     DryRunPowWowExecutor,
@@ -36,10 +23,7 @@ from ..pow_wow.ledger import (
 )
 from ..project_access import AccessMode, ProjectAccessPolicy
 from ..project_center import LinkedProject, load_project_center
-from ..project_scaffold import TargetProjectScaffold
 from ..staffing import load_bench
-
-logger = logging.getLogger(__name__)
 
 
 def map_pow_wow_run_status_to_ledger_status(run_status: str) -> str:
@@ -145,250 +129,12 @@ def load_control_plane_target_project(settings: Any) -> LinkedProject:
         )
 
 
-def _extend_repeated_arg(args: list[str], flag: str, values: tuple[str, ...]) -> None:
-    cleaned = tuple(value for value in values if value.strip())
-    if cleaned:
-        args.append(flag)
-        args.extend(cleaned)
-
-
-APPROVED_GAWD_DISPATCH_SOURCE_PREFIX = "approved_gawd:"
-APPROVED_GAWD_DUPLICATE_GUARD_STATUSES = {
-    "PENDING",
-    "CLAIMED",
-    "CHECKPOINT_REVIEW",
-    "PAUSED",
-    "SUPERSEDED",
-    "DONE",
-}
-
-
-def build_approved_gawd_dispatch_source(gawd_doc_id: str) -> str:
-    return f"{APPROVED_GAWD_DISPATCH_SOURCE_PREFIX}{gawd_doc_id}"
-
-
-def build_approved_gawd_milestone_dispatch_source(gawd_doc_id: str, milestone_id: str) -> str:
-    """The one place a milestone-linked dispatch source is assembled.
-
-    The marker comes from the module that parses it back, because the format is
-    genuinely one decision written and read together. An empty id would produce a
-    source the parser has to report as malformed, so it is refused here instead:
-    the caller has the id in hand and a blank one is a programmer error.
-    """
-
-    if not milestone_id.strip():
-        raise ValueError("a milestone dispatch source needs a milestone id")
-    prefix = build_approved_gawd_dispatch_source(gawd_doc_id)
-    return f"{prefix}{SAGA_MILESTONE_SOURCE_MARKER}{milestone_id}"
-
-
-def find_existing_dispatch_intent_for_source(
-    settings: Any,
-    source: str,
-) -> dict[str, Any] | None:
-    intents = run_coordination_command(
-        ListDispatchIntents(),
-        timeout=15,
-        settings=settings,
-    ).get("intents", [])
-    for intent in intents:
-        if (
-            intent.get("source") == source
-            and intent.get("status") in APPROVED_GAWD_DUPLICATE_GUARD_STATUSES
-        ):
-            return intent
-    return None
-
-
-def extract_target_project_id_from_gawd_doc(gawd_doc: Mapping[str, Any]) -> str | None:
-    task_graph = gawd_doc.get("task_graph")
-    if not isinstance(task_graph, Mapping):
-        return None
-    for key in ("target_project_id", "target_project", "project_id"):
-        value = task_graph.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def build_target_project_scaffold_from_gawd_doc(
-    gawd_doc: Mapping[str, Any],
-) -> TargetProjectScaffold | None:
-    task_graph = gawd_doc.get("task_graph")
-    if not isinstance(task_graph, Mapping):
-        return None
-    raw = task_graph.get("target_project_scaffold")
-    if raw is None:
-        return None
-    return TargetProjectScaffold.from_payload(dict(raw) if isinstance(raw, Mapping) else raw)
-
-
-def resolve_approved_gawd_target_project_id(
-    spec: DirectiveSpec,
-    gawd_doc: Mapping[str, Any],
-    *,
-    inferred_target_project_id: str | None = None,
-) -> str:
-    scaffold = build_target_project_scaffold_from_gawd_doc(gawd_doc)
-    embedded_target = extract_target_project_id_from_gawd_doc(gawd_doc)
-    if scaffold is not None and embedded_target is not None:
-        raise ValueError("Approved GAWD target cannot be both linked and scaffolded.")
-    if spec.target_project_id and scaffold and spec.target_project_id != scaffold.project_id:
-        raise ValueError(
-            "Explicit target project does not match the approved scaffold contract: "
-            f"{spec.target_project_id!r} != {scaffold.project_id!r}."
-        )
-    if spec.create_target_id and embedded_target:
-        raise ValueError(
-            "Approved GAWD already names a linked target; --create-target cannot replace it."
-        )
-    if spec.create_target_id and scaffold and spec.create_target_id != scaffold.project_id:
-        raise ValueError(
-            "Explicit scaffold target does not match the approved scaffold contract: "
-            f"{spec.create_target_id!r} != {scaffold.project_id!r}."
-        )
-    target_project_id = (
-        spec.target_project_id
-        or spec.create_target_id
-        or embedded_target
-        or (scaffold.project_id if scaffold else None)
-        or inferred_target_project_id
-    )
-    if not target_project_id:
-        raise ValueError(
-            "Approved GAWD execution requires an explicit target project. "
-            "Use /start /approved-gawd <final_gawd_doc_id> --target-project <project_id> "
-            "or --create-target <project_id>."
-        )
-    return target_project_id
-
-
-def resolve_target_project_from_gawd_dispatch_history(
-    settings: Any,
-    gawd_doc_id: str,
-) -> dict[str, Any] | None:
-    """Infer a legacy GAWD target only when its durable history is unanimous."""
-
-    intents = run_coordination_command(
-        ListDispatchIntents(),
-        timeout=15,
-        settings=settings,
-    ).get("intents", [])
-    source_prefix = f"approved_gawd:{gawd_doc_id}"
-    matches = [
-        dict(intent)
-        for intent in intents
-        if isinstance(intent, Mapping)
-        and (
-            intent.get("source") == source_prefix
-            or str(intent.get("source") or "").startswith(f"{source_prefix}:")
-        )
-        and str(intent.get("target_project_id") or "").strip()
-    ]
-    targets = sorted({str(intent["target_project_id"]).strip() for intent in matches})
-    if not targets:
-        return None
-    if len(targets) > 1:
-        raise ValueError(
-            "Approved GAWD dispatch history names multiple target projects; "
-            "the shortcut will not guess. Use the explicit /start /approved-gawd "
-            f"form. gawd_doc_id={gawd_doc_id!r}, targets={targets!r}."
-        )
-    return {
-        "target_project_id": targets[0],
-        "source": "prior_gawd_dispatch_intents",
-        "intent_ids": sorted(
-            str(intent.get("intent_id")) for intent in matches if intent.get("intent_id")
-        ),
-    }
-
-
 def validate_approved_gawd_target_project(settings: Any, target_project_id: str) -> LinkedProject:
     center = load_project_center(settings)
     target_project = center.project_by_id(target_project_id)
     if target_project.read_only:
         raise ValueError(f"Approved GAWD target project is read-only: {target_project_id}")
     return target_project
-
-
-def build_approved_gawd_dispatch_prompt(
-    gawd_doc: Mapping[str, Any],
-    milestone: Mapping[str, Any] | None = None,
-) -> str:
-    lines = [
-        (
-            "Implement the next approved saga milestone."
-            if milestone is not None
-            else "Implement the approved GAWD contract."
-        ),
-        "",
-        f"gawd_doc_id: {gawd_doc.get('gawd_doc_id')}",
-        f"saga_id: {gawd_doc.get('saga_id')}",
-        f"goal: {gawd_doc.get('goal')}",
-        "",
-        "Constraints:",
-        *_markdown_items(_string_items(gawd_doc.get("constraints"))),
-        "",
-        "Success criteria:",
-        *_markdown_items(_string_items(gawd_doc.get("success_criteria"))),
-        "",
-        "Acceptance criteria:",
-        *_markdown_items(_string_items(gawd_doc.get("acceptance_criteria"))),
-        "",
-    ]
-    if milestone is not None:
-        lines.extend(
-            [
-                "Milestone:",
-                f"- milestone_id: {milestone.get('milestone_id')}",
-                f"- sequence: {milestone.get('sequence')}",
-                f"- name: {milestone.get('name')}",
-                f"- description: {milestone.get('description')}",
-                "",
-                "Milestone entry criteria:",
-                *_markdown_items(_string_items(milestone.get("entry_criteria"))),
-                "",
-                "Milestone exit criteria:",
-                *_markdown_items(_string_items(milestone.get("exit_criteria"))),
-                "",
-                "Milestone required artifacts/evidence:",
-                *_markdown_items(_string_items(milestone.get("required_artifacts"))),
-                "",
-            ]
-        )
-    lines.extend(
-        [
-            "Unresolved questions:",
-            *_markdown_items(_string_items(gawd_doc.get("unresolved_questions")) or ("None.",)),
-            "",
-            "Durable plan reference:",
-            "- The complete task graph and finalized GAWD remain attached to the ledger under "
-            f"gawd_doc_id {gawd_doc.get('gawd_doc_id')}. This dispatch brief deliberately "
-            "contains only the approved milestone contract; do not widen scope to downstream "
-            "milestones.",
-            "",
-            "Execution rules:",
-            "- Stay inside the approved goal, constraints, and non-goals.",
-            "- Preserve the permission envelope; do not merge, deploy, spend, send external "
-            "messages, access secrets, or perform destructive operations without a separate "
-            "approval.",
-            "- Record verification evidence in the ledger before marking work complete.",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _string_items(value: Any) -> tuple[str, ...]:
-    if isinstance(value, (list, tuple)):
-        return tuple(str(item).strip() for item in value if str(item).strip())
-    if value is None:
-        return ()
-    text = str(value).strip()
-    return (text,) if text else ()
-
-
-def _markdown_items(items: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(f"- {item}" for item in items) or ("- None.",)
 
 
 def persist_durable_workflow_milestones(
@@ -447,112 +193,3 @@ def persist_durable_workflow_milestones(
         )
         previous_milestone_id = ledger_milestone_id
     return created
-
-
-def ensure_approved_gawd_milestones(
-    settings: Any,
-    *,
-    saga_id: str,
-    gawd_doc: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    existing = run_coordination_command(
-        ListSagaMilestones(saga_id),
-        timeout=15,
-        settings=settings,
-    )["milestones"]
-    if existing:
-        return existing
-    gawd_doc_id = str(gawd_doc.get("gawd_doc_id") or "")
-    created = run_coordination_command(
-        CreateSagaMilestone(
-            saga_id=saga_id,
-            name_text="Implement approved GAWD contract",
-            sequence=1,
-            milestone_id=f"{saga_id}:m01_implement_approved_gawd_contract",
-            gawd_doc_id=gawd_doc_id,
-            description=(
-                "Legacy approved GAWD without a persisted workflow plan. Execute as one "
-                "explicit milestone rather than a whole-saga dispatch."
-            ),
-            entry_criteria=("GAWD doc is approved and attached to this saga.",),
-            exit_criteria=("Approved GAWD success and acceptance criteria are satisfied.",),
-            required_artifacts=("test_log",),
-        ),
-        timeout=15,
-        settings=settings,
-    )["milestone"]
-    return [created]
-
-
-def approve_next_dependency_ready_milestone(
-    settings: Any,
-    *,
-    saga_id: str,
-    gawd_doc_id: str,
-    target_project_id: str,
-    blocked: Sequence[Mapping[str, Any]],
-) -> dict[str, Any] | None:
-    """Apply this explicit operator command to one dependency-ready gate.
-
-    `/approved-gawd` is intentionally repeatable: the first invocation approves
-    milestone 1, and a later invocation after completion approves milestone 2.
-    It never grants approval to downstream milestones in advance.
-    """
-    candidate = next(
-        (
-            item
-            for item in blocked
-            if item.get("dependency_ready") and not item.get("approval_ready")
-        ),
-        None,
-    )
-    if candidate is None:
-        return None
-    milestone_id = str(candidate.get("milestone_id") or "").strip()
-    if not milestone_id:
-        return None
-    pending = run_coordination_command(
-        ListApprovalRequests(saga_id=saga_id, status="PENDING"),
-        timeout=15,
-        settings=settings,
-    ).get("requests", [])
-    request = next(
-        (
-            item
-            for item in pending
-            if item.get("request_type") == "GENERAL"
-            and isinstance(item.get("payload"), Mapping)
-            and item["payload"].get("milestone_id") == milestone_id
-        ),
-        None,
-    )
-    if request is None:
-        request = run_coordination_command(
-            SubmitApprovalRequest(
-                saga_id=saga_id,
-                request_type="GENERAL",
-                requested_by="pi:/start /approved-gawd",
-                payload={
-                    "schema_version": "milestone_execution_approval.v1",
-                    "milestone_id": milestone_id,
-                    "gawd_doc_id": gawd_doc_id,
-                    "target_project_id": target_project_id,
-                },
-            ),
-            timeout=15,
-            settings=settings,
-        )
-    resolution = run_coordination_command(
-        ResolveApprovalRequest(
-            approval_id=str(request["approval_id"]),
-            decision=ApprovalDecision.APPROVE,
-            resolved_by="operator:/start /approved-gawd",
-        ),
-        timeout=15,
-        settings=settings,
-    )
-    return {
-        "milestone_id": milestone_id,
-        "request": request,
-        "resolution": resolution,
-    }

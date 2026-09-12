@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from test_host_verification_receipts import GateFixture
+from test_host_verification_receipts import HOST_GATE_TIMEOUT_SECONDS, GateFixture
 from test_host_verification_receipts import gate_fixture as gate_fixture
 
 from local_first_agent_os import host_verification as host
@@ -58,7 +58,7 @@ def registered_request(gate_fixture: GateFixture, monkeypatch) -> driver.Registe
     monkeypatch.setattr(driver, "load_project_center", host.load_project_center)
     request = driver.registered_gate_dispatch(gate_fixture.intent_id)
     assert request is not None
-    return replace(request, timeout_seconds=15)
+    return replace(request, timeout_seconds=HOST_GATE_TIMEOUT_SECONDS)
 
 
 def _settle_registered_failure(request: driver.RegisteredGateDispatch) -> MilestoneFailed:
@@ -275,24 +275,15 @@ def test_public_cancel_after_first_gate_prevents_the_next_command(
     monkeypatch.setattr(host, "load_project_center", lambda: replace(center, projects=(project,)))
     monkeypatch.setattr(driver, "load_project_center", host.load_project_center)
     request = replace(registered_request, commands=commands)
-    real_runner = host.run_captured_command
+    real_runner = host.NativeVerificationBroker.run
     gate_commands: list[str] = []
 
     def cancel_after_gate(
+        broker: host.NativeVerificationBroker,
         command: Sequence[str],
         cwd: Path,
-        *,
-        timeout_seconds: float,
-        env: Mapping[str, str] | None = None,
-        complete_environment: bool = False,
     ) -> CommandRunCapture:
-        capture = real_runner(
-            command,
-            cwd,
-            timeout_seconds=timeout_seconds,
-            env=env,
-            complete_environment=complete_environment,
-        )
+        capture = real_runner(broker, command, cwd)
         if "-c" in command:
             gate_commands.append(command[-1])
         if "-c" in command and len(gate_commands) == 1:
@@ -307,7 +298,7 @@ def test_public_cancel_after_first_gate_prevents_the_next_command(
             assert cancellation["ok"], cancellation
         return capture
 
-    monkeypatch.setattr(host, "run_captured_command", cancel_after_gate)
+    monkeypatch.setattr(host.NativeVerificationBroker, "run", cancel_after_gate)
     terminal = driver.run_registered_gate_dispatch(request)
     assert not isinstance(terminal, IntentDeferred)
     status, _, _ = terminal
@@ -374,7 +365,10 @@ def test_active_replay_preserves_owned_execution_and_recovers_receipt_afterward(
             assert row["status"] == "CLAIMED" and row["result"] is None
         finally:
             release.set()
-        terminal = first.result(timeout=20)
+        # Admission is already observed; now allow the owned staging, gate and receipt lifetime.
+        terminal = first.result(
+            timeout=registered_request.timeout_seconds + driver.RECEIPT_PERSISTENCE_GRACE_SECONDS
+        )
     assert not isinstance(terminal, IntentDeferred)
     assert terminal[0] == "DONE", terminal
     assert driver.run_registered_gate_dispatch(registered_request) == terminal

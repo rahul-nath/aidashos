@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -10,7 +11,9 @@ import time
 from pathlib import Path
 
 import pytest
+from host_test_scope import require_uncontained_scope
 
+from local_first_agent_os import chrome_devtools
 from local_first_agent_os.chrome_devtools import (
     ChromeControlFailure,
     ChromeControlService,
@@ -19,6 +22,31 @@ from local_first_agent_os.chrome_devtools import (
     redact_chrome_text,
 )
 from local_first_agent_os.tools import ChromeDevToolsTool
+
+_HOST_PROCESS_OBSERVER = chrome_devtools.read_pid_command_map
+
+
+@pytest.fixture(autouse=True)
+def fixture_owned_process_observer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Observe only the real fake-sidecar processes declared by this fixture.
+
+    Protocol tests own their process topology. Host-wide process discovery is
+    exercised separately, without pretending denied `ps` returned an empty tree.
+    """
+
+    def read_owned_processes() -> dict[int, tuple[int, str]]:
+        observed: dict[int, tuple[int, str]] = {}
+        for record in tmp_path.glob("fake_chrome_mcp_*.pids.json"):
+            for pid, parent, command in json.loads(record.read_text()):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    continue
+                observed[pid] = parent, command
+        return observed
+
+    monkeypatch.setattr(chrome_devtools, "read_pid_command_map", read_owned_processes)
+
 
 # One fake JSON-RPC child with composable behaviors selected by a
 # comma-separated mode list in argv[1]:
@@ -32,6 +60,8 @@ from local_first_agent_os.tools import ChromeDevToolsTool
 #   attacherr - answer tools/call with a tool-level isError attach failure
 _FAKE_MCP_SOURCE = """
 import json
+import os
+from pathlib import Path
 import subprocess
 import sys
 import time
@@ -40,6 +70,13 @@ MODES = set(sys.argv[1].split(","))
 child = None
 if "child" in MODES:
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+owned = [[os.getpid(), os.getppid(), repr([sys.executable, *sys.argv])]]
+if child is not None:
+    owned.append([child.pid, os.getpid(), repr(child.args)])
+record = Path(sys.argv[2])
+temporary = record.with_suffix(".new")
+temporary.write_text(json.dumps(owned))
+temporary.replace(record)
 if "exit" in MODES:
     sys.exit(3)
 
@@ -129,7 +166,11 @@ def _fake_settings(runtime, script: Path, mode: str = "normal"):
     settings = runtime.settings.model_copy(deep=True)
     settings.chrome_devtools_transport = "mcp"
     settings.chrome_devtools_command = sys.executable
-    settings.chrome_devtools_command_args = [str(script), mode]
+    settings.chrome_devtools_command_args = [
+        str(script),
+        mode,
+        str(script.with_suffix(".pids.json")),
+    ]
     settings.chrome_devtools_start_args = []
     settings.chrome_devtools_attach_mode = "launch"
     settings.chrome_devtools_launch_args = []
@@ -320,6 +361,27 @@ def test_stop_reaps_spawned_descendant(runtime, tmp_path) -> None:
     result = service.stop_action("wf-stop", [])
 
     assert result["process_cleanup"]["process_group_reaped"] is True
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+
+def test_host_process_observer_reaps_spawned_descendant(runtime, tmp_path, monkeypatch) -> None:
+    """The real host process scanner remains an independently required integration lane."""
+    require_uncontained_scope(
+        reason="host process discovery requires the operator scope outside a leased gate",
+        required_flag="AIDASHOS_REQUIRE_HOST_PROCESS_OBSERVER",
+    )
+    monkeypatch.setattr(chrome_devtools, "read_pid_command_map", _HOST_PROCESS_OBSERVER)
+    service = _service(runtime, tmp_path, "child")
+    try:
+        service.start_action("wf-host-child", [])
+        status = service.supervisor.status()
+        child_pid = int(status["server_version"])
+        assert child_pid in chrome_devtools.capture_descendant_process_snapshot(status["pid"])
+    finally:
+        stopped = service.stop_action("wf-host-stop", [])
+    assert stopped["process_cleanup"]["direct_child_reaped"] is True
+    assert stopped["process_cleanup"]["process_group_reaped"] is True
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)
 

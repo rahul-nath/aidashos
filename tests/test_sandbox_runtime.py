@@ -6,10 +6,13 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from local_first_agent_os import sandbox_runtime
 from local_first_agent_os.process_containment import ProcessContainmentUnavailable
 from local_first_agent_os.sandbox_runtime import (
     ReadOnlyToolWorker,
@@ -17,6 +20,18 @@ from local_first_agent_os.sandbox_runtime import (
     _run_identity,
     _runtime_tree_sha256,
 )
+
+
+@pytest.fixture
+def prepared_worker_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fake-installation policy tests prepare files without opening native SRT sockets."""
+
+    def owned_directory(*, prefix: str, dir: str):
+        return tempfile.TemporaryDirectory(prefix=prefix, dir=tmp_path)
+
+    monkeypatch.setattr(
+        sandbox_runtime, "tempfile", SimpleNamespace(TemporaryDirectory=owned_directory)
+    )
 
 
 def test_identity_probe_cannot_inherit_preload_or_git_overrides(monkeypatch) -> None:
@@ -66,7 +81,9 @@ def test_runtime_identity_measures_internal_file_symlink_target(tmp_path) -> Non
     assert _runtime_tree_sha256(tmp_path) != before
 
 
-def test_worker_has_private_state_and_no_ambient_authority(tmp_path, monkeypatch) -> None:
+def test_worker_has_private_state_and_no_ambient_authority(
+    prepared_worker_state, tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv("LOCAL_AGENT_OPERATOR_TOKEN", "operator-canary")
     monkeypatch.setenv("OPENAI_API_KEY", "provider-canary")
     monkeypatch.setenv("LOCAL_AGENT_COORDINATION_DATABASE_URL", "writer-canary")
@@ -124,7 +141,9 @@ def test_installation_drift_prevents_any_launch(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("changed", ["request", "service"])
-def test_bridge_refuses_prepared_launch_drift(tmp_path, monkeypatch, changed) -> None:
+def test_bridge_refuses_prepared_launch_drift(
+    prepared_worker_state, tmp_path, monkeypatch, changed
+) -> None:
     node = os.environ.get("LOCAL_AGENT_SRT_PROBE_NODE")
     if not node:
         pytest.skip("explicit existing Node toolchain not configured")

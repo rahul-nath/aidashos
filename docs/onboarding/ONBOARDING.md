@@ -25,6 +25,10 @@ The verification setup command uses the existing PostgreSQL 16 image with `--pul
 It preserves an existing matching setup and refuses a different protected binding or retained legacy Neon setup that needs an explicit migration.
 The readiness check is read-only.
 
+On macOS, contained test execution also needs the [native verifier helper](../../scripts/verifier_uid/README.md).
+Follow that guide to prepare the installation, review the privileged action, qualify it on your machine and activate the service.
+The base install alone does not establish that the verifier is ready.
+
 For a retained Neon v1 setup, first quiesce every dispatcher, verifier, and cleanup owner.
 Then run `uv run --offline --no-sync python -m local_first_agent_os.local_verification_setup migrate-legacy-neon-to-local` from the registered checkout.
 The command verifies the same Git common directory and matching CLOSED legacy lease receipts before binding the existing local test service.
@@ -85,7 +89,7 @@ Or from your own AI tool over MCP: Claude Code picks up the repo's `.mcp.json` a
 ## Platforms
 
 macOS is the supported platform today, and it is the one this is developed and run on daily.
-Linux is expected to work, since every boot stage is POSIX shell and the runtime has no macOS-specific dependency, but it is not exercised on a schedule.
+The contained verifier uses macOS-specific security features, so this release does not claim that the complete workflow works on Linux.
 
 Windows is not supported.
 PowerShell twins of every boot stage are written and kept at `potential_directions/windows-boot/`, and they have never been executed or parsed, so nothing here claims they work.

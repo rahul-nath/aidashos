@@ -10,14 +10,7 @@ import logging
 from collections.abc import Iterator
 from typing import Any
 
-from ..agent_query import (
-    AGENT_QUERY_RECORD_SCHEMA,
-    agent_query_request,
-    build_agent_query_record,
-    configured_agent_query_model,
-    resolve_transcript_pointer,
-    run_agent_query,
-)
+from ..agent_query_retirement import AgentQueryRetirement
 from ..constants import DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS
 from ..contracts import (
     ArtifactRef,
@@ -45,6 +38,7 @@ from .compaction import (
 )
 from .core import (
     build_completed_workflow_result,
+    build_event_workflow_id,
 )
 
 logger = logging.getLogger(__name__)
@@ -225,91 +219,16 @@ class ModelWorkflowMixin(WorkflowMixinBase):
         }
 
     def agent_query(self, event: IngressEvent) -> WorkflowResult:
-        """Ask a frontier CLI directly and record the question plus a transcript pointer.
-
-        No worktree, no lease, no dispatch intent: a question is not a code
-        change. The answer is returned to the terminal and left in the CLI's own
-        transcript rather than copied into the artifact store.
-        """
-
-        workflow_id = self._start(WorkflowType.AGENT_QUERY, event)
-        parser = DirectiveParser(self.runtime.settings)
-        directive = str(event.payload.get("directive", ""))
-        try:
-            spec = parser.parse(directive)
-        except Exception as exc:
-            return self._fail_agent_query(workflow_id, directive, str(exc))
-        if spec.action != "agent_query" or spec.agent_harness is None or not spec.query:
-            return self._fail_agent_query(
-                workflow_id,
-                directive,
-                "/claude and /codex each require a query.",
-            )
-
-        try:
-            model = configured_agent_query_model(
-                spec.agent_harness,
-                config_dir=self.runtime.settings.config_dir,
-            )
-            request = agent_query_request(
-                workflow_id=workflow_id,
-                harness=spec.agent_harness,
-                model=model,
-                alias=spec.alias,
-                query=spec.query,
-            )
-        except Exception as exc:
-            return self._fail_agent_query(workflow_id, directive, str(exc))
-        run = run_agent_query(request)
-        transcript = resolve_transcript_pointer({**request, "session_id": run.get("session_id")})
-        record = build_agent_query_record({**request, **run, "transcript": transcript})
-        artifact = self.runtime.artifact_store.write_json(
-            role=ArtifactRole.AGENT_QUERY_RECORD.value,
-            payload=record,
-            workflow_id=workflow_id,
-            schema_version=record["schema_version"],
-        )
-        status = WorkflowStatus.COMPLETED if run["succeeded"] else WorkflowStatus.FAILED_PERMANENT
-        self.runtime.repository.update_workflow(
-            workflow_id,
-            status=status,
-            stage=Stage.COMPLETED,
-            error=run.get("error"),
-        )
+        """Refuse fresh calls and historical replay without changing retained records."""
+        retirement = AgentQueryRetirement.RETIRED
         return build_completed_workflow_result(
-            workflow_id,
-            WorkflowType.AGENT_QUERY,
-            status,
-            Stage.COMPLETED,
-            [artifact],
-            manual_review_reason=run.get("error") if not run["succeeded"] else None,
-        )
-
-    def _fail_agent_query(self, workflow_id: str, directive: str, error: str) -> WorkflowResult:
-        artifact = self.runtime.artifact_store.write_json(
-            role=ArtifactRole.AGENT_QUERY_RECORD.value,
-            payload={
-                "schema_version": AGENT_QUERY_RECORD_SCHEMA,
-                "directive": directive,
-                "status": "failed",
-                "error": error,
-            },
-            workflow_id=workflow_id,
-            schema_version=AGENT_QUERY_RECORD_SCHEMA,
-        )
-        self.runtime.repository.update_workflow(
-            workflow_id,
-            status=WorkflowStatus.FAILED_PERMANENT,
-            stage=Stage.COMPLETED,
-            error=error,
-        )
-        return build_completed_workflow_result(
-            workflow_id,
+            build_event_workflow_id(WorkflowType.AGENT_QUERY, event),
             WorkflowType.AGENT_QUERY,
             WorkflowStatus.FAILED_PERMANENT,
             Stage.COMPLETED,
-            [artifact],
-            manual_review_reason=error,
+            [],
+            manual_review_reason=retirement.message,
+            help=retirement.help_payload(),
         )
 
     def general_questions(

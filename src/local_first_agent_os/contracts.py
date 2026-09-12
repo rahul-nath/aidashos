@@ -108,7 +108,7 @@ class WorkflowType(StrEnum):
     MEDICAL_IMAGE_ANALYZER = "medical_image_analyzer"
     TRAINING_EXPORT_STUB = "training_export_stub"
     MODEL_DIRECTIVE = "model_directive"
-    AGENT_QUERY = "agent_query"
+    AGENT_QUERY = "agent_query"  # Historical decoding and permanent replay refusal only.
     OCR_CAPTURE = "ocr_capture"
     DIRECTORY_EMBEDDING = "directory_embedding"
     CONTEXT_COMPACTION = "context_compaction"
@@ -196,13 +196,6 @@ class ArtifactRole(StrEnum):
     DAILY_VIEW_PATCH = "daily_view_patch"
     ENTITY_GRAPH = "entity_graph"
     GRAPH_METRICS = "graph_metrics"
-
-
-class AgentHarness(StrEnum):
-    """A frontier CLI reachable as a direct query target."""
-
-    CLAUDE_CODE = "claude_code"
-    CODEX_CLI = "codex_cli"
 
 
 class ModelRole(StrEnum):
@@ -628,7 +621,6 @@ class DirectiveSpec:
     month_day: str | None = None
     chrome_action: str | None = None
     chrome_args: tuple[str, ...] = ()
-    agent_harness: AgentHarness | None = None
     # Dispatcher / reactor fields
     dispatcher_name: str | None = None
     dispatcher_tier: DispatchTier | None = None

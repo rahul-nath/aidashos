@@ -8,11 +8,11 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
-import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
+from host_verifier_capability import require_host_uid_verifier
 from pydantic import ValidationError
 from test_settled_dispatch_adoption import _runner_result, _settled_intent, _wait_elapsed_milestone
 
@@ -29,6 +29,8 @@ from local_first_agent_os.project_center import LinkedProject, ProjectCenter
 from local_first_agent_os.work_units import dispatch_adoption
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units.lifecycle import LifecyclePhase, MilestoneExecutionStatus
+
+HOST_GATE_TIMEOUT_SECONDS = 180
 
 
 @dataclass(frozen=True)
@@ -48,12 +50,22 @@ class GateFixture:
             source_repository=self.repository,
             source_commit=self.commit,
             base_commit=self.commit,
-            timeout_seconds=15,
+            # The declared lifetime includes staging the installed toolchain.
+            # Command-deadline controls use their own separate explicit bounds.
+            timeout_seconds=HOST_GATE_TIMEOUT_SECONDS,
         )
 
 
 @pytest.fixture
 def gate_fixture(work_unit_ledger, tmp_path, monkeypatch) -> GateFixture:
+    real_runner = host.run_registered_verification
+
+    def qualified_host_runner(**arguments):
+        require_host_uid_verifier()
+        return real_runner(**arguments)
+
+    # Pure declaration/report tests retain the fixture without provisioning a host gate.
+    monkeypatch.setattr(host, "run_registered_verification", qualified_host_runner)
     monkeypatch.setattr(
         host, "acquire_verification_resources", lambda *_args: host.VerificationResourcesAbsent()
     )
@@ -101,7 +113,7 @@ def gate_fixture(work_unit_ledger, tmp_path, monkeypatch) -> GateFixture:
         status="active",
         access=ProjectAccessPolicy(mode=AccessMode.READ_WRITE),
         description="test",
-        verification_commands=[f"{shlex.quote(sys.executable)} -I gate.py"],
+        verification_commands=["python -I gate.py"],
     )
     center = ProjectCenter(
         id="fixture",
@@ -118,7 +130,7 @@ def gate_fixture(work_unit_ledger, tmp_path, monkeypatch) -> GateFixture:
         intent_id=intent_id,
         target_project_id=project.id,
         permission_envelope_sha256="a" * 64,
-        timeout_seconds=120,
+        timeout_seconds=240,
     )
     return GateFixture(
         repository, commit, intent_id, str(lease["lease"]["lease_id"]), work_unit_id, milestone_key
@@ -129,6 +141,15 @@ def _require_real_pass(fixture: GateFixture) -> host.VerificationPassed:
     outcome = fixture.run()
     assert isinstance(outcome, host.VerificationPassed), outcome
     assert "source write and outside read denied" in outcome.captures[0].stdout
+    with tx() as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM host_verification_receipts WHERE receipt_id=?",
+            (outcome.receipt_id,),
+        ).fetchone()
+    assert row is not None
+    identity = json.loads(host.Receipt.model_validate_json(row["payload_json"]).runtime_identity)
+    assert identity["staged_toolchain_disposition"] == "removed_after_uid_cleanup"
+    assert not (Path(identity["toolchain_provenance_path"]).parent / "installed").exists()
     return outcome
 
 
@@ -243,11 +264,16 @@ def test_success_prose_from_nonzero_process_never_certifies(gate_fixture, monkey
 def test_ownership_change_after_process_before_receipt_insert_is_unavailable(
     gate_fixture, monkeypatch, stop
 ) -> None:
-    real_runner = host.run_captured_command
+    real_runner = host.NativeVerificationBroker.run
+    injected = False
 
-    def stop_after_gate(command, *args, **kwargs):
-        capture = real_runner(command, *args, **kwargs)
+    def stop_after_gate(broker, command, *args, **kwargs):
+        nonlocal injected
+        capture = real_runner(broker, command, *args, **kwargs)
         if "-c" in command:
+            assert capture.exit_code == 0, capture
+            assert "real gate passed; source write and outside read denied" in capture.stdout
+            injected = True
             if stop == "cancel":
                 request_execution_cancel(gate_fixture.lease_id)
             else:
@@ -258,8 +284,10 @@ def test_ownership_change_after_process_before_receipt_insert_is_unavailable(
                     )
         return capture
 
-    monkeypatch.setattr(host, "run_captured_command", stop_after_gate)
-    assert isinstance(gate_fixture.run(), host.VerificationUnavailable)
+    monkeypatch.setattr(host.NativeVerificationBroker, "run", stop_after_gate)
+    outcome = gate_fixture.run()
+    assert injected, outcome
+    assert isinstance(outcome, host.VerificationUnavailable)
     with tx() as connection:
         assert not connection.execute(
             "SELECT receipt_id FROM host_verification_receipts"
@@ -312,7 +340,7 @@ def test_export_attributes_cannot_hide_failing_committed_test(
     center = host.load_project_center()
     project = replace(
         center.projects[0],
-        verification_commands=[f"{shlex.quote(sys.executable)} -I -c {shlex.quote(program)}"],
+        verification_commands=[f"python -I -c {shlex.quote(program)}"],
     )
     monkeypatch.setattr(host, "load_project_center", lambda: replace(center, projects=(project,)))
     outcome = replace(gate_fixture, commit=commit).run()

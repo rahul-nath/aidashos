@@ -10,23 +10,24 @@ from typing import Any
 
 import pytest
 
-from local_first_agent_os.agent_adapters import (
-    AgentTask,
-    LocalModelAdapter,
-    LocalModelRunProvenance,
-    LocalModelTask,
-)
 from local_first_agent_os.constants import DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS
 from local_first_agent_os.contracts import ModelCallRequest, ModelRole, SourceType, WorkspaceId
 from local_first_agent_os.delegation import agent_result_payload, delegate_local_model_task
 from local_first_agent_os.ingress import normalize_scheduled_event
+from local_first_agent_os.local_model_delegation import (
+    LocalModelAdapter,
+    LocalModelRunProvenance,
+    LocalModelTask,
+)
 from local_first_agent_os.runtime import AppRuntime
 
 
-def test_agent_and_model_request_defaults_allow_one_hour() -> None:
-    task = AgentTask(
+def test_local_task_and_model_request_defaults_allow_one_hour() -> None:
+    task = LocalModelTask(
         task_id="default-timeout",
         prompt="Confirm the default timeout.",
+        model_role=ModelRole.GENERAL,
+        task_max_tokens=64,
     )
     request = ModelCallRequest(
         workflow_id="workflow-default-timeout",

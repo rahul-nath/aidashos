@@ -35,6 +35,43 @@ def unprivileged_process_environment(environment: Mapping[str, str]) -> dict[str
     }
 
 
+def _project_node_version(project_path: Path) -> str | None:
+    version_file = project_path / ".nvmrc"
+    if not version_file.is_file():
+        return None
+    raw = version_file.read_text(encoding="utf-8").strip()
+    match = _EXACT_NODE_VERSION.fullmatch(raw)
+    if match is None:
+        raise RuntimeError(f"{version_file} must contain an exact Node version.")
+    return match.group(1)
+
+
+def _nvm_node_path(version: str) -> Path:
+    return Path("versions") / "node" / f"v{version}" / "bin" / "node"
+
+
+def installed_node_environment(project_path: Path, executable: Path) -> dict[str, str]:
+    """Project the selected exact NVM installation after layout-preserving relocation.
+
+    The host has already selected and copied these bytes. This only binds NVM's
+    lookup root to that same installation; it never probes or selects another Node.
+    """
+    version = _project_node_version(project_path)
+    if version is None:
+        return {}
+    suffix = _nvm_node_path(version)
+    if (
+        not executable.is_absolute()
+        or executable.parts[-len(suffix.parts) :] != suffix.parts
+        or not executable.is_file()
+    ):
+        raise RuntimeError(
+            "Selected Node does not retain the NVM installation pinned by "
+            f"{project_path / '.nvmrc'}."
+        )
+    return {"NVM_DIR": str(executable.parents[len(suffix.parts) - 1])}
+
+
 def project_environment(
     project_path: Path,
     overrides: Mapping[str, str] | None = None,
@@ -42,24 +79,18 @@ def project_environment(
     """Return an environment honoring an exact ``.nvmrc`` when present."""
 
     env = {**os.environ, **(overrides or {})}
-    version_file = project_path / ".nvmrc"
-    if not version_file.is_file():
+    version = _project_node_version(project_path)
+    if version is None:
         return env
-    raw = version_file.read_text(encoding="utf-8").strip()
-    match = _EXACT_NODE_VERSION.fullmatch(raw)
-    if match is None:
-        raise RuntimeError(f"{version_file} must contain an exact Node version.")
-    version = match.group(1)
     nvm_dir = Path(env.get("NVM_DIR") or (Path.home() / ".nvm")).expanduser()
-    node_bin = nvm_dir / "versions" / "node" / f"v{version}" / "bin"
-    node = node_bin / "node"
+    node = nvm_dir / _nvm_node_path(version)
     if not node.is_file():
         raise RuntimeError(
-            f"Node {version} pinned by {version_file} is not installed. "
+            f"Node {version} pinned by {project_path / '.nvmrc'} is not installed. "
             f"Run `source ~/.nvm/nvm.sh && nvm install {version}`."
         )
     path_parts = [part for part in env.get("PATH", "").split(os.pathsep) if part]
-    env["PATH"] = os.pathsep.join((str(node_bin), *path_parts))
+    env["PATH"] = os.pathsep.join((str(node.parent), *path_parts))
     env["LOCAL_AGENT_NODE_VERSION"] = version
     return env
 
@@ -83,6 +114,7 @@ def verification_gate_environment(project_path: Path) -> tuple[dict[str, str], t
 __all__ = [
     "CONTROL_PLANE_ENV_NAMES",
     "CONTROL_PLANE_ENV_PREFIXES",
+    "installed_node_environment",
     "project_environment",
     "verification_gate_environment",
 ]

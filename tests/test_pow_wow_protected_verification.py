@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
-from test_host_verification_receipts import GateFixture, _receipt_payload
+from test_host_verification_receipts import HOST_GATE_TIMEOUT_SECONDS, GateFixture, _receipt_payload
 from test_host_verification_receipts import gate_fixture as gate_fixture
 from test_host_verification_resources import _resource_fixture
 from test_host_verification_resources import pinned_relay as pinned_relay
@@ -62,7 +62,7 @@ def _project_result(fixture: GateFixture) -> tuple[PowWowArtifact, ...]:
             changed_from_base=False,
             checkpointed_files=(),
         ),
-        timeout_seconds=15,
+        timeout_seconds=HOST_GATE_TIMEOUT_SECONDS,
     )
 
 
@@ -144,10 +144,10 @@ def test_actual_projected_gate_cannot_discharge_verify_until_cleanup_is_proven(
     if pending:
         assert artifact.artifact_type == "host_verification_cleanup_pending"
         process = artifact.content["process"]
-        assert process["outcome"] == "passed"
+        assert process["outcome"] == "passed", process
         receipt_id = process["receipt_id"]
     else:
-        assert artifact.artifact_type == host.REFERENCE_KIND
+        assert artifact.artifact_type == host.REFERENCE_KIND, artifact.content
         receipt_id = artifact.content["receipt_id"]
     complete_execution_lease(gate_fixture.lease_id, "COMPLETED")
     payload = json.loads(_receipt_payload(gate_fixture, receipt_id))

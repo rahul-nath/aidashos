@@ -7,34 +7,27 @@ import uuid
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from .agent_adapters import (
-    AgentResult,
-    LocalModelAdapter,
-    LocalModelRunProvenance,
-    LocalModelTask,
-)
 from .constants import (
     DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
     DEFAULT_DELEGATED_TASK_MAX_TOKENS,
 )
 from .contracts import ModelRole
 from .coordination.failures import FailureV1
+from .local_model_delegation import LocalModelAdapter, LocalModelResult, LocalModelTask
 
 if TYPE_CHECKING:
     from .runtime import AppRuntime
 
 
-def agent_result_payload(result: AgentResult) -> dict[str, Any]:
-    artifact_ids: list[str] = []
-    if isinstance(result.provenance, LocalModelRunProvenance):
-        artifact_ids = [
-            artifact.artifact_id
-            for artifact in (
-                result.provenance.prompt_artifact,
-                result.provenance.output_artifact,
-            )
-            if artifact is not None
-        ]
+def agent_result_payload(result: LocalModelResult) -> dict[str, Any]:
+    artifact_ids = [
+        artifact.artifact_id
+        for artifact in (
+            result.provenance.prompt_artifact,
+            result.provenance.output_artifact,
+        )
+        if artifact is not None
+    ]
     return {
         "ok": result.success,
         "task_id": result.task_id,
@@ -57,7 +50,7 @@ async def delegate_local_model_task(
     timeout_seconds: int = DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS,
     model_params: Mapping[str, object] | None = None,
     workflow_id: str | None = None,
-) -> AgentResult:
+) -> LocalModelResult:
     """Run a bounded task on the selected local-model role.
 
     Runtime-backend selection belongs to ModelManager and the installed model

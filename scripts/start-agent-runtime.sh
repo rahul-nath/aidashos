@@ -19,7 +19,9 @@ load_dotenv_file() {
   # array such as ["--headless"] removes its inner quotes and corrupts values
   # consumed by pydantic-settings. Parse with python-dotenv, validate names, and
   # emit shell-escaped assignments without ever placing values in argv.
-  exports="$("$python_bin" - "$env_file" <<'PY'
+  # Bash 3.2 here-documents use system temp files without honoring TMPDIR.
+  # Only fixed parser code travels in argv; dotenv values remain file input.
+  exports="$("$python_bin" -c '
 import re
 import shlex
 import sys
@@ -32,8 +34,7 @@ for key, value in dotenv_values(env_file).items():
         raise SystemExit(f"invalid environment variable name in {env_file}: {key!r}")
     if value is not None:
         print(f"export {key}={shlex.quote(value)}")
-PY
-)"
+' "$env_file")"
   eval "$exports"
 }
 

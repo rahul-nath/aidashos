@@ -51,7 +51,7 @@ def host_local_resource_owner() -> None:
 def local_configuration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[str, Path]:
     repository = tmp_path / "repository"
     repository.mkdir()
-    subprocess.run(["/usr/bin/git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
     directory = tmp_path / "protected"
     directory.mkdir(mode=0o700)
     secret = directory / "database-url"
@@ -185,7 +185,7 @@ def test_actual_setup_script_is_repeatable_without_pulling_or_exposing_credentia
     home.mkdir()
     repository = tmp_path / "public-checkout"
     repository.mkdir()
-    subprocess.run(["/usr/bin/git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
     config = tmp_path / "configs"
     write_test_project_registry(config, "public_self", repository)
     commands = tmp_path / "commands"
@@ -381,7 +381,7 @@ def legacy_migration(tmp_path: Path) -> _LegacyMigrationFixture:
     directory = home / ".local-agent/verification"
     directory.mkdir(mode=0o700, parents=True)
     repository = tmp_path / "repository"
-    subprocess.run(["/usr/bin/git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
     config = tmp_path / "configs"
     write_test_project_registry(config, "retained_project", repository)
     secret = directory / "neon-database-url"
@@ -431,7 +431,7 @@ def test_explicit_legacy_migration_preserves_cleanup_files_and_is_repeatable(
     if legacy_checkout == "linked_worktree":
         subprocess.run(
             [
-                "/usr/bin/git",
+                "git",
                 "-C",
                 str(fixture.repository),
                 "-c",
@@ -448,7 +448,7 @@ def test_explicit_legacy_migration_preserves_cleanup_files_and_is_repeatable(
         linked = fixture.repository.parent / "linked-worktree"
         subprocess.run(
             [
-                "/usr/bin/git",
+                "git",
                 "-C",
                 str(fixture.repository),
                 "worktree",
@@ -518,7 +518,7 @@ def test_legacy_migration_refuses_unproven_binding_without_writes(
     payload = json.loads(fixture.manifest.read_text())
     if mutation == "wrong_repository":
         other = tmp_path / "other-repository"
-        subprocess.run(["/usr/bin/git", "init", "-q", str(other)], check=True)
+        subprocess.run(["git", "init", "-q", str(other)], check=True)
         metadata["target_repository"] = str(other)
     elif mutation == "wrong_lease_repository":
         payload["identity"]["source_common_directory"] = str(tmp_path / "other/.git")

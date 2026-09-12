@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from host_test_scope import require_uncontained_scope
 from pytest_bdd import given, parsers, scenarios, then, when
 from test_pow_wow_executor import _context, _review_loop_fixture, _review_loop_target, _seated
 
@@ -40,6 +41,11 @@ def world() -> dict[str, Any]:
 
 @given(parsers.parse('a local reviewer fixture fails at "{failure_point}"'))
 def _failed_fixture(world, tmp_path, monkeypatch, failure_point):
+    if failure_point == "tool-evidence":
+        require_uncontained_scope(
+            reason="Tool-evidence review faults require the real host WebSocket worker relay",
+            required_flag="LOCAL_AGENT_REQUIRE_CODEX_HOST_TESTS",
+        )
     repo = tmp_path / "inspection"
     repo.mkdir()
     (repo / "canary.txt").write_text("repository read canary\n")

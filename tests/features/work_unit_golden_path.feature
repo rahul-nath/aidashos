@@ -1,34 +1,9 @@
-# The path nothing has ever driven end to end.
-#
-# `tests/conftest.py` pins LOCAL_AGENT_USE_DBOS=false before the package is
-# imported, because `@dbos_step` and `@dbos_workflow` bind at import time. So the
-# ordinary suite has never run a real DBOS workflow, and every green WorkUnit
-# trace in it went through the simulated runtime and never submitted a dispatch
-# intent at all. Every defect in the 2026-08-04 handoffs lived in the gap between
-# those two facts.
-#
-# The full drive - DesignDoc -> compile -> start -> enqueue drainer -> DBOS ->
-# resident dispatcher -> local junior delegate -> dispatch settlement -> artifacts
-# -> operator decision -> SUCCEEDED - runs the two resident loops as real
-# subprocesses against disposable databases, because that is the only shape where
-# "production resident constructors" is literally true and the only one that
-# exercises DBOS's cross-process notification path. It is gated on
-# LOCAL_AGENT_RUN_POSTGRES_INTEGRATION=1.
-#
-# The edge cases below it are ledger semantics and run in the ordinary lane.
+# Recovery scenarios exercise durable ledger semantics.
+# The composed happy path has one executable owner:
+# test_the_golden_path_runs_through_the_resident_loops in test_work_unit_golden_path.py.
+# make test-golden-path requires that real subprocess test rather than a no-op BDD alias.
 
 Feature: A WorkUnit driven from a document to SUCCEEDED
-
-  @golden-path @integration @happy-path
-  Scenario: The whole path, through the resident loops
-    Given a disposable coordination ledger and DBOS system database
-    And the golden path design doc is compiled and started
-    When the enqueue drainer and the resident dispatcher are running
-    Then the first milestone reaches a real dispatch intent
-    And the local junior delegate answers it
-    And the milestone records its artifact
-    When the operator approves the review milestone
-    Then the WorkUnit reaches SUCCEEDED
 
   @golden-path @lost-notification
   Scenario: A settlement whose notification was already consumed

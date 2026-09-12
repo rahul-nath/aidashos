@@ -107,10 +107,7 @@ def test_startup_dotenv_loader_preserves_json_array(tmp_path: Path) -> None:
     # Pass the interpreter running the tests through the loader's documented
     # override so this does not depend on a .venv existing in the checkout.
     python_bin = shlex.quote(sys.executable)
-    command = f"""
-source scripts/start-agent-runtime.sh
-load_dotenv_file "$DOTENV_TEST_FILE" {python_bin}
-{python_bin} - <<'PY'
+    verify = shlex.quote("""
 import json
 import os
 
@@ -119,7 +116,11 @@ assert json.loads(value) == [
     "--headless=new",
     "--user-data-dir=/tmp/profile with spaces",
 ]
-PY
+""")
+    command = f"""
+source scripts/start-agent-runtime.sh
+load_dotenv_file "$DOTENV_TEST_FILE" {python_bin}
+{python_bin} -c {verify}
 """
     result = subprocess.run(
         ["bash", "-c", command],
@@ -136,6 +137,34 @@ PY
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
+
+
+def test_startup_dotenv_loader_refuses_invalid_names_without_executing_values(
+    tmp_path: Path,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    marker = tmp_path / "must-not-exist"
+    env_file = tmp_path / ".env"
+    env_file.write_text(f'INVALID-NAME="$(touch {shlex.quote(str(marker))})"\n')
+    result = subprocess.run(
+        [
+            "bash",
+            "-c",
+            "source scripts/start-agent-runtime.sh\n"
+            f'load_dotenv_file "$DOTENV_TEST_FILE" {shlex.quote(sys.executable)}',
+        ],
+        cwd=repo_root,
+        env={**os.environ, "DOTENV_TEST_FILE": str(env_file)},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "invalid environment variable name" in result.stderr
+    assert result.stdout == ""
+    assert not marker.exists()
 
 
 def _parse_runtime_flag(

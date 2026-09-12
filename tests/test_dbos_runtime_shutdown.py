@@ -19,15 +19,48 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import psycopg
+import pytest
+from host_test_scope import require_uncontained_scope
 from psycopg import sql
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def test_a_finite_dispatcher_run_exits_instead_of_joining_dbos_forever(tmp_path: Path) -> None:
+@pytest.fixture
+def dbos_database_url() -> Iterator[str]:
+    """Own a complete DBOS database; the contained gate owns only its granted schemas."""
+
+    require_uncontained_scope(
+        reason="real DBOS shutdown requires host database creation; the server also binds TCP",
+        required_flag="AIDASHOS_REQUIRE_DBOS_SHUTDOWN_HOST_TESTS",
+    )
+    admin_url = os.environ["AGENT_COORDINATION_DATABASE_URL"]
+    scratch = f"dbos_shutdown_probe_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(admin_url, autocommit=True) as connection:
+        connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(scratch)))
+    try:
+        yield urlsplit(admin_url)._replace(path=f"/{scratch}").geturl()
+    finally:
+        with psycopg.connect(admin_url, autocommit=True) as connection:
+            connection.execute(
+                sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(scratch))
+            )
+            assert (
+                connection.execute(
+                    "SELECT 1 FROM pg_database WHERE datname = %s", (scratch,)
+                ).fetchone()
+                is None
+            ), "the owned DBOS database survived cleanup"
+
+
+def test_a_finite_dispatcher_run_exits_instead_of_joining_dbos_forever(
+    tmp_path: Path, dbos_database_url: str
+) -> None:
     """`run_ledger_dispatcher --max-polls 1` launches DBOS, polls, and must exit.
 
     The child runs against a scratch DBOS database on the suite's tmpfs server,
@@ -37,53 +70,42 @@ def test_a_finite_dispatcher_run_exits_instead_of_joining_dbos_forever(tmp_path:
     26-minute hang in miniature.
     """
 
-    admin_url = os.environ["AGENT_COORDINATION_DATABASE_URL"]
-    scratch = f"dbos_shutdown_probe_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(admin_url, autocommit=True) as connection:
-        connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(scratch)))
-    scratch_url = admin_url.rsplit("/", 1)[0] + f"/{scratch}"
-    try:
-        environment = {
-            **os.environ,
-            "LOCAL_AGENT_USE_DBOS": "true",
-            "LOCAL_AGENT_DBOS_SYSTEM_DATABASE_URL": scratch_url,
-            "DBOS_SYSTEM_DATABASE_URL": scratch_url,
-        }
-        started = time.monotonic()
-        proc = subprocess.run(
-            [
-                sys.executable,
-                str(REPO_ROOT / "agent_coordination_mcp.py"),
-                "--root",
-                str(tmp_path),
-                "run_ledger_dispatcher",
-                "--max-polls",
-                "1",
-                "--interval-seconds",
-                "0",
-            ],
-            cwd=REPO_ROOT,
-            env=environment,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        elapsed = time.monotonic() - started
+    environment = {
+        **os.environ,
+        "LOCAL_AGENT_USE_DBOS": "true",
+        "LOCAL_AGENT_DBOS_SYSTEM_DATABASE_URL": dbos_database_url,
+        "DBOS_SYSTEM_DATABASE_URL": dbos_database_url,
+    }
+    started = time.monotonic()
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "agent_coordination_mcp.py"),
+            "--root",
+            str(tmp_path),
+            "run_ledger_dispatcher",
+            "--max-polls",
+            "1",
+            "--interval-seconds",
+            "0",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    elapsed = time.monotonic() - started
 
-        assert proc.returncode == 0, f"dispatcher failed:\n{proc.stdout}{proc.stderr}"
-        assert elapsed < 90, f"the dispatcher took {elapsed:.0f}s for one empty poll"
-        with psycopg.connect(scratch_url) as connection:
-            launched = connection.execute(
-                "SELECT count(*) FROM information_schema.schemata WHERE schema_name = 'dbos'"
-            ).fetchone()
-        assert launched is not None and launched[0] == 1, (
-            "DBOS never launched in the child, so this exit proves nothing"
-        )
-    finally:
-        with psycopg.connect(admin_url, autocommit=True) as connection:
-            connection.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(scratch))
-            )
+    assert proc.returncode == 0, f"dispatcher failed:\n{proc.stdout}{proc.stderr}"
+    assert elapsed < 90, f"the dispatcher took {elapsed:.0f}s for one empty poll"
+    with psycopg.connect(dbos_database_url) as connection:
+        launched = connection.execute(
+            "SELECT count(*) FROM information_schema.schemata WHERE schema_name = 'dbos'"
+        ).fetchone()
+    assert launched is not None and launched[0] == 1, (
+        "DBOS never launched in the child, so this exit proves nothing"
+    )
 
 
 def test_the_boundary_hard_exits_past_a_thread_destroy_cannot_stop() -> None:
@@ -119,7 +141,7 @@ def test_the_boundary_hard_exits_past_a_thread_destroy_cannot_stop() -> None:
     assert "work finished" in proc.stdout, "output must be flushed before the hard exit"
 
 
-def test_a_ctrl_cd_server_that_launched_dbos_exits(tmp_path: Path) -> None:
+def test_a_ctrl_cd_server_that_launched_dbos_exits(tmp_path: Path, dbos_database_url: str) -> None:
     """`local-agent serve` under SIGINT must exit once uvicorn has shut down.
 
     The API lifespan launches DBOS and destroys it after yield; the boundary
@@ -133,11 +155,6 @@ def test_a_ctrl_cd_server_that_launched_dbos_exits(tmp_path: Path) -> None:
     import socket
     import urllib.request
 
-    admin_url = os.environ["AGENT_COORDINATION_DATABASE_URL"]
-    scratch = f"dbos_serve_probe_{uuid.uuid4().hex[:12]}"
-    with psycopg.connect(admin_url, autocommit=True) as connection:
-        connection.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(scratch)))
-    scratch_url = admin_url.rsplit("/", 1)[0] + f"/{scratch}"
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -154,8 +171,8 @@ def test_a_ctrl_cd_server_that_launched_dbos_exits(tmp_path: Path) -> None:
         env={
             **os.environ,
             "LOCAL_AGENT_USE_DBOS": "true",
-            "LOCAL_AGENT_DBOS_SYSTEM_DATABASE_URL": scratch_url,
-            "DBOS_SYSTEM_DATABASE_URL": scratch_url,
+            "LOCAL_AGENT_DBOS_SYSTEM_DATABASE_URL": dbos_database_url,
+            "DBOS_SYSTEM_DATABASE_URL": dbos_database_url,
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -182,7 +199,7 @@ def test_a_ctrl_cd_server_that_launched_dbos_exits(tmp_path: Path) -> None:
             raise AssertionError("the server printed its shutdown and never exited") from None
         assert server.returncode == 0, f"server exited {server.returncode}"
 
-        with psycopg.connect(scratch_url) as connection:
+        with psycopg.connect(dbos_database_url) as connection:
             launched = connection.execute(
                 "SELECT count(*) FROM information_schema.schemata WHERE schema_name = 'dbos'"
             ).fetchone()
@@ -192,7 +209,4 @@ def test_a_ctrl_cd_server_that_launched_dbos_exits(tmp_path: Path) -> None:
     finally:
         if server.poll() is None:
             server.kill()
-        with psycopg.connect(admin_url, autocommit=True) as connection:
-            connection.execute(
-                sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(scratch))
-            )
+        server.communicate(timeout=15)

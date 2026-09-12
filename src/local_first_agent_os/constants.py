@@ -110,11 +110,6 @@ DEFAULT_AGENT_MODEL_TIMEOUT_SECONDS: int = 3600
 # made most adapters silently ignore it.
 DEFAULT_DELEGATED_TASK_MAX_TOKENS: int = 2048
 
-# Process-adapter bounds. These are operational decisions shared by every CLI
-# adapter, not properties of Claude or Codex.
-DEFAULT_AGENT_PROCESS_HEALTH_TIMEOUT_SECONDS: int = 5
-DEFAULT_AGENT_PROCESS_TERMINATION_GRACE_SECONDS: int = 5
-
 # Conventional process outcomes shared by runners and lifecycle classifiers.
 PROCESS_TIMEOUT_EXIT_CODE: int = 124
 PROCESS_CANCELED_EXIT_CODE: int = 130

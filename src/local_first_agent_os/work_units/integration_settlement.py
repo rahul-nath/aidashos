@@ -109,7 +109,7 @@ def settle_landed_integration(payload: dict[str, Any]) -> SettlementOutcome:
     """Settle one ``integration_landed`` event's milestone, or say why not."""
 
     intent_id = str(payload.get("intent_id") or "") or None
-    if intent_id is None or not payload.get("milestone_key"):
+    if intent_id is None:
         return SettlementSkipped(
             intent_id=intent_id,
             reason="the integration request did not come from a milestone",
@@ -124,6 +124,8 @@ def settle_landed_integration(payload: dict[str, Any]) -> SettlementOutcome:
                 "MILESTONE_COMPLETED_BEFORE_EXACT_MERGE forbids settling without one"
             ),
         )
+    # Legacy approval metadata is optional; the retained dispatch owns the
+    # WorkUnit/milestone identity, and the aggregate verifies its current intent.
     with_source = _work_unit_source(intent_id)
     if with_source is None:
         return SettlementSkipped(

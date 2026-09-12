@@ -30,15 +30,10 @@ from local_first_agent_os.coordination.milestones import (
     parse_milestone_reference,
 )
 from local_first_agent_os.coordination.projects import create_saga
-from local_first_agent_os.workflow.saga_support import (
-    build_approved_gawd_milestone_dispatch_source,
-)
 
 
-def test_a_source_built_by_the_builder_round_trips() -> None:
-    """The one writer and the one reader agree, which is the only contract here."""
-
-    source = build_approved_gawd_milestone_dispatch_source("doc-1", "mile-1")
+def test_historical_milestone_sources_remain_readable() -> None:
+    source = "approved_gawd:doc-1:milestone:mile-1"
 
     assert parse_milestone_reference(source) == ClaimedMilestone(milestone_id="mile-1")
 
@@ -87,15 +82,6 @@ def test_the_marker_with_nothing_after_it_is_malformed() -> None:
     )
 
 
-def test_the_builder_refuses_to_produce_a_malformed_source() -> None:
-    """Better than reporting it later: the caller has the id in hand."""
-
-    import pytest
-
-    with pytest.raises(ValueError, match="needs a milestone id"):
-        build_approved_gawd_milestone_dispatch_source("doc-1", "  ")
-
-
 def test_a_dangling_milestone_reference_is_recorded_rather_than_ignored(tmp_path) -> None:
     """A claim that resolves to no row is not the same as no claim.
 
@@ -107,7 +93,7 @@ def test_a_dangling_milestone_reference_is_recorded_rather_than_ignored(tmp_path
 
     store.set_root(str(tmp_path))
     saga_id = str(create_saga("dangling reference")["saga_id"])
-    source = build_approved_gawd_milestone_dispatch_source("doc-1", "milestone-that-never-existed")
+    source = "approved_gawd:doc-1:milestone:milestone-that-never-existed"
     submit_dispatch_intent("senior", "do the work", "code", None, source)
 
     result = claim_next_dispatch_intent("worker-1")

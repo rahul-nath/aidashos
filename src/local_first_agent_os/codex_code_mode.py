@@ -9,20 +9,17 @@ Tool callbacks return to Codex and its existing capability-filtered worker.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import secrets
-from contextlib import ExitStack
+import tempfile
+from contextlib import ExitStack, suppress
 from pathlib import Path
 
-from websockets.asyncio.client import connect
-from websockets.asyncio.server import Server, ServerConnection, serve
-from websockets.exceptions import ConnectionClosed
-
 from .agent_process_cleanup import await_cleanup, close_process, wait_bounded
+from .codex_stdio_relay import FRAME_LIMIT, CodeModeEndpoint, connect_endpoint, read_frame
 from .process_containment import ProcessContainmentUnavailable
 from .sandbox_runtime import ReadOnlyToolWorker
-
-_FRAME_LIMIT = 2 * 1024 * 1024
 
 
 def code_mode_executable(codex_bin: str | Path) -> Path:
@@ -34,99 +31,127 @@ async def preflight_code_mode_runtime(boundary: ReadOnlyToolWorker, codex_bin: s
     try:
         # Keep resource cleanup outside the execution timeout.
         async with CodexCodeModeHost(boundary, codex_bin) as host:  # noqa: SIM117
-            async with asyncio.timeout(10), connect(host.url, max_size=_FRAME_LIMIT) as socket:
+            async with asyncio.timeout(10):
+                reader, writer = await connect_endpoint(host.endpoint)
 
-                async def exchange(message: dict) -> dict:
-                    encoded = json.dumps(message).encode()
-                    await socket.send(len(encoded).to_bytes(4, "little") + encoded)
-                    raw = await socket.recv()
+                try:
+
+                    async def exchange(message: dict) -> dict:
+                        encoded = json.dumps(message).encode()
+                        writer.write(len(encoded).to_bytes(4, "little") + encoded)
+                        await writer.drain()
+                        raw = await read_frame(reader)
+                        if (
+                            not isinstance(raw, bytes)
+                            or len(raw) < 4
+                            or int.from_bytes(raw[:4], "little") != len(raw) - 4
+                        ):
+                            raise ValueError("invalid Code Mode preflight frame")
+                        return json.loads(raw[4:])
+
+                    ready = await exchange(
+                        {
+                            "type": "connection/hello",
+                            "supportedVersions": [1],
+                            "requiredCapabilities": [],
+                            "optionalCapabilities": [],
+                        }
+                    )
+                    if ready != {
+                        "type": "connection/ready",
+                        "selectedVersion": 1,
+                        "capabilities": [],
+                    }:
+                        raise ValueError("Code Mode protocol differs from the verified version")
+                    opened = await exchange(
+                        {
+                            "type": "operation/request",
+                            "id": 1,
+                            "request": {"method": "session/open", "sessionId": "preflight"},
+                        }
+                    )
+                    if opened.get("result") != {
+                        "status": "ok",
+                        "value": {"type": "session/ready", "sessionId": "preflight"},
+                    }:
+                        raise ValueError("Code Mode session could not start")
+                    started = await exchange(
+                        {
+                            "type": "operation/request",
+                            "id": 2,
+                            "request": {
+                                "method": "session/execute",
+                                "sessionId": "preflight",
+                                "request": {
+                                    "tool_call_id": "preflight",
+                                    "enabled_tools": [],
+                                    "source": 'text("AIDASHOS_CODE_MODE_READY");',
+                                    "yield_time_ms": None,
+                                    "max_output_tokens": None,
+                                },
+                            },
+                        }
+                    )
+                    if (
+                        started.get("result", {}).get("value", {}).get("type")
+                        != "execution/started"
+                    ):
+                        raise ValueError("Code Mode execution did not start")
+                    raw = await read_frame(reader)
                     if (
                         not isinstance(raw, bytes)
                         or len(raw) < 4
                         or int.from_bytes(raw[:4], "little") != len(raw) - 4
                     ):
-                        raise ValueError("invalid Code Mode preflight frame")
-                    return json.loads(raw[4:])
+                        raise ValueError("invalid Code Mode execution frame")
+                    completed = json.loads(raw[4:])
+                    result = completed.get("result", {}).get("value", {}).get("Result", {})
+                    if (
+                        completed.get("type") != "execute/initialResponse"
+                        or completed.get("id") != 2
+                        or result.get("error_text") is not None
+                        or result.get("content_items")
+                        != [{"type": "input_text", "text": "AIDASHOS_CODE_MODE_READY"}]
+                    ):
+                        raise ValueError("Code Mode did not return its computed readiness proof")
+                    host.require_alive()
+                finally:
+                    writer.close()
+                    with suppress(OSError):
+                        await wait_bounded(writer.wait_closed(), 2)
 
-                ready = await exchange(
-                    {
-                        "type": "connection/hello",
-                        "supportedVersions": [1],
-                        "requiredCapabilities": [],
-                        "optionalCapabilities": [],
-                    }
-                )
-                if ready != {"type": "connection/ready", "selectedVersion": 1, "capabilities": []}:
-                    raise ValueError("Code Mode protocol differs from the verified version")
-                opened = await exchange(
-                    {
-                        "type": "operation/request",
-                        "id": 1,
-                        "request": {"method": "session/open", "sessionId": "preflight"},
-                    }
-                )
-                if opened.get("result") != {
-                    "status": "ok",
-                    "value": {"type": "session/ready", "sessionId": "preflight"},
-                }:
-                    raise ValueError("Code Mode session could not start")
-                started = await exchange(
-                    {
-                        "type": "operation/request",
-                        "id": 2,
-                        "request": {
-                            "method": "session/execute",
-                            "sessionId": "preflight",
-                            "request": {
-                                "tool_call_id": "preflight",
-                                "enabled_tools": [],
-                                "source": 'text("AIDASHOS_CODE_MODE_READY");',
-                                "yield_time_ms": None,
-                                "max_output_tokens": None,
-                            },
-                        },
-                    }
-                )
-                if started.get("result", {}).get("value", {}).get("type") != "execution/started":
-                    raise ValueError("Code Mode execution did not start")
-                raw = await socket.recv()
-                if (
-                    not isinstance(raw, bytes)
-                    or len(raw) < 4
-                    or int.from_bytes(raw[:4], "little") != len(raw) - 4
-                ):
-                    raise ValueError("invalid Code Mode execution frame")
-                completed = json.loads(raw[4:])
-                result = completed.get("result", {}).get("value", {}).get("Result", {})
-                if (
-                    completed.get("type") != "execute/initialResponse"
-                    or completed.get("id") != 2
-                    or result.get("error_text") is not None
-                    or result.get("content_items")
-                    != [{"type": "input_text", "text": "AIDASHOS_CODE_MODE_READY"}]
-                ):
-                    raise ValueError("Code Mode did not return its computed readiness proof")
-                host.require_alive()
-    except (OSError, ValueError, TimeoutError, ConnectionClosed) as exc:
+    except (OSError, ValueError, TimeoutError, asyncio.IncompleteReadError) as exc:
         raise ProcessContainmentUnavailable(
             "contained Code Mode execution preflight failed"
         ) from exc
 
 
 class CodexCodeModeHost:
-    """A single-use, supervised, contained native interpreter connection."""
+    """A single-use, supervised interpreter with a private authenticated relay.
+
+    The listener, every connection and the contained process share one owner.
+    The interpreter receives pipes only; it never receives socket authority.
+    """
 
     def __init__(self, boundary: ReadOnlyToolWorker, codex_bin: str):
         self.boundary = boundary
         self.executable = code_mode_executable(codex_bin)
         self._stack = ExitStack()
         self._process: asyncio.subprocess.Process | None = None
-        self._server: Server | None = None
-        self._key = secrets.token_urlsafe(32)
+        self._server: asyncio.Server | None = None
+        self._endpoint: CodeModeEndpoint | None = None
+        self._connections: set[asyncio.StreamWriter] = set()
+        self._handlers: set[asyncio.Task[None]] = set()
         self._connected = False
         self._disconnected = False
+        self._failure: str | None = None
         self._close_task: asyncio.Task[None] | None = None
-        self.url = ""
+
+    @property
+    def endpoint(self) -> CodeModeEndpoint:
+        if self._endpoint is None:
+            raise ValueError("Code Mode endpoint is not prepared")
+        return self._endpoint
 
     async def __aenter__(self) -> CodexCodeModeHost:
         if self._process is not None or self._close_task is not None:
@@ -142,20 +167,20 @@ class CodexCodeModeHost:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=None,
-                limit=_FRAME_LIMIT,
+                limit=FRAME_LIMIT,
             )
-            self._server = await serve(
-                self._relay,
-                "127.0.0.1",
-                0,
-                max_size=_FRAME_LIMIT,
-                max_queue=4,
-                origins=[None],
-                compression=None,
-                close_timeout=1,
+            # macOS sockaddr_un is short even when TMPDIR or the repository is long.
+            directory = Path(
+                self._stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="acm-", dir=Path("/tmp").resolve())
+                )
             )
-            port = self._server.sockets[0].getsockname()[1]
-            self.url = f"ws://127.0.0.1:{port}/{self._key}"
+            directory.chmod(0o700)
+            self._endpoint = CodeModeEndpoint(directory / "ipc", secrets.token_urlsafe(32))
+            self._server = await asyncio.start_unix_server(
+                self._accept, path=self.endpoint.path, limit=FRAME_LIMIT, backlog=4
+            )
+            self.endpoint.path.chmod(0o600)
             return self
         except BaseException:
             await self.aclose()
@@ -163,7 +188,9 @@ class CodexCodeModeHost:
 
     async def __aexit__(self, exc_type: object, *_: object) -> None:
         await self.aclose()
-        if exc_type is None and (self._process is None or self._process.returncode != 0):
+        if exc_type is None and (
+            self._process is None or self._process.returncode != 0 or self._failure is not None
+        ):
             raise ProcessContainmentUnavailable(
                 "contained Code Mode host did not exit successfully"
             )
@@ -176,61 +203,90 @@ class CodexCodeModeHost:
                 f"(exit={code}, disconnected={self._disconnected})"
             )
 
-    async def _relay(self, socket: ServerConnection) -> None:
-        if self._connected or socket.request is None or socket.request.path != f"/{self._key}":
-            await socket.close(code=1008, reason="unrecognized Code Mode connection")
+    def _accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self._close_task is not None or len(self._handlers) >= 4:
+            writer.close()
             return
-        self._connected = True
-        assert self._process is not None
-        assert self._process.stdin is not None and self._process.stdout is not None
-        stdin, stdout = self._process.stdin, self._process.stdout
+        self._connections.add(writer)
+        task = asyncio.create_task(self._relay(reader, writer))
+        self._handlers.add(task)
+        task.add_done_callback(self._finished)
 
-        async def to_worker() -> None:
-            async for raw in socket:
-                self.require_alive()
-                if not isinstance(raw, bytes) or len(raw) > _FRAME_LIMIT:
-                    raise ValueError("Code Mode frame exceeds the bound")
-                # Native WebSocket and stdio both carry length-prefixed JSON.
-                # Preserve the IPC bytes rather than introducing another envelope.
-                if len(raw) < 4 or int.from_bytes(raw[:4], "little") != len(raw) - 4:
-                    raise ValueError("invalid Code Mode IPC frame")
-                stdin.write(raw)
-                await stdin.drain()
+    def _finished(self, task: asyncio.Task[None]) -> None:
+        self._handlers.discard(task)
+        if not task.cancelled() and (failure := task.exception()) is not None:
+            self._failure = type(failure).__name__
 
-        async def from_worker() -> None:
-            while True:
-                try:
-                    header = await stdout.readexactly(4)
-                except asyncio.IncompleteReadError as exc:
-                    if exc.partial:
-                        raise ValueError("truncated Code Mode frame") from exc
-                    return
-                length = int.from_bytes(header, "little")
-                if length > _FRAME_LIMIT:
-                    raise ValueError("Code Mode response exceeds the bound")
-                await socket.send(header + await stdout.readexactly(length))
-
-        tasks = [asyncio.create_task(to_worker()), asyncio.create_task(from_worker())]
+    async def _relay(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        admitted = False
+        tasks: list[asyncio.Task[None]] = []
         try:
+            async with asyncio.timeout(5):
+                supplied = await reader.readexactly(44)
+                if not hmac.compare_digest(supplied, self.endpoint.token.encode("ascii") + b"\n"):
+                    return
+            # The check and assignment contain no await: concurrent handshakes cannot
+            # attach a second reader to the interpreter's stdout.
+            if self._connected or self._close_task is not None:
+                return
+            self.require_alive()
+            self._connected = admitted = True
+            assert self._process is not None
+            assert self._process.stdin is not None and self._process.stdout is not None
+            stdin, stdout = self._process.stdin, self._process.stdout
+            writer.write(b"ok\n")
+            await writer.drain()
+
+            async def transfer(
+                source: asyncio.StreamReader, destination: asyncio.StreamWriter
+            ) -> None:
+                while (frame := await read_frame(source)) is not None:
+                    self.require_alive()
+                    destination.write(frame)
+                    await destination.drain()
+
+            tasks = [
+                asyncio.create_task(transfer(reader, stdin)),
+                asyncio.create_task(transfer(stdout, writer)),
+            ]
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
-        except ConnectionClosed:
-            pass
+        except (
+            OSError,
+            ValueError,
+            TimeoutError,
+            asyncio.IncompleteReadError,
+            ProcessContainmentUnavailable,
+        ) as failure:
+            if admitted:
+                self._failure = type(failure).__name__
         finally:
-            self._disconnected = True
-            stdin.close()
+            if admitted:
+                self._disconnected = True
+                assert self._process is not None and self._process.stdin is not None
+                self._process.stdin.close()
             for task in tasks:
                 task.cancel()
-            await wait_bounded(asyncio.gather(*tasks, return_exceptions=True), 2)
-            await socket.close(code=1011, reason="Code Mode connection ended")
+            if tasks:
+                await wait_bounded(asyncio.gather(*tasks, return_exceptions=True), 2)
+            writer.close()
+            self._connections.discard(writer)
+            with suppress(OSError, TimeoutError):
+                await wait_bounded(writer.wait_closed(), 2)
 
     async def _close(self) -> None:
         try:
             if self._server is not None:
                 self._server.close()
+            for writer in tuple(self._connections):
+                writer.close()
+            for task in tuple(self._handlers):
+                task.cancel()
             if self._process is not None:
                 await close_process(self._process)
+            if self._handlers:
+                await wait_bounded(asyncio.gather(*self._handlers, return_exceptions=True), 3)
             if self._server is not None:
                 await wait_bounded(self._server.wait_closed(), 3)
         finally:

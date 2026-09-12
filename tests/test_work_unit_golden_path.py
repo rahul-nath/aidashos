@@ -1,35 +1,17 @@
 # SPDX-FileCopyrightText: 2026 Rahul Nath <https://github.com/rahul-nath>
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""A WorkUnit driven from a document to SUCCEEDED.
+"""Resident WorkUnit acceptance and durable recovery contracts.
 
-``tests/conftest.py`` pins ``LOCAL_AGENT_USE_DBOS=false`` before the package is
-imported, because ``@dbos_step`` and ``@dbos_workflow`` bind at import time. So
-the ordinary suite has never run a real DBOS workflow, every green WorkUnit trace
-in it went through the simulated runtime, and none of them ever submitted a
-dispatch intent. Every defect in the 2026-08-04 handoffs lived in that gap.
-
-Two lanes, for two different reasons:
-
-- ``test_the_golden_path_runs_through_the_resident_loops`` starts the enqueue
-  drainer and the ledger dispatcher as **real subprocesses** against disposable
-  databases, exactly the way ``scripts/start-agent-runtime.sh`` does. That is the
-  only shape where "the production resident constructors" is literally true, and
-  the only one that exercises DBOS's cross-process notification path. It is gated
-  on ``LOCAL_AGENT_RUN_POSTGRES_INTEGRATION=1``, which is what
-  ``scripts/run_dbos_postgres_smoke.sh`` already exports.
-- everything else is ledger semantics, and runs in the ordinary lane against the
-  per-test Postgres schema.
-
-The design doc is ``docs/examples/work_unit_golden_path_design_doc.md`` rather
-than the acceptance one, because the acceptance document's IMPLEMENT milestones
-require ``source_patch``, which the evidence gate grants only for non-empty
-``changed_files``. A bounded advisory turn cannot honestly produce that, and
-making the gate accept prose would be deleting the check to pass the test.
+The real happy path runs application subprocesses with separate disposable
+Postgres and DBOS databases and deterministic model responses. It is selected
+explicitly by scripts/accept_golden_path.py; ordinary ledger scenarios below do
+not certify that resident execution or installed native containment.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -84,6 +66,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 GOLDEN_PATH_DOC = REPO_ROOT / "docs" / "examples" / "work_unit_golden_path_design_doc.md"
 FIRST_MILESTONE = "a"
 REVIEW_MILESTONE = "b"
+DELIVERY_MILESTONE = "c"
 
 
 # --------------------------------------------------------------------------- #
@@ -506,6 +489,33 @@ def test_the_golden_path_runs_through_the_resident_loops(tmp_path: Path) -> None
             assert any(item["artifact_type"] == "implementation_plan" for item in artifacts), (
                 "the plan milestone must record its evidence, not merely succeed"
             )
+            plan_artifact = next(
+                item for item in artifacts if item["artifact_type"] == "implementation_plan"
+            )
+            plan_events = [
+                event
+                for event in _coordination("list_work_unit_events", work_unit_id)["events"]
+                if event["milestone_execution_id"] == plan_artifact["milestone_execution_id"]
+                and event["event_type"] == "MILESTONE_SUCCEEDED"
+            ]
+            assert len(plan_events) == 1
+            plan_record = next(
+                artifact
+                for artifact in plan_events[0]["payload"]["artifacts"]
+                if artifact["artifact_type"] == "implementation_plan"
+            )
+            assert plan_record["content_hash"] == plan_artifact["content_hash"]
+            plan_evidence = plan_record["metadata"]["implementation_plan"]
+            assert plan_evidence["schema_version"] == "implementation_plan_evidence.v1"
+            assert plan_evidence["report"]["status"] == "PLANNED"
+            assert "Deterministic model fixture only" in plan_evidence["report"]["plan_markdown"]
+            assert plan_evidence["origin"]["kind"] == "LOCAL_MODEL_INVOCATION"
+            assert (
+                plan_artifact["content_hash"]
+                == hashlib.sha256(
+                    json.dumps(plan_evidence, sort_keys=True).encode("utf-8")
+                ).hexdigest()
+            )
 
             pending = _await(
                 lambda: _view()["pending_decisions"],
@@ -533,28 +543,53 @@ def test_the_golden_path_runs_through_the_resident_loops(tmp_path: Path) -> None
                 lambda: _view()["status"] == WorkUnitStatus.SUCCEEDED.value,
                 timeout=300,
                 what="the WorkUnit to reach SUCCEEDED",
+                diagnose=_why_stuck,
             )
-
-
-@given("a disposable coordination ledger and DBOS system database")
-@given("the golden path design doc is compiled and started")
-@when("the enqueue drainer and the resident dispatcher are running")
-@then("the first milestone reaches a real dispatch intent")
-@then("the local junior delegate answers it")
-@then("the milestone records its artifact")
-@when("the operator approves the review milestone")
-@then("the WorkUnit reaches SUCCEEDED")
-def _covered_by_the_integration_test() -> None:
-    """The happy-path scenario is the integration test above, step for step.
-
-    Written this way rather than re-driven here: the whole point of that test is
-    that it runs in real subprocesses against disposable databases, and a second
-    in-process implementation of the same scenario would pass while proving none
-    of it.
-    """
-
-    if os.environ.get("LOCAL_AGENT_RUN_POSTGRES_INTEGRATION") != "1":
-        pytest.skip("set LOCAL_AGENT_RUN_POSTGRES_INTEGRATION=1 to run the full drive")
+            completed_view = _view()
+            delivered = next(
+                item
+                for item in completed_view["milestones"]
+                if item["stable_key"] == DELIVERY_MILESTONE
+            )
+            assert delivered["status"] == MilestoneExecutionStatus.SUCCEEDED.value
+            records = [
+                item
+                for item in completed_view["artifacts"]
+                if item["artifact_type"] == "delivery_record"
+            ]
+            assert len(records) == 1
+            record = records[0]
+            assert record["milestone_execution_id"] == delivered["milestone_execution_id"]
+            # A fresh CLI process reads the retained event, independently of
+            # the resident that produced the record and the materialized view.
+            events = _coordination("list_work_unit_events", work_unit_id)["events"]
+            delivery_events = [
+                event
+                for event in events
+                if event["milestone_execution_id"] == delivered["milestone_execution_id"]
+                and event["event_type"] == "MILESTONE_SUCCEEDED"
+            ]
+            assert len(delivery_events) == 1
+            evidence = next(
+                artifact
+                for artifact in delivery_events[0]["payload"]["artifacts"]
+                if artifact["artifact_type"] == "delivery_record"
+            )
+            assert evidence["uri"] == record["uri"]
+            assert evidence["content_hash"] == record["content_hash"]
+            payload = evidence["metadata"]["delivery_record"]
+            content = json.dumps(payload, sort_keys=True).encode("utf-8")
+            assert hashlib.sha256(content).hexdigest() == record["content_hash"]
+            assert evidence["size_bytes"] == len(content)
+            assert evidence["media_type"] == "application/json"
+            assert payload["schema_version"] == "delivery_record.v1"
+            assert payload["work_unit_id"] == work_unit_id
+            assert payload["compiled_plan_hash"] == completed_view["compiled_plan_hash"]
+            assert {"implementation_plan", "operator_approval"} <= set(
+                payload["delivered_artifact_types"]
+            )
+            assert "delivery_record" not in payload["delivered_artifact_types"]
+            assert "Changing any file in a target repository." in payload["not_covered"]
 
 
 # --------------------------------------------------------------------------- #
@@ -817,12 +852,7 @@ def _override_waiting(world: dict[str, Any]) -> None:
 
 
 def test_the_golden_path_document_compiles_to_a_runnable_plan(work_unit_ledger: Path) -> None:
-    """The document the integration test drives, checked without needing DBOS.
-
-    A compile failure here would make that test fail for a reason that has
-    nothing to do with the resident loops, in the one lane that is expensive to
-    run and rare to run.
-    """
+    """The resident document requests only evidence its executors can produce."""
 
     result = service.compile_design_doc_text(
         GOLDEN_PATH_DOC.read_text(encoding="utf-8"), design_doc_id="golden_path"
@@ -830,61 +860,18 @@ def test_the_golden_path_document_compiles_to_a_runnable_plan(work_unit_ledger: 
 
     assert result.runnable is True, result.diagnostics
     assert result.compiled_plan_revision_id is not None
-
-
-def test_every_golden_path_milestone_asks_for_evidence_its_executor_can_produce(
-    work_unit_ledger: Path,
-) -> None:
-    """The reason this document exists rather than the acceptance one.
-
-    `source_patch` needs non-empty `changed_files` and `test_result` needs
-    verification output; a bounded advisory turn produces neither, so a document
-    asking for them can only pass by weakening the gate.
-    """
-
-    result = service.compile_design_doc_text(
-        GOLDEN_PATH_DOC.read_text(encoding="utf-8"), design_doc_id="golden_path_evidence"
-    )
-    assert result.compiled_plan_revision_id is not None
     plan = repo.get_compiled_plan_revision(result.compiled_plan_revision_id).plan
-
+    assert plan.schema_version == "compiled_work_plan.v5"
     required = {
         item for milestone in plan.ordered_milestones() for item in milestone.required_artifacts
     }
-    assert "source_patch" not in required
-    assert "test_result" not in required
-
-
-def test_the_golden_path_document_still_gates_on_an_operator(
-    work_unit_ledger: Path,
-) -> None:
-    """An unattended path that never asks a person is not the path this system wants."""
-
-    result = service.compile_design_doc_text(
-        GOLDEN_PATH_DOC.read_text(encoding="utf-8"), design_doc_id="golden_path_gate"
-    )
-    assert result.compiled_plan_revision_id is not None
-    plan = repo.get_compiled_plan_revision(result.compiled_plan_revision_id).plan
-
-    gated = [
-        milestone for milestone in plan.ordered_milestones() if milestone.approval_policy.required
-    ]
-    assert [milestone.stable_key for milestone in gated] == [REVIEW_MILESTONE]
-
-
-def test_the_ordinary_suite_cannot_run_the_full_drive() -> None:
-    """The constraint that shaped this file, asserted rather than assumed.
-
-    `conftest` pins the DBOS flag before the package is imported, so no fixture
-    can turn it on afterwards: the decorators have already bound. A test that
-    believed otherwise would silently exercise the identity-decorator path and
-    report a green DBOS integration that never touched DBOS.
-    """
-
-    from local_first_agent_os.dbos_app import is_dbos_active
-
-    assert os.environ["LOCAL_AGENT_USE_DBOS"] == "false"
-    assert is_dbos_active() is False
+    assert not {"source_patch", "test_result"} & required
+    assert {"implementation_plan", "operator_approval", "delivery_record"} <= required
+    assert [
+        milestone.stable_key
+        for milestone in plan.ordered_milestones()
+        if milestone.approval_policy.required
+    ] == [REVIEW_MILESTONE]
 
 
 def test_golden_path_pairing_policy_cannot_select_a_frontier_provider(tmp_path: Path) -> None:

@@ -406,13 +406,16 @@ class KnowledgeWorkflowMixin(WorkflowMixinBase):
         sips = shutil.which("sips")
         if sips is None:
             return None
-        completed = subprocess.run(
-            [sips, "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                [sips, "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return None
         if completed.returncode != 0:
             return None
         sides = [

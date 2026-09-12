@@ -8,7 +8,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 import shlex
 import signal
 import subprocess
@@ -19,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, TypeVar
 
+from .codex_review_failure import inspection_process_failure
 from .constants import (
     AGENT_ACTIVITY_MINIMUM_POLL_SECONDS,
     AGENT_CHECKPOINT_TASK_CONTRACT_LIMIT,
@@ -77,6 +77,7 @@ from .lifecycle_failure_harness import (
     LifecycleTransitionPoint,
     reach_lifecycle_transition,
 )
+from .process_ownership import prepare_process_launch
 from .runtime_metrics import SupervisionMetrics
 from .toolchains import project_environment, unprivileged_process_environment
 from .worktree_observation import WorktreeLost, WorktreeObservation, observe_worktree
@@ -439,16 +440,21 @@ class StreamingCommandSupervisor:
                 "timeout_seconds": timeout_seconds,
             },
         )
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=cwd,
-            env=unprivileged_process_environment(
+        launch = prepare_process_launch(
+            command,
+            cwd,
+            unprivileged_process_environment(
                 dict(env or {}) if complete_environment else project_environment(cwd, env)
             ),
+        )
+        process = await asyncio.create_subprocess_exec(
+            *launch.command,
+            cwd=cwd,
+            env=launch.environment,
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            start_new_session=True,
+            start_new_session=launch.ownership.start_new_session,
             limit=AGENT_EVENT_STREAM_READER_LIMIT_BYTES,
         )
         started_sequence = await persist("lifecycle", "process.started", {"pid": process.pid})
@@ -707,7 +713,7 @@ class StreamingCommandSupervisor:
                     )
             with contextlib.suppress(ProcessLookupError):
                 measurements.signal_sent()
-                os.killpg(process.pid, signal.SIGTERM)
+                launch.ownership.send_signal(process.pid, signal.SIGTERM)
             try:
                 await asyncio.wait_for(
                     asyncio.shield(process_task),
@@ -720,7 +726,7 @@ class StreamingCommandSupervisor:
                     {"grace_seconds": self.termination_grace_seconds},
                 )
                 with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGKILL)
+                    launch.ownership.send_signal(process.pid, signal.SIGKILL)
                 try:
                     await asyncio.wait_for(
                         asyncio.shield(process_task),
@@ -790,7 +796,8 @@ class StreamingCommandSupervisor:
             "process.exited",
             {
                 "returncode": returncode,
-                "elapsed_seconds": round(time.monotonic() - started, 3),
+                # Preserve monotonic precision so serialization keeps observation order.
+                "elapsed_seconds": time.monotonic() - started,
                 "exit_observed_elapsed_seconds": (
                     measurements.exit_observed_at - started
                     if measurements.exit_observed_at is not None
@@ -800,7 +807,16 @@ class StreamingCommandSupervisor:
         )
 
         combined_output = "\n".join((*safe_stdout, *safe_stderr))
-        agent_outcome = classify_failure(combined_output) if returncode else None
+        inspection_failure = inspection_process_failure(
+            command, stdout="\n".join(safe_stdout), exit_code=returncode
+        )
+        agent_outcome = (
+            TerminalOutcome(inspection_failure.terminal_outcome)
+            if inspection_failure is not None
+            else classify_failure(combined_output)
+            if returncode
+            else None
+        )
         worktree_observation = None
         if returncode and source_repo_path is not None and base_head_sha is not None:
             worktree_observation = await asyncio.to_thread(observe_worktree, cwd)

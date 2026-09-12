@@ -62,6 +62,12 @@ from .executors import (
 )
 from .lifecycle import FailureClass
 from .plan import CompiledMilestone, DocumentContext
+from .plan_evidence import (
+    PLAN_REPORT_INSTRUCTION,
+    PlanEvidenceCause,
+    PlanEvidenceUnavailable,
+    resolve_implementation_plan,
+)
 
 if TYPE_CHECKING:
     from ..interrupted_recovery import RetainedWorktree
@@ -413,8 +419,11 @@ def _failure_class_for_outcome(outcome: str) -> FailureClass:
     to run, because the milestone was then billed for the provider's outage.
     """
 
-    if outcome == TerminalOutcome.LOCAL_MODEL_NOT_LOADED.value:
-        # Loading is an operator/resource decision, not a failed correctness judgment.
+    if outcome in (
+        TerminalOutcome.LOCAL_MODEL_NOT_LOADED.value,
+        TerminalOutcome.REVIEW_UNAVAILABLE.value,
+    ):
+        # Model/reviewer readiness needs repair before a correctness judgment exists.
         return FailureClass.SCHEDULING
     return FailureClass.TRANSIENT if outcome in _NO_FAULT_OUTCOMES else FailureClass.CORRECTABLE
 
@@ -501,6 +510,10 @@ def _agent_evidence(kind: ArtifactKind, run_result: Mapping[str, Any]) -> str | 
             if not changed:
                 return None
             return "changed files:\n" + "\n".join(sorted(changed))
+        case ArtifactKind.IMPLEMENTATION_PLAN:
+            # Only the exact produced task report, resolved through its retained
+            # artifact and execution subject, can satisfy implementation planning.
+            return None
         case ArtifactKind.TEST_RESULT | ArtifactKind.ACCEPTANCE_REPORT:
             # Observations remain readable, but only a separately resolved host
             # receipt can discharge verification. A result writer cannot certify
@@ -1113,6 +1126,11 @@ class DispatchBackedExecutorRuntime:
             f"Required evidence:\n{artifacts}\n\n"
             f"Permitted tools: {', '.join(context.permitted_tools)}\n"
             f"Compiled plan hash: {context.compiled_plan_hash}\n"
+            + (
+                f"\n{PLAN_REPORT_INSTRUCTION}"
+                if ArtifactKind.IMPLEMENTATION_PLAN.value in context.milestone.required_artifacts
+                else ""
+            )
         )
 
     def poll_until_stopped(
@@ -1362,8 +1380,54 @@ class DispatchBackedExecutorRuntime:
         run_result = normalized.run_result
         artifacts: list[ArtifactRecord] = []
         missing: list[str] = []
+        dispatch_metadata = {
+            "dispatch_intent_id": intent_id,
+            "pairing_assignment_id": (dispatch_payload.get("pairing_assignment") or {}).get(
+                "assignment_id"
+            ),
+            "quality_chart_hash": (dispatch_payload.get("pairing_assignment") or {}).get(
+                "chart_hash"
+            ),
+            "interrupted_recovery_effect_id": (
+                dispatch_payload.get("interrupted_recovery") or {}
+            ).get("effect_id"),
+            "interrupted_recovery_source_intent_id": (
+                dispatch_payload.get("interrupted_recovery") or {}
+            ).get("previous_intent_id"),
+        }
         for artifact_type in context.milestone.required_artifacts:
             kind = ArtifactKind(artifact_type)
+            if kind is ArtifactKind.IMPLEMENTATION_PLAN:
+                try:
+                    plan_evidence = resolve_implementation_plan(
+                        intent_id=intent_id,
+                        target_project_id=self._target_project_id(context) or "",
+                        dispatch_payload=dispatch_payload,
+                        run_result=run_result,
+                    )
+                except PlanEvidenceUnavailable as exc:
+                    return MilestoneFailed(
+                        failure_class=(
+                            FailureClass.CORRECTABLE
+                            if exc.cause is PlanEvidenceCause.REPORT_INVALID
+                            else FailureClass.REQUIRES_OPERATOR
+                        ),
+                        failure_code=exc.cause,
+                        failure_summary=str(exc),
+                    )
+                artifacts.append(
+                    json_evidence_artifact(
+                        context,
+                        RequirableArtifact(kind),
+                        payload=plan_evidence,
+                        step_name=f"dispatch:{intent_id}",
+                        metadata={
+                            **dispatch_metadata,
+                            "implementation_plan": plan_evidence,
+                        },
+                    )
+                )
+                continue
             verification = (
                 _verification_evidence(context, intent_id, run_result)
                 if kind in {ArtifactKind.TEST_RESULT, ArtifactKind.ACCEPTANCE_REPORT}
@@ -1380,24 +1444,12 @@ class DispatchBackedExecutorRuntime:
                     content=content,
                     step_name=f"dispatch:{intent_id}",
                     metadata={
+                        **dispatch_metadata,
                         **(
                             {"host_verification_receipt_ids": list(verification.receipt_ids)}
                             if verification
                             else {}
                         ),
-                        "dispatch_intent_id": intent_id,
-                        "pairing_assignment_id": (
-                            dispatch_payload.get("pairing_assignment") or {}
-                        ).get("assignment_id"),
-                        "quality_chart_hash": (
-                            dispatch_payload.get("pairing_assignment") or {}
-                        ).get("chart_hash"),
-                        "interrupted_recovery_effect_id": (
-                            dispatch_payload.get("interrupted_recovery") or {}
-                        ).get("effect_id"),
-                        "interrupted_recovery_source_intent_id": (
-                            dispatch_payload.get("interrupted_recovery") or {}
-                        ).get("previous_intent_id"),
                     },
                 )
             )
@@ -1528,6 +1580,9 @@ class DeliveryRecordRuntime:
                 RequirableArtifact(ArtifactKind(artifact_type)),
                 payload,
                 step_name="record_delivery",
+                # The transition owner persists this small document with its
+                # immutable event and artifact row; workunit:// names that ledger evidence.
+                metadata={"delivery_record": payload},
             )
             for artifact_type in context.milestone.required_artifacts
         )

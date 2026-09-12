@@ -68,7 +68,7 @@ def installed_native_boundary():
         timeout=5,
         env={"HOME": "/var/empty", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
     )
-    assert result.stdout.strip() == "codex-cli 0.147.0"
+    assert result.stdout.strip() == "codex-cli 0.153.4"
     return installation, codex
 
 
@@ -304,7 +304,6 @@ def inspect_profile(boundary_world):
     world["client_argv"] = _client_command(
         world["codex"],
         LocalFixtureModel("gpt-5.4", "http://127.0.0.1:1/v1"),
-        code_host_url="ws://127.0.0.1:1/code-mode-fixture",
     )
 
 
@@ -378,7 +377,7 @@ def no_broader_grant(boundary_world):
         "multi_agent",
         "skill_mcp_dependency_install",
     }
-    assert "--code-mode-host" in world["client_argv"]
+    assert "--code-mode-host" not in world["client_argv"]
 
 
 @when(parsers.parse("a real model-free review ends by {ending}"))
@@ -574,5 +573,7 @@ def descendants_exited(boundary_world):
 
 @then("only successful completion emits a completed review")
 def completion_is_truthful(boundary_world):
-    completed = sum(event.get("type") == "turn.completed" for event in boundary_world["events"])
+    completed = sum(
+        event.get("type") == "codex.app_server.turn.completed" for event in boundary_world["events"]
+    )
     assert completed == (1 if boundary_world["ending"] == "success" else 0)

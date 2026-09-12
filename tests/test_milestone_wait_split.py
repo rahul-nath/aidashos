@@ -30,10 +30,11 @@ from local_first_agent_os.work_units.execution import (
     DispatchWaitTimeout,
     MilestoneAwaitingDispatch,
     MilestoneFailed,
-    MilestoneSucceeded,
     SimulatedExecutorRuntime,
 )
 from local_first_agent_os.work_units.executors import ExecutorKind
+from local_first_agent_os.work_units.lifecycle import FailureClass
+from local_first_agent_os.work_units.plan_evidence import PlanEvidenceCause
 
 
 class _Submitter:
@@ -111,7 +112,7 @@ def _runner_result(**run_result: Any) -> str:
     )
 
 
-def test_settle_translates_a_terminal_row(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_settle_refuses_summary_only_done_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "local_first_agent_os.work_units.execution.dispatch_intent_row",
         lambda _id: {
@@ -126,7 +127,10 @@ def test_settle_translates_a_terminal_row(monkeypatch: pytest.MonkeyPatch) -> No
 
     outcome = runtime.settle(_context(), awaiting)
 
-    assert isinstance(outcome, MilestoneSucceeded)
+    assert isinstance(outcome, MilestoneFailed)
+    assert outcome.failure_code is PlanEvidenceCause.HOST_EVIDENCE_UNAVAILABLE
+    assert outcome.failure_class is FailureClass.REQUIRES_OPERATOR
+    assert not outcome.artifacts
 
 
 @pytest.mark.parametrize(

@@ -25,7 +25,9 @@ from typing import Any
 
 from .codex_code_mode import code_mode_executable, preflight_code_mode_runtime
 from .codex_review_client import CodexSubscription, run_read_only_review
+from .codex_review_failure import inspection_failure_event
 from .codex_tool_worker import CodexToolWorker, NativeWorkerError
+from .coordination.outcomes import TerminalOutcome
 from .execution_admission import (
     AuthorizedExecution,
     ExecutionAdmissionError,
@@ -41,8 +43,12 @@ from .spawn_authority import SpawnAuthority
 
 _REQUEST_VERSION = 2
 _MAX_REQUEST_BYTES = 2 * 1024 * 1024
-_CODEX_VERSION = "codex-cli 0.147.0"
+_CODEX_VERSION = "codex-cli 0.153.4"
 _EFFORTS = frozenset({"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
+
+
+class CodexInspectionRequestTooLarge(ProcessContainmentUnavailable):
+    """The complete encoded host request cannot fit the supported transport."""
 
 
 @dataclass(frozen=True)
@@ -260,7 +266,7 @@ def prepare_readonly_codex_launch(invocation: CodexReviewInvocation) -> Iterator
         }
         encoded = json.dumps(request).encode()
         if len(encoded) > _MAX_REQUEST_BYTES:
-            raise ValueError("Codex inspection request exceeds the bound")
+            raise CodexInspectionRequestTooLarge("Codex inspection request exceeds the bound")
         request_path = scratch / "request.json"
         request_path.write_bytes(encoded)
         request_path.chmod(0o600)
@@ -377,20 +383,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     except asyncio.CancelledError:
         _emit(
-            {
-                "type": "error",
-                "failure_code": "REVIEW_UNAVAILABLE",
-                "text": "CANNOT_REVIEW: inspection was cancelled",
-            }
+            inspection_failure_event(
+                TerminalOutcome.OPERATOR_CANCELED, "CANNOT_REVIEW: inspection was cancelled"
+            )
         )
         return 130
+    except (ProcessContainmentUnavailable, NativeWorkerError) as exc:
+        _emit(
+            inspection_failure_event(
+                TerminalOutcome.REVIEW_UNAVAILABLE, f"CANNOT_REVIEW: {type(exc).__name__}: {exc}"
+            )
+        )
+        return 125
     except Exception as exc:  # noqa: BLE001 - process contract reports every failed launch
         _emit(
-            {
-                "type": "error",
-                "failure_code": "REVIEW_UNAVAILABLE",
-                "text": f"CANNOT_REVIEW: {type(exc).__name__}: {exc}",
-            }
+            inspection_failure_event(
+                TerminalOutcome.UNKNOWN_FAILURE, f"CANNOT_REVIEW: {type(exc).__name__}: {exc}"
+            )
         )
         return 125
 

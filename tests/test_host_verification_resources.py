@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import socket
 import socketserver
@@ -18,6 +19,7 @@ from typing import Literal
 import pytest
 import test_host_verification_receipts
 import test_local_verification_resources
+from host_verifier_capability import require_host_uid_verifier
 from test_host_verification_receipts import GateFixture
 from test_host_verification_toolchain import _commit
 
@@ -97,6 +99,9 @@ class _EchoHandler(socketserver.BaseRequestHandler):
 
 @pytest.fixture
 def pinned_relay() -> Iterator[resources._PinnedLoopbackRelay]:
+    # This relay belongs to the host gate owner, not to an already contained child.
+    # Check the same gate prerequisite before creating its listening sockets.
+    require_host_uid_verifier()
     with socketserver.TCPServer(("127.0.0.1", 0), _EchoHandler) as server:
         serving = threading.Thread(target=server.serve_forever, daemon=True)
         serving.start()
@@ -111,6 +116,19 @@ def pinned_relay() -> Iterator[resources._PinnedLoopbackRelay]:
             serving.join(timeout=2)
             assert relay_closed
             assert not serving.is_alive()
+
+
+def test_relay_checks_host_authority_before_opening_listeners(monkeypatch) -> None:
+    def contained_client_refusal() -> None:
+        pytest.skip("authenticated contained client cannot provision a host relay")
+
+    def forbidden_listener(*_args, **_kwargs):
+        raise AssertionError("listener creation preceded host authority")
+
+    monkeypatch.setattr(f"{__name__}.require_host_uid_verifier", contained_client_refusal)
+    monkeypatch.setattr(socketserver, "TCPServer", forbidden_listener)
+    with pytest.raises(pytest.skip.Exception, match="cannot provision a host relay"):
+        next(inspect.unwrap(pinned_relay)())
 
 
 @dataclass(frozen=True)
@@ -192,11 +210,19 @@ def test_actual_resource_gate_preserves_process_truth_and_separate_cleanup(
     (gate_fixture.repository / "resource_gate.py").write_text(
         "import os\nimport socket\nimport sys\nfrom pathlib import Path\n"
         "from urllib.parse import parse_qs, urlsplit\n"
-        f"assert Path({str(fixture.certificate)!r}).read_text() == 'synthetic-public-ca'\n"
         "assert 'LOCAL_AGENT_COORDINATION_DATABASE_URL' not in os.environ\n"
         "print(os.environ['LOCAL_AGENT_TEST_DATABASE_URL'])\n"
         "print(os.environ['LOCAL_AGENT_TEST_DATABASE_URL'], file=sys.stderr)\n"
         "url = urlsplit(os.environ['LOCAL_AGENT_TEST_DATABASE_URL'])\n"
+        "ca = Path(parse_qs(url.query)['sslrootcert'][0])\n"
+        f"assert ca != Path({str(fixture.certificate)!r})\n"
+        "assert ca.read_text() == 'synthetic-public-ca'\n"
+        f"for action in [lambda: Path({str(fixture.certificate)!r}).read_bytes(), "
+        "lambda: ca.write_text('replace trust')]:\n"
+        "    try: action()\n"
+        "    except PermissionError: pass\n"
+        "    else: raise AssertionError('private CA read or staged CA write allowed')\n"
+        "print('staged CA readable; original private CA read and staged CA write denied')\n"
         "assert url.hostname == 'ep-fixture.us-east-2.aws.neon.tech'\n"
         "assert parse_qs(url.query)['sslmode'] == ['verify-full']\n"
         "assert parse_qs(url.query)['hostaddr'] == ['127.0.0.1']\n"
@@ -230,6 +256,10 @@ def test_actual_resource_gate_preserves_process_truth_and_separate_cleanup(
         assert observed.resource.identity == fixture.lease.identity
         passed = observed.verification
     assert fixture.close_calls == [fixture.lease.identity.lease_id]
+    assert fixture.certificate.read_text() == "synthetic-public-ca"
+    assert "staged CA readable; original private CA read and staged CA write denied" in (
+        passed.captures[0].stdout
+    )
     assert "declared relay reachable" in passed.captures[0].stdout
     assert "undeclared network denied" in passed.captures[0].stdout
     assert "source write and outside read denied" in passed.captures[1].stdout
@@ -266,7 +296,9 @@ def test_setup_failure_still_closes_the_resource_and_redacts_the_error(
 ) -> None:
     fixture = _resource_fixture(gate_fixture, monkeypatch, pinned_relay, cleanup="closed")
 
-    def fail_toolchain(_project: Path) -> host._InstalledToolchain:
+    def fail_toolchain(
+        _project: Path, *, source_root: Path | None = None
+    ) -> host._InstalledToolchain:
         raise ValueError("toolchain unavailable: " + fixture.worker_secret)
 
     monkeypatch.setattr(host, "_installed_toolchain", fail_toolchain)
@@ -283,7 +315,9 @@ def test_resource_cannot_override_the_command_environment(
 ) -> None:
     fixture = _resource_fixture(gate_fixture, monkeypatch, pinned_relay, cleanup="closed")
     monkeypatch.setattr(
-        resources.VerificationResourceLease, "environment", lambda _self: {"PATH": "/"}
+        resources.VerificationResourceLease,
+        "environment",
+        lambda _self, **_kwargs: {"PATH": "/"},
     )
     observed = gate_fixture.run()
     assert isinstance(observed, host.VerificationUnavailable), observed

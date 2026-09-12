@@ -808,8 +808,7 @@ class NoMilestoneReference:
 class MalformedMilestoneReference:
     """The source carries the marker and no identifier after it.
 
-    Nothing legitimately builds this, so it means a source was assembled by hand
-    or by a caller that bypassed `build_approved_gawd_milestone_dispatch_source`.
+    No supported producer emits this historical format with an empty identifier.
     It is reported rather than raised because the string arrives from a persisted
     column: one poisoned row must not take down every dispatcher poll.
     """

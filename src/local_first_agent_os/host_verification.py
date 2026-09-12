@@ -21,7 +21,7 @@ import sys
 import tempfile
 import uuid
 import zlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from time import monotonic
@@ -33,9 +33,13 @@ from .capabilities import Capability
 from .constants import PROCESS_TIMEOUT_EXIT_CODE
 from .contracts import DispatchIntentStatus, LeaseStatus
 from .coordination.store import ConnectionLike, now, rowdict, tx
-from .pow_wow.process import run_captured_command
+from .macho_dependencies import linked_runtime_files as _linked_runtime_files
+from .native_verification_broker import NativeVerificationBroker
 from .pow_wow.types import CommandRunCapture
 from .project_center import LinkedProject, load_project_center
+from .seatbelt_policy import PathGrant, PathScope, SeatbeltPolicy, TcpGrant
+from .toolchains import installed_node_environment, project_environment
+from .uid_verifier_client import UidVerifierClient, UidVerifierUnavailable
 from .verification_git import verification_git_environment
 from .verification_resources import (
     VerificationResourceClosed,
@@ -46,6 +50,7 @@ from .verification_resources import (
     VerificationResourcesRefused,
     acquire_verification_resources,
 )
+from .verification_toolchain_staging import stage_installed_toolchain
 from .work_units.lifecycle import TERMINAL_WORK_UNIT_STATUSES, WorkUnitStatus
 
 RECEIPT_SCHEMA = "host_verification_receipt.v1"
@@ -461,8 +466,10 @@ class _InstalledToolchain:
     def gate_environment(self, snapshot: Path, outputs: Path) -> dict[str, str]:
         paths = (self.environment / "bin", *(path.parent for path in self.executables))
         search_paths = dict.fromkeys((*paths, Path("/usr/bin"), Path("/bin")))
+        git_prefix = self.executables[1].parent.parent
         return {
             **verification_git_environment(),
+            **installed_node_environment(snapshot, self.executables[2]),
             "PATH": os.pathsep.join(map(str, search_paths)),
             "HOME": str(outputs),
             "TMPDIR": str(outputs),
@@ -470,6 +477,8 @@ class _InstalledToolchain:
             "UV_CACHE_DIR": str(outputs / "uv-cache"),
             "UV_PROJECT_ENVIRONMENT": str(self.environment),
             "VIRTUAL_ENV": str(self.environment),
+            "GIT_EXEC_PATH": str(git_prefix / "libexec" / "git-core"),
+            "GIT_TEMPLATE_DIR": str(git_prefix / "share" / "git-core" / "templates"),
             "UV_PYTHON": str(self.environment / "bin" / "python"),
             "UV_OFFLINE": "1",
             "UV_NO_SYNC": "1",
@@ -486,47 +495,31 @@ class _InstalledToolchain:
         }
 
 
-def _linked_runtime_files(executable: Path) -> tuple[Path, ...]:
-    """Grant concrete loader dependencies, never their host installation parent."""
-    pending = [executable.resolve()]
-    discovered: set[Path] = set()
-    while pending:
-        current = pending.pop()
-        if current in discovered:
-            continue
-        discovered.add(current)
-        result = subprocess.run(
-            ("/usr/bin/otool", "-L", str(current)), capture_output=True, text=True, check=False
-        )
-        if result.returncode != 0:
-            raise ValueError("registered verification tool is not a readable native executable")
-        for line in result.stdout.splitlines()[1:]:
-            dependency = line.strip().split(" (", 1)[0]
-            if dependency.startswith(("/System/", "/usr/lib/")):
-                continue
-            if not dependency.startswith("/"):
-                raise ValueError("verification tool has an unresolved dynamic-library reference")
-            candidate = Path(dependency).resolve(strict=True)
-            if candidate not in discovered:
-                pending.append(candidate)
-    return tuple(sorted(discovered))
-
-
-def _installed_toolchain(project_root: Path) -> _InstalledToolchain:
-    project_environment = project_root / ".venv"
-    if project_environment.is_symlink():
+def _installed_toolchain(
+    project_root: Path, *, source_root: Path | None = None
+) -> _InstalledToolchain:
+    project_venv = project_root / ".venv"
+    if project_venv.is_symlink():
         raise ValueError("registered project environment must not be a symlink")
-    environment = project_environment if project_environment.is_dir() else Path(sys.prefix)
+    environment = project_venv if project_venv.is_dir() else Path(sys.prefix)
+    node_source = source_root if source_root is not None else project_root
+    node_environment = project_environment(node_source)
     roots = (Path(sys.base_prefix), environment)
     if any(path.resolve() in {Path("/"), project_root.resolve()} for path in roots):
         raise ValueError("installed toolchain root would expose mutable source")
     executables: list[Path] = []
     readable = set(roots)
     for name in ("uv", "git", "node"):
-        found = shutil.which(name)
+        found = (
+            shutil.which(name, path=node_environment.get("PATH"))
+            if name == "node"
+            else shutil.which(name)
+        )
         if found is None:
             raise ValueError(f"registered verification tool is unavailable: {name}")
         executable = Path(found).resolve(strict=True)
+        if name == "node":
+            installed_node_environment(node_source, executable)
         executables.append(executable)
         readable.update(_linked_runtime_files(executable))
         if name == "git":
@@ -547,9 +540,13 @@ def _installed_toolchain(project_root: Path) -> _InstalledToolchain:
     return _InstalledToolchain(environment.resolve(), tuple(executables), tuple(sorted(readable)))
 
 
-def _sandbox_profile(
-    snapshot: Path, outputs: Path, toolchain: tuple[Path, ...], forbidden: tuple[Path, ...]
-) -> str:
+def _sandbox_policy(
+    snapshot: Path,
+    outputs: Path,
+    toolchain: tuple[Path, ...],
+    forbidden: tuple[Path, ...],
+    relay_port: int | None = None,
+) -> SeatbeltPolicy:
     # The gate may read its frozen installed toolchain, but all writes are confined
     # to an output directory separate from source. Children inherit this profile.
     readable = (
@@ -565,25 +562,27 @@ def _sandbox_profile(
         Path("/Library/Apple"),
         *toolchain,
     )
-    return " ".join(
-        (
-            "(version 1)",
-            "(allow default)",
-            "(deny network*)",
-            "(deny file-read-data)",
-            *(
-                f"(allow file-read-data (subpath {json.dumps(str(path.resolve()))}))"
-                for path in readable
-                if path.exists()
+    return SeatbeltPolicy(
+        reads=(
+            (
+                *(PathGrant(path) for path in readable if path.exists()),
+                PathGrant(Path("/"), PathScope.EXACT),
+                PathGrant(Path("/dev/null"), PathScope.EXACT),
             ),
-            '(allow file-read-data (literal "/") (literal "/dev/null"))',
-            "(deny file-write*)",
-            f"(allow file-write* (subpath {json.dumps(str(outputs))}))",
-            '(allow file-write* (literal "/dev/null"))',
-            *(f"(deny file-read-data (subpath {json.dumps(str(path))}))" for path in forbidden),
-            f"(deny file-write* (subpath {json.dumps(str(snapshot))}))",
-        )
+        ),
+        writes=((PathGrant(outputs), PathGrant(Path("/dev/null"), PathScope.EXACT)),),
+        outbound=((TcpGrant("localhost", relay_port),) if relay_port is not None else (),),
+        forbidden_reads=tuple(PathGrant(path) for path in forbidden),
+        forbidden_writes=(PathGrant(snapshot),),
+        pty=True,
+        fixed_process_group=True,
     )
+
+
+def _sandbox_profile(
+    snapshot: Path, outputs: Path, toolchain: tuple[Path, ...], forbidden: tuple[Path, ...]
+) -> str:
+    return _sandbox_policy(snapshot, outputs, toolchain, forbidden).render()
 
 
 @dataclass(frozen=True)
@@ -611,11 +610,10 @@ class _GateAuthorityInvalidated:
 def _run_gate_commands(
     commands: tuple[str, ...],
     snapshot: Path,
-    profile: str,
-    environment: dict[str, str],
     deadline: float,
     subject: VerificationSubject,
     lease: BoundLease,
+    broker: NativeVerificationBroker,
 ) -> _GateProcesses | _GateAuthorityInvalidated:
     captures: list[CommandRunCapture] = []
     for command in commands:
@@ -632,13 +630,11 @@ def _run_gate_commands(
             return _GateProcesses(
                 tuple(captures), GateDeadlineExceeded(started_command_count=len(captures))
             )
-        capture = run_captured_command(
-            (str(_SANDBOX), "-p", profile, "/bin/sh", "-c", command),
-            snapshot,
-            timeout_seconds=remaining,
-            env=environment,
-            complete_environment=True,
-        )
+        capture = broker.run(("/bin/sh", "-c", command), snapshot)
+        if broker.authority_invalidated:
+            return _GateAuthorityInvalidated(
+                tuple((*captures, capture)), "verification authority revoked during command"
+            )
         captures.append(capture)
         if capture.exit_code == PROCESS_TIMEOUT_EXIT_CODE or monotonic() >= deadline:
             return _GateProcesses(
@@ -714,88 +710,152 @@ def _observe_gate(
         deadline = min(deadline, monotonic() + resource_remaining)
     with tempfile.TemporaryDirectory(prefix="host-verification-") as raw:
         root = Path(raw).resolve()
-        snapshot, outputs = root / "source", root / "outputs"
-        snapshot.mkdir()
-        outputs.mkdir()
-        source = _snapshot(source_repository, source_commit, base_commit, snapshot)
-        # PATH entries are search locations, not read grants. Grant only
-        # known runtime roots; a caller's PATH may include a source checkout.
-        toolchain = _installed_toolchain(project.expanded_path)
-        resource_reads = (
-            resources.lease.readable_paths
-            if isinstance(resources, VerificationResourcesPresent)
-            else ()
-        )
-        profile = _sandbox_profile(
-            snapshot, outputs, (*toolchain.readable, *resource_reads), (operator_token_file(),)
-        )
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if key in {"LANG", "LC_ALL", "SYSTEMROOT"}
-        }
-        environment.update(toolchain.gate_environment(snapshot, outputs))
-        if isinstance(resources, VerificationResourcesPresent):
-            scoped_environment = resources.lease.environment()
-            if set(scoped_environment) != {"LOCAL_AGENT_TEST_DATABASE_URL"}:
-                raise ValueError(
-                    "verification resource tried to replace unrelated process authority"
+        frozen = root / "source"
+        frozen.mkdir()
+        source = _snapshot(source_repository, source_commit, base_commit, frozen)
+        with UidVerifierClient(
+            source_binding=source.manifest_digest,
+            deadline=deadline,
+            process_limit=256,
+        ) as uid_owner:
+            snapshot = uid_owner.staging.source
+            # Copy as the operator into the helper-created ACL anchor.
+            # Root never opens or recursively mutates caller-controlled source paths.
+            shutil.copytree(frozen, snapshot, dirs_exist_ok=True, copy_function=shutil.copyfile)
+            for original in frozen.rglob("*"):
+                if original.is_file():
+                    (snapshot / original.relative_to(frozen)).chmod(
+                        stat.S_IMODE(original.stat().st_mode)
+                    )
+            staged = stage_installed_toolchain(
+                project.expanded_path,
+                uid_owner.staging.toolchain,
+                source_root=snapshot,
+                public_ca=resources.lease.public_ca
+                if isinstance(resources, VerificationResourcesPresent)
+                else None,
+            )
+            try:
+                if deadline <= monotonic():
+                    return VerificationUnavailable(
+                        "verification deadline expired during preparation"
+                    )
+                toolchain = staged.toolchain
+                root_prepared = uid_owner.prepare(parent=None, scratch=None)
+                outputs = root_prepared.scratch
+                resource_reads = (
+                    (staged.public_ca.copied.path,) if staged.public_ca is not None else ()
                 )
-            environment.update(scoped_environment)
-            profile = " ".join((profile, *resources.lease.sandbox_rules()))
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            return VerificationUnavailable("verification deadline expired during preparation")
-        probe = run_captured_command(
-            (str(_SANDBOX), "-p", profile, "/usr/bin/true"),
-            snapshot,
-            timeout_seconds=min(10, remaining),
-            env=environment,
-            complete_environment=True,
-        )
-        if probe.exit_code != 0:
-            return VerificationUnavailable(
-                "snapshot containment unavailable: " + probe.stderr.strip()
-            )
-        processes = _run_gate_commands(
-            commands, snapshot, profile, environment, deadline, subject, lease
-        )
-        if isinstance(processes, _GateAuthorityInvalidated):
-            return VerificationUnavailable(
-                "verification authority invalidated before the next command: " + processes.reason
-            )
-        captures = tuple(
-            CommandRunCapture(
-                command=command,
-                cwd=capture.cwd,
-                stdout=_resource_redact(resources, capture.stdout),
-                stderr=_resource_redact(resources, capture.stderr),
-                exit_code=capture.exit_code,
-            )
-            for command, capture in zip(
-                commands[: len(processes.captures)], processes.captures, strict=True
-            )
-        )
-
-        return _ObservedGate(
-            source=source,
-            captures=captures,
-            execution_end=processes.execution_end,
-            started_at=started,
-            completed_at=now(),
-            runtime_identity=_json(
-                {
-                    "python": sys.version,
-                    "python_executable_sha256": _digest(Path(sys.executable).read_bytes()),
-                    "platform": platform.platform(),
-                    "shell_sha256": _digest(Path("/bin/sh").read_bytes()),
-                    "containment_profile_sha256": _digest(profile.encode()),
-                    "installed_executables": {
-                        str(path): _digest(path.read_bytes()) for path in toolchain.executables
-                    },
+                policy = replace(
+                    _sandbox_policy(
+                        snapshot,
+                        outputs,
+                        (*toolchain.readable, *resource_reads),
+                        (operator_token_file(),),
+                        resources.lease.identity.relay_port
+                        if isinstance(resources, VerificationResourcesPresent)
+                        else None,
+                    ),
+                    # The qualified helper owns detached descendants by an exclusive UID.
+                    fixed_process_group=False,
+                )
+                environment = {
+                    key: value
+                    for key, value in os.environ.items()
+                    if key in {"LANG", "LC_ALL", "SYSTEMROOT"}
                 }
-            ),
-        )
+                environment.update(toolchain.gate_environment(snapshot, outputs))
+                environment.update(
+                    {
+                        "HOME": str(root_prepared.home),
+                        "TMPDIR": str(root_prepared.scratch),
+                        # Cross-UID fixture repositories are confined to this verified anchor.
+                        "GIT_CONFIG_COUNT": "1",
+                        "GIT_CONFIG_KEY_0": "safe.directory",
+                        "GIT_CONFIG_VALUE_0": str(uid_owner.staging.directory) + "/*",
+                    }
+                )
+                if isinstance(resources, VerificationResourcesPresent):
+                    scoped_environment = resources.lease.environment(staged_ca=staged.public_ca)
+                    if set(scoped_environment) != {"LOCAL_AGENT_TEST_DATABASE_URL"}:
+                        raise ValueError(
+                            "verification resource tried to replace unrelated process authority"
+                        )
+                    environment.update(scoped_environment)
+                if deadline <= monotonic():
+                    return VerificationUnavailable(
+                        "verification deadline expired during preparation"
+                    )
+
+                def authority_valid() -> bool:
+                    return _subject_and_lease(
+                        subject.intent_id, lease.lease_id, lease.worker_id
+                    ) == (
+                        subject,
+                        lease,
+                    )
+
+                with NativeVerificationBroker(
+                    policy=policy,
+                    snapshot=snapshot,
+                    outputs=outputs,
+                    environment=environment,
+                    deadline=deadline,
+                    authority_valid=authority_valid,
+                    uid_owner=uid_owner,
+                    root_prepared=root_prepared,
+                    runtime_dependencies=staged.runtime_dependencies,
+                ) as broker:
+                    processes = _run_gate_commands(
+                        commands, snapshot, deadline, subject, lease, broker
+                    )
+                nested_processes = broker.records
+                if isinstance(processes, _GateAuthorityInvalidated):
+                    return VerificationUnavailable(
+                        "verification authority invalidated before the next command: "
+                        + processes.reason
+                    )
+                captures = tuple(
+                    CommandRunCapture(
+                        command=command,
+                        cwd=capture.cwd,
+                        stdout=_resource_redact(resources, capture.stdout),
+                        stderr=_resource_redact(resources, capture.stderr),
+                        exit_code=capture.exit_code,
+                    )
+                    for command, capture in zip(
+                        commands[: len(processes.captures)], processes.captures, strict=True
+                    )
+                )
+
+                return _ObservedGate(
+                    source=source,
+                    captures=captures,
+                    execution_end=processes.execution_end,
+                    started_at=started,
+                    completed_at=now(),
+                    runtime_identity=_json(
+                        {
+                            "python": sys.version,
+                            "python_executable_sha256": _digest(Path(sys.executable).read_bytes()),
+                            "platform": platform.platform(),
+                            "shell_sha256": _digest(Path("/bin/sh").read_bytes()),
+                            "containment_profile_sha256": _digest(broker.policy.render().encode()),
+                            "native_processes": nested_processes,
+                            "toolchain_provenance_sha256": staged.manifest_digest,
+                            "toolchain_provenance_path": str(staged.manifest),
+                            "staged_toolchain_disposition": "removed_after_uid_cleanup",
+                            "uid_gate_cleanup": uid_owner.close(),
+                            "installed_executables": {
+                                str(path): _digest(path.read_bytes())
+                                for path in toolchain.executables
+                            },
+                        }
+                    ),
+                )
+            finally:
+                uid_owner.close()
+                staged.cleanup_after(uid_owner)
 
 
 def run_registered_verification(
@@ -845,7 +905,7 @@ def run_registered_verification(
                 deadline,
                 resources,
             )
-        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        except (ValueError, OSError, subprocess.SubprocessError, UidVerifierUnavailable) as exc:
             observed = VerificationUnavailable(_resource_redact(resources, str(exc)))
         finally:
             resource_disposition = _close_resources(resources)
@@ -922,7 +982,7 @@ def run_registered_verification(
                         now(),
                     ),
                 )
-        except (ValueError, OSError, subprocess.SubprocessError) as exc:
+        except (ValueError, OSError, subprocess.SubprocessError, UidVerifierUnavailable) as exc:
             return _with_resource_disposition(
                 VerificationUnavailable(_resource_redact(resources, str(exc))), resource_disposition
             )
@@ -934,7 +994,7 @@ def run_registered_verification(
             case "cancelled":
                 result = VerificationCancelled(receipt.receipt_id, observed.captures)
         return _with_resource_disposition(result, resource_disposition)
-    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+    except (ValueError, OSError, subprocess.SubprocessError, UidVerifierUnavailable) as exc:
         return VerificationUnavailable(str(exc))
 
 

@@ -42,6 +42,7 @@ from .verification_postgres_protocol import (
     OpaquePostgresTls,
     PostgresStartupPolicy,
 )
+from .verification_toolchain_staging import PublicVerificationCa, StagedVerificationCa
 
 _NEON_DATABASE = "neondb"
 _NEON_PORT = 5432
@@ -488,12 +489,25 @@ class VerificationResourceLease:
     _relay: _PinnedLoopbackRelay = field(repr=False)
 
     @property
-    def readable_paths(self) -> tuple[Path, ...]:
-        return (self._worker.ca_file,) if isinstance(self._worker, _NeonConnection) else ()
+    def public_ca(self) -> PublicVerificationCa | None:
+        return (
+            PublicVerificationCa(self._worker.ca_file)
+            if isinstance(self._worker, _NeonConnection)
+            else None
+        )
 
-    def environment(self) -> dict[str, str]:
+    def environment(self, *, staged_ca: StagedVerificationCa | None = None) -> dict[str, str]:
+        worker = self._worker
+        if isinstance(worker, _NeonConnection):
+            if staged_ca is None:
+                raise ValueError("Neon verification requires its staged public CA")
+            worker = replace(
+                worker, ca_file=staged_ca.verified_path(PublicVerificationCa(worker.ca_file))
+            )
+        elif staged_ca is not None:
+            raise ValueError("local verification has no public CA to project")
         return {
-            "LOCAL_AGENT_TEST_DATABASE_URL": self._worker.url(
+            "LOCAL_AGENT_TEST_DATABASE_URL": worker.url(
                 hostaddr=self.identity.relay_hostaddr, port=self.identity.relay_port
             )
         }

@@ -454,6 +454,19 @@ class ModelManager:
             self._active_sessions.discard(role)
 
     def _mock_text_for(self, req: ModelCallRequest, input_text: str) -> dict[str, Any]:
+        from .work_units.plan_evidence import PLAN_REPORT_INSTRUCTION
+
+        if PLAN_REPORT_INSTRUCTION in input_text:
+            return {
+                "schema_version": "plan_result.v1",
+                "status": "PLANNED",
+                "plan_markdown": (
+                    "Deterministic model fixture only; no repository investigation occurred. "
+                    "Exercise the compiled milestone, approval, verification, and delivery "
+                    "boundaries in the test harness. "
+                    f"Prompt/input hash: {sha256_text(input_text)}."
+                ),
+            }
         if req.model_role in {ModelRole.OCR, ModelRole.HARD_OCR}:
             return {
                 "text": f"Mock OCR text extracted from {req.input_artifact_id}.",

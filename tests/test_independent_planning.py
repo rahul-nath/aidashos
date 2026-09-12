@@ -402,8 +402,14 @@ def test_staff_reviewer_starts_fresh_and_read_only(
     def forbidden_lookup(command):
         raise AssertionError("staff must not look up an implementer's continuation")
 
+    codex = tmp_path / "fixture-codex"
+    codex.write_text("#!/bin/sh\nexit 99\n")
+    codex.chmod(0o700)
     executor = CliPowWowExecutor(
-        worktree_root=tmp_path / "worktrees", bench=bench, coordination_command=forbidden_lookup
+        worktree_root=tmp_path / "worktrees",
+        bench=bench,
+        coordination_command=forbidden_lookup,
+        codex_bin=str(codex),
     )
     slot = executor._task_bench_slot(task)
     assert slot is not None
@@ -438,6 +444,7 @@ def test_staff_reviewer_starts_fresh_and_read_only(
         effort=slot.reasoning_effort,
     )
     assert request is not None and request.effort == "high"
+    assert request.codex_bin == codex
 
 
 def test_missing_or_malformed_audit_never_fails_the_reading(tmp_path: Path) -> None:

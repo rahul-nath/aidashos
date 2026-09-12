@@ -12,7 +12,6 @@ from pathlib import Path
 import pytest
 from work_unit_support import acceptance_target_project_id
 
-from local_first_agent_os.contracts import SourceType, WorkflowStatus, WorkspaceId
 from local_first_agent_os.coordination import DispatchKind, DispatchTerminalStatus
 from local_first_agent_os.coordination.durable import (
     CoordinationCommandRequest,
@@ -30,7 +29,6 @@ from local_first_agent_os.dispatcher import (
 )
 from local_first_agent_os.dispatcher_runner import DispatcherIntentRunner
 from local_first_agent_os.engineering_doctrine import CURRENT_ENGINEERING_DOCTRINE
-from local_first_agent_os.ingress import normalize_scheduled_event
 from local_first_agent_os.pow_wow import (
     PowWowArtifact,
     PowWowRunResult,
@@ -41,7 +39,6 @@ from local_first_agent_os.pow_wow import (
 from local_first_agent_os.pow_wow.protocol import PlanningPhase
 from local_first_agent_os.settings import Settings
 from local_first_agent_os.tools_gate import ToolGate, shelly_plug
-from local_first_agent_os.workflow import WorkflowEngine
 
 
 def _coord(root: Path, args: list[str]) -> dict:
@@ -960,188 +957,20 @@ def test_dispatcher_runner_rejects_code_intent_without_target(
     assert pow_wow_count == 0
 
 
-def _legacy_approved_gawd_dispatcher_runs_fake_frontier_clis_end_to_end(
-    tmp_path: Path,
-    runtime,
-) -> None:
-    root = tmp_path / "coordination-root"
-    target = tmp_path / "target"
-    runtime.settings.coordination_root = root
-    runtime.settings.saga_worktree_root = tmp_path / "worktrees"
-    _init_git_repo(target)
-    _write_linked_projects(
-        runtime.settings.config_dir,
-        target,
-        verification_commands=("test -f NEXT_STEP.md",),
-    )
-    (runtime.settings.config_dir / "staffing.toml").write_text(
-        """
-seated_pairing = "two-vendor"
-
-[pairings.two-vendor.staff]
-harness = "codex"
-model = "gpt-5.6-sol"
-reasoning_effort = "high"
-capacity = 1
-
-[pairings.two-vendor.senior]
-harness = "claude"
-capacity = 3
-
-[bench.junior]
-harness = "pi"
-model = "gemma4"
-capacity = 4
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-    claude = tmp_path / "fake_claude.py"
-    claude.write_text(
-        "#!/usr/bin/env python3\n"
-        "import json\n"
-        "import sys\n"
-        "from pathlib import Path\n"
-        "prompt = sys.argv[-1]\n"
-        "if 'Planning visibility contract: senior_independent_reading.' in prompt:\n"
-        "    print(json.dumps({'type':'result','result':'independent raw-contract reading'}))\n"
-        "    raise SystemExit(0)\n"
-        "Path('NEXT_STEP.md').write_text('proof from fake claude\\n', encoding='utf-8')\n"
-        "print(json.dumps({'type':'result','result':'created NEXT_STEP.md'}))\n",
-        encoding="utf-8",
-    )
-    claude.chmod(0o755)
-    codex = tmp_path / "fake_codex.py"
-    codex.write_text(
-        "#!/usr/bin/env python3\n"
-        "import sys\n"
-        "from pathlib import Path\n"
-        "if sys.argv[1:3] == ['login', 'status']:\n"
-        "    raise SystemExit(0)\n"
-        "prompt = sys.argv[-1]\n"
-        "if 'Planning visibility contract: staff_independent_reading.' in prompt:\n"
-        "    print('Independent staff raw-contract reading')\n"
-        "    raise SystemExit(0)\n"
-        "if not Path('NEXT_STEP.md').exists():\n"
-        "    print('VERDICT: BLOCK - missing NEXT_STEP.md')\n"
-        "    raise SystemExit(2)\n"
-        "print('VERDICT: APPROVE - NEXT_STEP.md present for dispatcher boundary proof')\n",
-        encoding="utf-8",
-    )
-    codex.chmod(0o755)
-    saga = run_coordination_command(
-        ["create_saga", "Dispatcher boundary proof"],
-        settings=runtime.settings,
-    )
-    doc = run_coordination_command(
-        [
-            "create_gawd_doc",
-            "Dispatcher boundary proof",
-            "--saga-id",
-            saga["saga_id"],
-            "--constraints",
-            "Only touch the disposable proof target.",
-            "--success-criteria",
-            "NEXT_STEP.md is created in the isolated worktree.",
-            "--acceptance-criteria",
-            "Dispatcher claims and completes the intent.",
-            "--task-graph-json",
-            '{"schema_version":"new_project_task_graph.v1"}',
-        ],
-        settings=runtime.settings,
-    )
-    directive = f"/start /approved-gawd {doc['gawd_doc_id']} --target-project target"
-    event = normalize_scheduled_event(
-        source_type=SourceType.MANUAL,
-        workspace_id=WorkspaceId.GENERAL.value,
-        event_type="pi.directive",
-        payload={"directive": directive},
-    )
-
-    approval_result = WorkflowEngine(runtime).model_directive(event)
-
-    assert approval_result.status == WorkflowStatus.COMPLETED
-    approval_artifact = next(
-        artifact
-        for artifact in approval_result.artifacts
-        if str(artifact.role) == "directive_result"
-    )
-    approval_payload = runtime.artifact_store.read_json(approval_artifact.artifact_id)
-    assert approval_payload["status"] == "approved_and_enqueued"
-    assert approval_payload["target_project_id"] == "target"
-
-    delegate_calls: list[dict] = []
-
-    def fake_delegate(**kwargs):
-        delegate_calls.append(kwargs)
-        return {"ok": True, "output": f"junior context for {kwargs['task_name']}"}
-
-    runner = DispatcherIntentRunner(
-        runtime,
-        delegate_fn=fake_delegate,
-        claude_bin=str(claude),
-        codex_bin=str(codex),
-    )
-    dispatcher = LedgerDispatcher(runner, name="proof-dispatcher", settings=runtime.settings)
-
-    outcome = dispatcher.poll_once()
-
-    assert isinstance(outcome, Dispatched)
-    assert outcome.status == "DONE"
-    assert not (target / "NEXT_STEP.md").exists()
-    assert delegate_calls and delegate_calls[0]["model"] == "gemma4"
-    done = _coord(root, ["list_dispatch_intents", "--status", "DONE"])["intents"]
-    assert done[0]["intent_id"] == approval_payload["dispatch_intent_id"]
-    payload = json.loads(done[0]["result"])
-    assert payload["schema_version"] == "dispatch_runner_result.v1"
-    assert payload["target_project_id"] == "target"
-    assert payload["merge_approval"]["status"] == "PENDING"
-    milestones = _coord(root, ["list_saga_milestones", approval_payload["saga_id"]])["milestones"]
-    assert milestones[0]["status"] == "COMPLETED"
-    evidence = _coord(root, ["get_saga_milestone", milestones[0]["milestone_id"]])["milestone"][
-        "evidence"
-    ]
-    assert evidence and evidence[0]["evidence_type"] == "summary"
-    run_result = payload["run_result"]
-    assert run_result["status"] == "COMPLETED"
-    assert run_result["external_agents_started"] is True
-    assert run_result["auto_merge"] is False
-    assert run_result["changed_files"] == ["NEXT_STEP.md"]
-    tasks_by_role = {task["role"]: task for task in run_result["tasks"]}
-    assert tasks_by_role["independent_reader"]["status"] == "completed"
-    assert tasks_by_role["independent_reviewer"]["status"] == "completed"
-    assert tasks_by_role["verification_planner"]["status"] == "completed"
-    assert tasks_by_role["implementer"]["changed_files"] == ["NEXT_STEP.md"]
-    review_run_capture = next(
-        artifact["content"]
-        for artifact in tasks_by_role["reviewer"]["artifacts"]
-        if artifact["artifact_type"] == "cli_agent_run"
-    )
-    assert "APPROVE" in review_run_capture["verdict"]
-
-
 @pytest.mark.parametrize("verification_passed", [True, False])
-def test_recovery_staff_review_reuses_exact_commit_and_stamps_host_provenance(
+def test_recovery_staff_review_requires_host_execution_before_provenance(
     tmp_path: Path,
     runtime,
     monkeypatch: pytest.MonkeyPatch,
     verification_passed: bool,
 ) -> None:
-    from contextlib import contextmanager
-
     from local_first_agent_os.pow_wow import executor as executor_module
-    from local_first_agent_os.process_containment import ContainedProcess
 
-    @contextmanager
-    def fixture_inspection(request):
-        assert verification_passed, "a failing exact-commit gate must prevent model startup"
-        assert "verification passed" in request.prompt
-        assert (request.repository / "FEATURE.md").exists()
-        yield ContainedProcess((str(request.codex_bin),), {}, request.repository, "fixture")
+    def forbidden_review(*args, **kwargs):
+        pytest.fail("recovery anchor without host execution launched a reviewer")
 
-    # This fixture proves recovery/provenance, not installed native containment.
-    # The explicit native profile tests the real launcher independently.
-    monkeypatch.setattr(executor_module, "prepare_configured_codex_review", fixture_inspection)
+    monkeypatch.setattr(executor_module, "prepare_configured_codex_review", forbidden_review)
+    # Launcher preflight precedes candidate evidence; it is not a model review.
     monkeypatch.setattr(executor_module, "preflight_configured_codex_review", lambda *_: None)
     root = tmp_path / "coordination-root"
     target = tmp_path / "target"
@@ -1309,18 +1138,9 @@ capacity = 4
     outcome = dispatcher.poll_once()
 
     assert isinstance(outcome, Dispatched)
-    if not verification_passed:
-        assert outcome.status == "FAILED"
-        assert not claude_marker.exists()
-        assert not _coord(root, ["list_approval_requests", "--status", "PENDING"])["requests"]
-        failed = _coord(root, ["list_dispatch_intents", "--status", "FAILED"])["intents"]
-        record = next(row for row in failed if row["intent_id"] == outcome.intent_id)
-        anchor = json.loads(record["result"])["run_result"]["tasks"][0]
-        assert anchor["failure"]["operation"] == "verify_recovery_checkpoint"
-        assert "false -> 1" in "\n".join(anchor["verification_output"])
-        return
-    assert outcome.status == "DONE"
+    assert outcome.status == "FAILED"
     assert not claude_marker.exists()
+    assert not _coord(root, ["list_approval_requests", "--status", "PENDING"])["requests"]
     assert (
         subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -1342,55 +1162,54 @@ capacity = 4
         == retained_commit
     )
 
-    done = _coord(root, ["list_dispatch_intents", "--status", "DONE"])["intents"]
-    recovery_row = next(row for row in done if row["intent_id"] == recovery["intent"]["intent_id"])
+    failed = _coord(root, ["list_dispatch_intents", "--status", "FAILED"])["intents"]
+    recovery_row = next(
+        row for row in failed if row["intent_id"] == recovery["intent"]["intent_id"]
+    )
     result = json.loads(recovery_row["result"])
     assert result["result_origin"] == "AUTOMATED_RECOVERY"
-    assert result["promotion_state"] == "MERGE_PENDING"
-    assert [task["task_name"] for task in result["run_result"]["tasks"]] == [
+    tasks = result["run_result"]["tasks"]
+    assert [task["task_name"] for task in tasks] == [
         "recovery_revision_anchor",
         "recovery_staff_review",
+        "recovery_staff_review_unresolved",
     ]
-    anchor = result["run_result"]["tasks"][0]
+    anchor, review, unresolved = tasks
+    assert unresolved["status"] == "failed"
+    assert unresolved["role"] == review["role"]
+    assert unresolved["failure"] == review["failure"]
+    assert unresolved["artifacts"] == []
+    assert "after 0 revision round(s)" in unresolved["summary"]
+    assert "staff review never ran" in unresolved["summary"]
+    assert "There is no verdict to reparse" in unresolved["summary"]
+    assert not any(
+        artifact["artifact_type"] == "review_result"
+        for task in tasks
+        for artifact in task["artifacts"]
+    )
+    if not verification_passed:
+        assert anchor["failure"]["operation"] == "verify_recovery_checkpoint"
+        assert "false -> 1" in "\n".join(anchor["verification_output"])
+        assert review["status"] == "blocked"
+        assert review["failure"] == anchor["failure"]
+        return
+    assert anchor["status"] == "completed"
     anchor_evidence = next(
         item["content"]
         for item in anchor["artifacts"]
         if item["artifact_type"] == "recovery_review_anchor"
     )
     assert anchor_evidence["implementation_model_started"] is False
-    review_task = result["run_result"]["tasks"][1]
-    review = next(
-        item["content"]
-        for item in review_task["artifacts"]
-        if item["artifact_type"] == "review_result"
+    assert review["status"] == "failed"
+    assert review["failure"]["error_code"] == "REVIEW_UNAVAILABLE"
+    assert review["failure"]["operation"] == "candidate_review.source_unavailable"
+    refusal = next(
+        artifact["content"]
+        for artifact in review["artifacts"]
+        if artifact["artifact_type"] == "candidate_review_unavailable"
     )
-    assert review == {
-        **review,
-        "schema_version": "review_result.v1",
-        "verdict": "approve",
-        "finding_severity": "NON_BLOCKING",
-        "review_origin": "RECOVERY_STAFF",
-        "reviewer_tier": "STAFF",
-        "harness": "codex",
-        "model": "gpt-5.6-sol",
-        "reasoning_effort": "high",
-        "task_id": result["task_ids_by_name"]["recovery_staff_review"],
-        "reviewed_commit_sha": retained_commit,
-        "base_sha": base_sha,
-        "attempt_number": 1,
-        "completion_status": "COMPLETED",
-        "engineering_doctrine": CURRENT_ENGINEERING_DOCTRINE.provenance_payload(),
-        "provenance_stamped_by": "pow_wow_executor",
-    }
-    assert review["execution_lease_id"]
-    approvals = _coord(root, ["list_approval_requests", "--status", "PENDING"])["requests"]
-    assert len(approvals) == 1
-    approval = approvals[0]["payload"]
-    assert approval["base_sha"] == base_sha
-    assert approval["commit_sha"] == retained_commit
-    assert approval["checkpoint_id"] == checkpoint["checkpoint_id"]
-    assert approval["milestone_id"] == "milestone-3"
-    assert approval["dispatch_result"]["result_origin"] == "AUTOMATED_RECOVERY"
+    assert refusal["cause"] == "source_unavailable"
+    assert "host implementation execution capture" in refusal["reason"]
 
 
 def test_tool_gate_denies_unless_allowlisted() -> None:

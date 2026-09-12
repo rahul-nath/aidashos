@@ -13,15 +13,22 @@ import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit
 
 import psycopg
 import pytest
 from conftest import suite_postgres_source
+from host_test_scope import require_uncontained_scope
 from postgres_server import ManagedPostgres
 from psycopg import sql
 
 from local_first_agent_os import verification_resources as resources
+from local_first_agent_os.macho_dependencies import PinnedRuntimeFile
+from local_first_agent_os.verification_toolchain_staging import (
+    PublicVerificationCa,
+    StagedVerificationCa,
+)
 
 _HOST = "ep-example-leaf-ab123.us-east-1.aws.neon.tech"
 
@@ -125,26 +132,37 @@ def test_resource_identity_manifest_and_repr_exclude_credentials(tmp_path: Path)
         expires_at="2026-09-08T12:00:00+00:00",
     )
     manifest = tmp_path / "lease.json"
-    relay = resources._PinnedLoopbackRelay(("127.0.0.1", 1), startup=resources.OpaquePostgresTls())
-    identity = identity.model_copy(update={"relay_port": relay.port})
+    # Identity rendering has no transport side effects. Actual relay lifetime is
+    # covered by the host forwarding/cleanup tests, not by this serialization test.
+    relay = Mock(spec=resources._PinnedLoopbackRelay)
     lease = resources.VerificationResourceLease(identity, connection, connection, manifest, relay)
     resources._write_manifest(manifest, identity, resources.VerificationResourceState.READY)
     assert "canary-credential" not in repr(lease)
     assert "canary-credential" not in manifest.read_text()
     assert manifest.stat().st_mode & 0o777 == 0o600
-    assert set(lease.environment()) == {"LOCAL_AGENT_TEST_DATABASE_URL"}
-    assert lease.sandbox_rules() == (
-        f'(allow network-outbound (remote tcp "localhost:{relay.port}"))',
+    staged_file = tmp_path / "staged-ca.pem"
+    staged_file.write_bytes(connection.ca_file.read_bytes())
+    staged_ca = StagedVerificationCa(
+        PublicVerificationCa(connection.ca_file), PinnedRuntimeFile.capture(staged_file)
     )
-    child_url = urlsplit(lease.environment()["LOCAL_AGENT_TEST_DATABASE_URL"])
+    environment = lease.environment(staged_ca=staged_ca)
+    assert set(environment) == {"LOCAL_AGENT_TEST_DATABASE_URL"}
+    assert lease.sandbox_rules() == (
+        f'(allow network-outbound (remote tcp "localhost:{identity.relay_port}"))',
+    )
+    child_url = urlsplit(environment["LOCAL_AGENT_TEST_DATABASE_URL"])
     assert child_url.hostname == _HOST
-    assert child_url.port == relay.port
+    assert child_url.port == identity.relay_port
     assert parse_qs(child_url.query)["hostaddr"] == ["127.0.0.1"]
-    assert relay.close()
+    assert parse_qs(child_url.query)["sslrootcert"] == [str(staged_file)]
+    assert lease._worker is connection and lease._owner is connection
+    assert connection.ca_file == tmp_path / "ca.pem"
+    assert lease.identity is identity
     assert lease.redact(connection.url() + " canary-credential") == (
         "[REDACTED_VERIFICATION_DATABASE_URL] [REDACTED_VERIFICATION_CREDENTIAL]"
     )
     assert json.loads(manifest.read_text())["identity"]["authority"] == "connect_create_own_schemas"
+    assert relay.mock_calls == []
 
 
 def test_provisioning_exception_never_echoes_a_credential(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -310,6 +328,11 @@ class _EchoHandler(socketserver.BaseRequestHandler):
 
 @pytest.fixture
 def loopback_echo() -> Iterator[int]:
+    require_uncontained_scope(
+        reason="real pinned-relay integration requires a host TCP listener",
+        required_flag="LOCAL_AGENT_REQUIRE_HOST_NETWORK_TESTS",
+    )
+
     class Server(socketserver.ThreadingTCPServer):
         daemon_threads = True
 

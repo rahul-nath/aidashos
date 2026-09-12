@@ -141,9 +141,9 @@ automated runs persist a later state directly because their implementation and
 staff-review evidence are captured atomically, but no consumer may skip
 `MERGE_APPROVED -> MERGED -> MILESTONE_COMPLETED`. `/approve-merge` still does
 not merge code; its stdout and structured result print the exact approved
-branch/commit and the required merge step. When the approval owns a milestone,
-it also prints the milestone-completion step and the approved-GAWD command for
-selecting the next dependency-ready milestone.
+branch/commit and the required merge step. When an approval belongs to a historical saga milestone, it also prints the milestone-completion step.
+New governed execution uses `agent-ledger compile_design_doc <finalized document>` and the explicit WorkUnit approval command it returns.
+The standalone approved-GAWD command permanently refuses execution, including when a historical setting requests an open posture.
 
 Inspect and resolve gates with the coordination CLI (run from the repo root):
 

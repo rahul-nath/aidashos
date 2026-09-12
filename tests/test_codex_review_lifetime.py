@@ -232,9 +232,9 @@ def test_native_review_lifetime_has_no_retained_children(
                             worker._process.kill()
                         with pytest.raises(ProcessContainmentUnavailable):
                             await asyncio.wait_for(review, 15)
-                    assert sum(event.get("type") == "turn.completed" for event in events) == (
-                        1 if ending == "completed" else 0
-                    )
+                    assert sum(
+                        event.get("type") == "codex.app_server.turn.completed" for event in events
+                    ) == (1 if ending == "completed" else 0)
                 finally:
                     release_final.set()
                     if not review.done():

@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from .agent_process_cleanup import await_cleanup, close_process, wait_bounded
 from .capabilities import Capability
 from .codex_code_mode import CodexCodeModeHost
+from .codex_local_stdio import prepare_local_stdio_client
 from .codex_tool_worker import (
     READ_REPOSITORY_TOOL,
     CodexToolWorker,
@@ -127,7 +128,7 @@ class LocalFixtureModel:
 type ReviewModel = CodexSubscription | LocalFixtureModel
 
 
-def _client_command(codex_bin: str, model: ReviewModel, *, code_host_url: str) -> list[str]:
+def _client_command(codex_bin: str, model: ReviewModel) -> list[str]:
     command = [codex_bin, "--strict-config"]
     for feature in _DISABLED_FEATURES:
         command.extend(("--disable", feature))
@@ -155,8 +156,6 @@ def _client_command(codex_bin: str, model: ReviewModel, *, code_host_url: str) -
         "--enable",
         "code_mode",
         "app-server",
-        "--code-mode-host",
-        code_host_url,
     ]
 
 
@@ -281,8 +280,10 @@ async def run_read_only_review(
         code_host = await resources.enter_async_context(
             CodexCodeModeHost(worker.boundary, codex_bin)
         )
+        prepared = prepare_local_stdio_client(codex_bin, endpoint=code_host.endpoint, home=home)
+        emit({"type": "codex.local_stdio.prepared", **prepared.provenance()})
         process = await asyncio.create_subprocess_exec(
-            *_client_command(codex_bin, model, code_host_url=code_host.url),
+            *_client_command(str(prepared.executable), model),
             cwd=home,
             env=environment,
             stdin=asyncio.subprocess.PIPE,
@@ -348,7 +349,11 @@ async def run_read_only_review(
             if effort:
                 params["effort"] = effort
             await worker.require_ready()
-            await client.rpc("turn/start", params)
+            started = await client.rpc("turn/start", params)
+            turn_id = started["turn"]["id"]
+            if not isinstance(turn_id, str) or not turn_id:
+                raise ProcessContainmentUnavailable("Codex review turn identity is unavailable")
+            usage_notification: Mapping[str, Any] | None = None
             text = ""
             while True:
                 code_host.require_alive()
@@ -403,7 +408,22 @@ async def run_read_only_review(
                                 },
                             }
                         )
+                elif method == "thread/tokenUsage/updated":
+                    if payload.get("threadId") != thread_id or payload.get("turnId") != turn_id:
+                        raise ProcessContainmentUnavailable("Codex review usage identity differs")
+                    # This is one fresh ephemeral thread and one turn. Its total
+                    # is cumulative across model calls; summing updates or using
+                    # `last` would miscount the invocation. Retain the final
+                    # notification unchanged, even if its counters are malformed.
+                    usage_notification = payload
                 elif method == "turn/completed":
+                    if (
+                        payload.get("threadId") != thread_id
+                        or payload.get("turn", {}).get("id") != turn_id
+                    ):
+                        raise ProcessContainmentUnavailable(
+                            "Codex review completion identity differs"
+                        )
                     if payload.get("turn", {}).get("status") != "completed":
                         raise ProcessContainmentUnavailable("Codex review turn did not complete")
                     await worker.require_ready()
@@ -420,6 +440,16 @@ async def run_read_only_review(
         # intentionally invalidates its one-use worker connection.
         if client.process.returncode != 0:
             raise ProcessContainmentUnavailable("Codex review client did not exit successfully")
+        prepared.verify()
     # Completion is emitted only after the contained interpreter scope closes.
-    emit({"type": "turn.completed"})
+    # App-server lifecycle completion does not promise CLI turn.completed usage.
+    # Do not retain the terminal's item collection, which can contain reasoning.
+    emit(
+        {
+            "type": "codex.app_server.turn.completed",
+            "threadId": thread_id,
+            "turnId": turn_id,
+            "usage_notification": usage_notification,
+        }
+    )
     return text

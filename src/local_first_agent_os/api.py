@@ -138,10 +138,14 @@ def _drain_accepted_integration(target_project_id: str) -> None:
         logger.exception("cockpit integration trigger failed for %s", target_project_id)
 
 
-def create_app() -> FastAPI:
+def create_app(*, intake_root: Path | None = None) -> FastAPI:
+    """Build the API with an explicit authoring-state owner for isolated callers."""
+
     settings = get_settings()
     runtime = get_runtime()
-    walkthru_store = GawdWalkthruStore(resolve_project_repo_root())
+    walkthru_store = GawdWalkthruStore(
+        resolve_project_repo_root() if intake_root is None else intake_root
+    )
     walkthru_adapter = TypeAdapter(WalkthruView)
 
     def run_workflow_result(workflow_type: WorkflowType, event: IngressEvent) -> dict[str, Any]:

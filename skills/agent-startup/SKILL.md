@@ -172,6 +172,11 @@ UV_CACHE_DIR=/tmp/uv-cache uv run pytest -k 'not streams_query_events'
 git diff --check
 ```
 
+## Recovery Learning
+
+After an incident requires diagnosis or recovery, use [Recovery Postmortem](../recovery-postmortem/SKILL.md) before the final handoff.
+Capture private decision-time evidence and actual results even when the cause remains unresolved; the procedure does not itself certify training examples or launch training.
+
 ## Handoffs
 
 If work stops before completion, use `skills/handoff/SKILL.md`. A handoff must

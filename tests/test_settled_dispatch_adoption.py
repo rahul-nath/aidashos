@@ -15,8 +15,10 @@ evidence the normal translation accepts.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
+from test_plan_evidence import PLAN, REPORT, _dispatch
 from work_unit_support import compile_acceptance_doc
 
 from local_first_agent_os.coordination.dispatch import (
@@ -28,6 +30,7 @@ from local_first_agent_os.coordination.dispatch_diagnostics import DISPATCH_CONT
 from local_first_agent_os.coordination.execution import list_ledger_events
 from local_first_agent_os.coordination.store import tx
 from local_first_agent_os.dispatch_contracts import DispatchIngressFailureCode
+from local_first_agent_os.runtime import AppRuntime
 from local_first_agent_os.work_units import dispatch_adoption
 from local_first_agent_os.work_units import repository as repo
 from local_first_agent_os.work_units.events import MilestoneTransition, WorkUnitTransition
@@ -170,8 +173,11 @@ def _wait_elapsed_milestone(
     return work_unit_id, milestone.stable_key
 
 
-def test_adopting_the_settled_dispatch_credits_the_milestone_once() -> None:
-    intent_id = _settled_intent()
+def test_adopting_the_settled_dispatch_credits_the_milestone_once(
+    tmp_path: Path, runtime: AppRuntime
+) -> None:
+    row = _dispatch(tmp_path, runtime, REPORT, target_project_id=_settled_plan().target_project_id)
+    intent_id = row["intent_id"]
     work_unit_id, milestone_key = _wait_elapsed_milestone(intent_id, phase=LifecyclePhase.PLAN)
 
     first = dispatch_adoption.adopt_settled_dispatch(work_unit_id, milestone_key)
@@ -195,6 +201,7 @@ def test_adopting_the_settled_dispatch_credits_the_milestone_once() -> None:
     assert milestone.status is MilestoneExecutionStatus.SUCCEEDED
     assert milestone.attempt == 2
     assert implementation_plan.metadata["dispatch_intent_id"] == intent_id
+    assert implementation_plan.metadata["implementation_plan"]["report"]["plan_markdown"] == PLAN
 
 
 @pytest.mark.parametrize("promotion", [None, "RESULT_RECORDED", "MERGE_PENDING"])

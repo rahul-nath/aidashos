@@ -17,24 +17,6 @@ from __future__ import annotations
 from enum import StrEnum
 
 
-class GovernedSagaDoorPosture(StrEnum):
-    """How the standalone approved-GAWD door treats governed work.
-
-    Governed work - a milestone-bearing contract with approval gates - has two
-    lanes today, and docs/completed/designdoc_governed_work_unit_execution_design.md
-    already named the WorkUnit as where such sagas converge. This posture is the
-    retirement dial for the standalone lane: OPEN is the historical behavior,
-    DEPRECATED runs the door while stamping every result with the notice that
-    the lane is closing, RETIRED refuses with the WorkUnit commands that replace
-    it. The default lives in settings; the flip to RETIRED is gated by
-    docs/completed/governed_saga_door_retirement_gawd.md.
-    """
-
-    OPEN = "open"
-    DEPRECATED = "deprecated"
-    RETIRED = "retired"
-
-
 class DispatchTier(StrEnum):
     """Seniority axis - an engineer persona's level IS its tier.
 

@@ -8,8 +8,9 @@ from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
+from .agent_query_retirement import AgentQueryRetirement, retired_agent_query_alias
 from .contracts import DirectiveHelp
-from .directives import AGENT_QUERY_ALIASES, TOP_LEVEL_DIRECTIVES, DirectiveParser
+from .directives import TOP_LEVEL_DIRECTIVES, DirectiveParser
 
 CANONICAL_EXAMPLES: tuple[str, ...] = (
     "/start /qwen",
@@ -37,8 +38,6 @@ CANONICAL_EXAMPLES: tuple[str, ...] = (
     "/chrome close-category docs --yes",
     "/chrome close 1",
     "/compact",
-    "/claude explain how the ledger records a dispatch",
-    "/codex what does resolve_transcript_pointer guarantee?",
     "/stop",
     "/try-milestone",
     "/approve-most-recent",
@@ -49,6 +48,8 @@ CANONICAL_EXAMPLES: tuple[str, ...] = (
 
 
 def explain_failure(parser: DirectiveParser, raw: str, error: str) -> DirectiveHelp:
+    if retired_agent_query_alias(raw) is not None:
+        return AgentQueryRetirement.RETIRED.help()
     tokens = shlex.split(raw) if raw.strip() else []
     if not tokens:
         return DirectiveHelp(
@@ -85,19 +86,6 @@ def _explain_known_directive(
     tokens: list[str],
     error: str,
 ) -> DirectiveHelp:
-    if head in AGENT_QUERY_ALIASES:
-        return DirectiveHelp(
-            summary=f"{head} requires a question to ask the harness.",
-            suggestions=[
-                f"{head} <your question>, in plain prose; the whole tail is the question.",
-                "The answer comes back to the terminal and stays in the harness's own "
-                "transcript, so no worktree or merge gate is involved.",
-            ],
-            canonical_examples=[
-                "/claude explain how the ledger records a dispatch",
-                "/codex what does resolve_transcript_pointer guarantee?",
-            ],
-        )
     if head in {"/store", "/embed"} and len(tokens) <= 1:
         return DirectiveHelp(
             summary=f"{head} requires a local file or directory path.",

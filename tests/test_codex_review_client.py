@@ -113,11 +113,13 @@ def test_real_codex_uses_isolated_read_tool_and_cannot_run_shell(
                 )
             elif ordinal == 8:
                 name, arguments = (
-                    "read_repository", {"operation": "read_file", "path": "missing.txt"}
+                    "read_repository",
+                    {"operation": "read_file", "path": "missing.txt"},
                 )
             elif ordinal == 9:
                 name, arguments = (
-                    "read_repository", {"operation": "read_file", "path": "canary.txt"}
+                    "read_repository",
+                    {"operation": "read_file", "path": "canary.txt"},
                 )
             else:
                 name, arguments = "", {}
@@ -251,9 +253,9 @@ def test_real_codex_uses_isolated_read_tool_and_cannot_run_shell(
     # Discovery cannot expand the RPC port's read authority: native fs/walk is
     # unavailable. Forged resources cannot bypass that missing admission.
     assert json.loads(skill_outputs["call-5"])["skills"] == []
-    denial = "skill package is not available from the requested authority"
+    denial = "skill package is not available"
     assert skill_outputs["call-6"] == denial
     assert skill_outputs["call-7"] == denial
     assert "UNTRUSTED_SKILL_READ_CANARY" not in json.dumps(requests)
     assert "FORBIDDEN_HOST_SKILL_READ_CANARY" not in json.dumps(requests)
-    assert any(event.get("type") == "turn.completed" for event in events)
+    assert any(event.get("type") == "codex.app_server.turn.completed" for event in events)

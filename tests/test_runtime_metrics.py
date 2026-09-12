@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from host_test_scope import require_uncontained_scope
 from prometheus_client import REGISTRY, CollectorRegistry, generate_latest
 
 from local_first_agent_os import runtime_metrics as metrics
@@ -117,6 +118,10 @@ def test_exit_timing_is_observed_once_and_excludes_later_stream_drain(monkeypatc
 
 
 def test_current_process_cpu_and_rss_can_be_scraped() -> None:
+    require_uncontained_scope(
+        reason="actual process RSS sampling requires the host process observer",
+        required_flag="AIDASHOS_REQUIRE_HOST_PROCESS_OBSERVER",
+    )
     registry = CollectorRegistry()
     registry.register(metrics.RuntimeProcessCollector())
     data = generate_latest(registry).decode()
