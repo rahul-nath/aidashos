@@ -5,26 +5,31 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
+import signal
 import socket
+import subprocess
 import sys
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from time import monotonic, sleep
 
 import pytest
 
+from local_first_agent_os import native_verification_broker as broker_module
 from local_first_agent_os.constants import PROCESS_CANCELED_EXIT_CODE, PROCESS_TIMEOUT_EXIT_CODE
 from local_first_agent_os.host_verification import _installed_toolchain, _sandbox_policy
 from local_first_agent_os.native_verification_broker import (
     BROKER_ENV,
     NativeVerificationBroker,
+    _signal_process_group,
     authenticated_contained_client,
 )
 from local_first_agent_os.seatbelt_policy import TcpGrant
@@ -287,6 +292,96 @@ time.sleep(30)
     assert len([item for item in gate.broker.records if item["kind"] != "metadata"]) == 2
     assert all(record["leader_reaped"] for record in gate.broker.records)
     assert gate.broker.authority_invalidated == (stop == "revoke")
+
+
+def test_group_signal_reaps_exited_leader_before_confirming_group_absence() -> None:
+    with subprocess.Popen(("/usr/bin/true",), start_new_session=True) as process:
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT)
+        # Reproduce the real Darwin all-zombie group response without reaping it.
+        with pytest.raises(PermissionError):
+            os.killpg(process.pid, signal.SIGKILL)
+        _signal_process_group(process, signal.SIGKILL)
+        assert process.returncode == 0
+        with pytest.raises(ProcessLookupError):
+            os.killpg(process.pid, 0)
+
+
+def test_group_signal_kills_live_descendant_after_leader_exit() -> None:
+    child_code = "import time;print('child ready',flush=True);time.sleep(30)"
+    parent_code = f"""import subprocess,sys
+child=subprocess.Popen((sys.executable,'-I','-S','-c',{child_code!r}),
+ stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
+assert child.stdout.readline()==b'child ready\\n'
+print(child.pid,flush=True)
+"""
+    with subprocess.Popen(
+        (sys.executable, "-I", "-S", "-c", parent_code),
+        stdout=subprocess.PIPE,
+        start_new_session=True,
+    ) as process:
+        output, _ = process.communicate(timeout=5)
+        child_pid = int(output)
+        child_absent = False
+        try:
+            assert process.wait(timeout=5) == 0
+            assert os.getpgid(child_pid) == process.pid
+            _signal_process_group(process, signal.SIGKILL)
+            deadline = monotonic() + 2
+            while True:
+                try:
+                    os.getpgid(child_pid)
+                except ProcessLookupError:
+                    child_absent = True
+                    break
+                assert monotonic() < deadline, "group signal left the descendant running"
+                sleep(0.01)
+        finally:
+            if not child_absent:
+                with suppress(ProcessLookupError):
+                    os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize(
+    ("platform_name", "leader_alive", "error_number"),
+    [
+        ("darwin", True, errno.EPERM),
+        ("linux", False, errno.EPERM),
+        ("darwin", False, errno.EPERM),
+        ("darwin", False, errno.EACCES),
+    ],
+)
+def test_group_signal_preserves_permission_denials(
+    monkeypatch: pytest.MonkeyPatch, platform_name: str, leader_alive: bool, error_number: int
+) -> None:
+    command = ("/bin/sleep", "30") if leader_alive else ("/usr/bin/true",)
+    with subprocess.Popen(command, start_new_session=True) as process:
+        try:
+            if not leader_alive:
+                assert process.wait(timeout=5) == 0
+            attempts = 0
+            refusal = PermissionError(error_number, "kernel refused the owned group signal")
+
+            def deny_signal(pgid: int, value: signal.Signals) -> None:
+                nonlocal attempts
+                assert pgid == process.pid
+                assert value is signal.SIGKILL
+                attempts += 1
+                raise refusal
+
+            with monkeypatch.context() as patch:
+                patch.setattr(broker_module.sys, "platform", platform_name)
+                patch.setattr(broker_module.os, "killpg", deny_signal)
+                with pytest.raises(PermissionError) as result:
+                    _signal_process_group(process, signal.SIGKILL)
+            assert result.value is refusal
+            if platform_name == "darwin" and not leader_alive and error_number == errno.EPERM:
+                assert attempts > 1
+            else:
+                assert attempts == 1
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=5)
 
 
 def test_nonce_does_not_admit_a_process_outside_the_owned_group(tmp_path: Path) -> None:

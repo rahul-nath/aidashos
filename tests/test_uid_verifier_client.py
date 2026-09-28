@@ -14,9 +14,11 @@ import socket
 import sys
 import tempfile
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic
+from typing import Literal
 
 import pytest
 
@@ -37,14 +39,21 @@ def trusted_host_transport_authority():
 
 
 @contextmanager
-def _owner(tmp_path, monkeypatch, *, fault=None, delay=False):
+def _owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    fault: Literal["binding", "disconnect", "missing-child"] | None = None,
+    delay: bool = False,
+) -> Iterator[tuple[Path, list[dict[str, object]]]]:
     socket_directory = tempfile.TemporaryDirectory(prefix="uvc-")
     path = Path(socket_directory.name) / "owner.sock"
     staging = tmp_path / "g55000"
     staging.mkdir()
     for name in ("source", "toolchain"):
         (staging / name).mkdir()
-    errors, received = [], []
+    errors: list[BaseException] = []
+    received: list[dict[str, object]] = []
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     listener.bind(str(path))
     listener.listen()
@@ -52,7 +61,7 @@ def _owner(tmp_path, monkeypatch, *, fault=None, delay=False):
     # This fixture tests framing, not kernel peer authentication or UID cleanup.
     monkeypatch.setattr(client_module, "_root_peer", lambda _socket: None)
 
-    def serve():
+    def serve() -> None:
         try:
             connection, _ = listener.accept()
             with connection, connection.makefile("rb") as stream:
@@ -180,9 +189,12 @@ def _owner(tmp_path, monkeypatch, *, fault=None, delay=False):
     try:
         yield path, received
     finally:
-        listener.close()
-        thread.join(5)
-        socket_directory.cleanup()
+        try:
+            # A rejected peer may disconnect before the server accepts its queued connection.
+            thread.join(5)
+        finally:
+            listener.close()
+            socket_directory.cleanup()
         assert not thread.is_alive()
         assert not errors
 
@@ -273,3 +285,29 @@ def test_environment_and_same_uid_socket_cannot_fake_contained_context(tmp_path,
             ),
         )
         assert not authenticated_contained_client()
+
+
+def test_owner_teardown_waits_for_pending_accept(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    accepting = threading.Event()
+    release_accept = threading.Event()
+    original_accept = socket.socket.accept
+    original_join = threading.Thread.join
+
+    def blocked_accept(listener: socket.socket) -> tuple[socket.socket, object]:
+        accepting.set()
+        assert release_accept.wait(5), "teardown must join the serving thread"
+        return original_accept(listener)
+
+    def release_then_join(thread: threading.Thread, timeout: float | None = None) -> None:
+        release_accept.set()
+        original_join(thread, timeout)
+
+    monkeypatch.setattr(socket.socket, "accept", blocked_accept)
+    monkeypatch.setattr(threading.Thread, "join", release_then_join)
+    with _owner(tmp_path, monkeypatch) as (path, requests):
+        assert accepting.wait(5), "the server must reach accept before the client disconnects"
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+            connection.connect(str(path))
+        assert requests == []
