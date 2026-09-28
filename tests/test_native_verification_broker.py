@@ -12,13 +12,15 @@ import socket
 import sys
 import threading
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 
 import pytest
 
+from local_first_agent_os.constants import PROCESS_CANCELED_EXIT_CODE, PROCESS_TIMEOUT_EXIT_CODE
 from local_first_agent_os.host_verification import _installed_toolchain, _sandbox_policy
 from local_first_agent_os.native_verification_broker import (
     BROKER_ENV,
@@ -236,25 +238,50 @@ with contained_frontier_process((sys.executable,'-c',{code!r}),Path(os.environ['
 def test_gate_stop_reaps_native_children_and_preserves_output(tmp_path: Path, stop: str) -> None:
     valid = threading.Event()
     valid.set()
-    with _gate(tmp_path, seconds=1 if stop == "deadline" else 10, valid=valid.is_set) as gate:
+    # Cold interpreter startup is a prerequisite, not part of the stop-latency proof.
+    # The parent acknowledges only output received through the real child transport.
+    with (
+        ThreadPoolExecutor(max_workers=1) as pool,
+        _gate(tmp_path, seconds=20, valid=valid.is_set) as gate,
+    ):
+        ready = gate.outputs / "child-output-forwarded"
         code = (
             "import time,sys;print('retained child stdout',flush=True);"
             "print('retained child stderr',file=sys.stderr,flush=True);time.sleep(30)"
         )
-        timer = threading.Timer(0.8, valid.clear) if stop == "revoke" else None
-        if timer is not None:
-            timer.start()
-        started = monotonic()
-        result = gate.run(f"""
+        execution = pool.submit(
+            gate.run,
+            f"""
 with contained_frontier_process((sys.executable,'-c',{code!r}),Path(os.environ['TMPDIR']),
  posture=ReadOnlyInspection(),harness=FrontierHarness.CODEX) as child:
- subprocess.run(child.command,env=child.environment,check=False)
+ with subprocess.Popen(child.command,env=child.environment,stdout=subprocess.PIPE,
+  stderr=subprocess.PIPE,text=True) as running:
+  output=running.stdout.readline();error=running.stderr.readline()
+  assert output=='retained child stdout\\n',output
+  assert error=='retained child stderr\\n',error
+  print(output,end='',flush=True);print(error,file=sys.stderr,end='',flush=True)
+  Path({str(ready)!r}).touch()
+  running.wait()
 time.sleep(30)
-""")
-        if timer is not None:
-            timer.join()
+""",
+        )
+        startup_deadline = monotonic() + 15
+        while not ready.exists():
+            if execution.done():
+                pytest.fail(f"gate exited before child readiness: {execution.result()}")
+            assert monotonic() < startup_deadline, "native child did not become ready"
+            sleep(0.01)
+        started = monotonic()
+        if stop == "deadline":
+            # Narrow the existing finite deadline only after observable progress.
+            gate.broker.deadline = started + 0.2
+        else:
+            valid.clear()
+        result = execution.result(timeout=4)
         assert monotonic() - started < 4
-        assert result.exit_code != 0
+        assert result.exit_code == (
+            PROCESS_TIMEOUT_EXIT_CODE if stop == "deadline" else PROCESS_CANCELED_EXIT_CODE
+        )
         assert "retained child stdout" in result.stdout
         assert "retained child stderr" in result.stderr
     assert len([item for item in gate.broker.records if item["kind"] != "metadata"]) == 2

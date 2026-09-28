@@ -43,7 +43,7 @@ jobs:
           uv run --no-sync python scripts/dump_openapi.py --check
           uv run --no-sync python scripts/dump_config_reference.py --check
           uv run --no-sync python scripts/ci/check_readme.py
-          uv run --no-sync pytest --noconftest -q scripts/ci/tests tests/test_traveling_document_links.py tests/test_onboarding_prompts.py
+          uv run --no-sync python -m pytest --noconftest -q scripts/ci/tests tests/test_traveling_document_links.py tests/test_onboarding_prompts.py
 
   backend:
     name: PostgreSQL test suite
