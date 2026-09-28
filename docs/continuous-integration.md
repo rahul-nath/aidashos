@@ -7,7 +7,7 @@ Failure, cancellation or a skipped group prevents that gate from passing.
 | Group | What it checks |
 | --- | --- |
 | Quality and documentation | Ruff lint and formatting, Pyright, generated OpenAPI/configuration documents, README links and CI helper tests |
-| PostgreSQL test suite | The public Python suite and verifier helper protocol tests against disposable PostgreSQL 18 |
+| PostgreSQL test suite | The public Python suite and verifier helper protocol tests against disposable PostgreSQL 16 with pgvector |
 | Frontend (web) | Locked dependencies, ESLint, generated API types and the dashboard production build |
 | Frontend (landing_page_website) | Locked dependencies, TypeScript, browser and server builds, and page prerendering |
 | macOS containment | Selected real Seatbelt, child-process and native broker controls on macOS, without provider accounts |
@@ -25,14 +25,16 @@ The workflows do not install models, invoke paid providers, use Neon or receive 
 Their token has read-only repository contents permission, and checkout does not persist Git credentials.
 Pull requests use `pull_request`, not `pull_request_target`.
 
-The Ubuntu job uses an ephemeral PostgreSQL service container.
-The macOS job starts and stops its own temporary PostgreSQL cluster because GitHub service containers require Linux.
-Both supply only `LOCAL_AGENT_TEST_DATABASE_URL`; neither points tests at an operational database.
+The full suite runs in four disjoint file partitions on macOS, the supported runtime platform.
+Each partition starts and stops its own temporary PostgreSQL 16 cluster with commit-pinned pgvector because the public local-resource contract explicitly requires major version 16.
+Python Playwright installs Chromium on those hosted runners for the real browser acceptance tests.
+The separate containment group uses PostgreSQL 18; that narrower result does not claim a migration of the versioned local-resource contract.
+These jobs supply only `LOCAL_AGENT_TEST_DATABASE_URL`; neither points tests at an operational database.
 The Node preparation script copies the runner's installed distribution into a job-owned NVM directory required by runtime discovery.
 
 ## Test scope and results
 
-The portable suite reports its skip reasons and uploads JUnit results.
+The public suite reports its skip reasons and uploads JUnit results.
 Some public tests require macOS, an explicitly enabled browser/provider installation, or private documents that are not distributed.
 Those skips remain visible rather than being presented as executed tests.
 The selected macOS containment tests must collect and run with zero skips.

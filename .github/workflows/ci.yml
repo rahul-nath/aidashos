@@ -46,23 +46,13 @@ jobs:
           uv run --no-sync python -m pytest --noconftest -q scripts/ci/tests tests/test_traveling_document_links.py tests/test_onboarding_prompts.py
 
   backend:
-    name: PostgreSQL test suite
-    runs-on: ubuntu-24.04
+    name: PostgreSQL test suite (${{ matrix.shard }})
+    runs-on: macos-15
     timeout-minutes: 60
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: local_agent
-        ports:
-          - 5433:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d local_agent"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 12
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     env:
       LOCAL_AGENT_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/local_agent
       LOCAL_AGENT_RUN_POSTGRES_INTEGRATION: "1"
@@ -73,8 +63,6 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: .node-version
-      - name: Install the audio import prerequisite
-        run: sudo apt-get update && sudo apt-get install --yes libportaudio2
       - uses: ./.github/actions/python
       - name: Bind the installed Node runtime
         env:
@@ -82,13 +70,26 @@ jobs:
         run: |
           uv run --no-sync python scripts/ci/prepare_node.py
           echo "NVM_DIR=$NVM_DIR" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/postgres
+        with:
+          major: "16"
+          pgvector: "true"
+      - name: Install the browser test runtime
+        run: uv run --no-sync playwright install chromium
       - name: Run the public suite and verifier protocol tests
-        run: uv run --no-sync python scripts/ci/run_tests.py portable
+        run: uv run --no-sync python scripts/ci/run_tests.py portable --shard-index ${{ matrix.shard }} --shard-count 4
+      - name: Stop the test cluster
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/ci-postgres/postmaster.pid" ]]; then
+            "$CI_PG_BIN/pg_ctl" -D "$RUNNER_TEMP/ci-postgres" -m immediate -w stop
+          fi
       - name: Retain test results
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: postgres-test-results
+          name: postgres-test-results-${{ matrix.shard }}
           path: artifacts/*.xml
           if-no-files-found: warn
           retention-days: 14
@@ -126,7 +127,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 30
     env:
-      LOCAL_AGENT_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5433/local_agent
+      LOCAL_AGENT_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/local_agent
       LOCAL_AGENT_RUN_POSTGRES_INTEGRATION: "1"
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_ANALYTICS: "1"
@@ -144,14 +145,9 @@ jobs:
         run: |
           uv run --no-sync python scripts/ci/prepare_node.py
           echo "NVM_DIR=$NVM_DIR" >> "$GITHUB_ENV"
-      - name: Start an ephemeral PostgreSQL 18 cluster
-        shell: bash
-        run: |
-          brew install postgresql@18
-          pg_bin="$(brew --prefix postgresql@18)/bin"
-          "$pg_bin/initdb" -D "$RUNNER_TEMP/ci-postgres" -U postgres --auth=trust --encoding=UTF8 --locale=C
-          "$pg_bin/pg_ctl" -D "$RUNNER_TEMP/ci-postgres" -l "$RUNNER_TEMP/ci-postgres.log" -o "-h 127.0.0.1 -p 5433" -w start
-          "$pg_bin/createdb" -h 127.0.0.1 -p 5433 -U postgres local_agent
+      - uses: ./.github/actions/postgres
+        with:
+          major: "18"
       - name: Prove native containment without provider accounts
         run: uv run --no-sync python scripts/ci/run_tests.py native
       - name: Stop the test cluster
@@ -159,7 +155,7 @@ jobs:
         shell: bash
         run: |
           if [[ -f "$RUNNER_TEMP/ci-postgres/postmaster.pid" ]]; then
-            "$(brew --prefix postgresql@18)/bin/pg_ctl" -D "$RUNNER_TEMP/ci-postgres" -m immediate -w stop
+            "$CI_PG_BIN/pg_ctl" -D "$RUNNER_TEMP/ci-postgres" -m immediate -w stop
           fi
       - name: Retain native test results
         if: always()

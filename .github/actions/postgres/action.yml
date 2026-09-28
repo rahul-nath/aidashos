@@ -1,0 +1,43 @@
+name: Disposable macOS PostgreSQL
+description: Start a job-owned PostgreSQL cluster, optionally with the repository's pgvector dependency.
+inputs:
+  major:
+    description: PostgreSQL major version required by the tested contract.
+    required: true
+  pgvector:
+    description: Build the pinned vector extension for this server.
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Install the declared database toolchain
+      shell: bash
+      env:
+        PG_MAJOR: ${{ inputs.major }}
+        NEED_VECTOR: ${{ inputs.pgvector }}
+        HOMEBREW_NO_AUTO_UPDATE: "1"
+        HOMEBREW_NO_ANALYTICS: "1"
+      run: |
+        [[ "$RUNNER_OS" == macOS ]]
+        case "$PG_MAJOR" in 16|18) ;; *) exit 1 ;; esac
+        case "$NEED_VECTOR" in true|false) ;; *) exit 1 ;; esac
+        brew install "postgresql@$PG_MAJOR"
+        pg_bin="$(brew --prefix "postgresql@$PG_MAJOR")/bin"
+        echo "CI_PG_BIN=$pg_bin" >> "$GITHUB_ENV"
+        if [[ "$NEED_VECTOR" == true ]]; then
+          git init "$RUNNER_TEMP/ci-pgvector"
+          git -C "$RUNNER_TEMP/ci-pgvector" fetch --depth=1 https://github.com/pgvector/pgvector.git 8ee86c96f0fd72390f890aa8a336fda6d3ab4c6c
+          git -C "$RUNNER_TEMP/ci-pgvector" checkout --detach FETCH_HEAD
+          make -C "$RUNNER_TEMP/ci-pgvector" PG_CONFIG="$pg_bin/pg_config" OPTFLAGS=""
+          make -C "$RUNNER_TEMP/ci-pgvector" PG_CONFIG="$pg_bin/pg_config" install
+        fi
+    - name: Start the isolated test cluster
+      shell: bash
+      env:
+        PGPASSWORD: postgres
+      run: |
+        printf '%s\n' "$PGPASSWORD" > "$RUNNER_TEMP/ci-postgres-password"
+        chmod 600 "$RUNNER_TEMP/ci-postgres-password"
+        "$CI_PG_BIN/initdb" -D "$RUNNER_TEMP/ci-postgres" -U postgres --auth=scram-sha-256 --pwfile="$RUNNER_TEMP/ci-postgres-password" --encoding=UTF8 --locale=C
+        "$CI_PG_BIN/pg_ctl" -D "$RUNNER_TEMP/ci-postgres" -l "$RUNNER_TEMP/ci-postgres.log" -o "-h 127.0.0.1 -p 5433" -w start
+        "$CI_PG_BIN/createdb" -h 127.0.0.1 -p 5433 -U postgres local_agent
