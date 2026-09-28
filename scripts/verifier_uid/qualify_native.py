@@ -26,12 +26,29 @@ import stat
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
+from typing import Protocol
 
 HELPER = Path("/Library/PrivilegedHelperTools/com.aidashos.verifier-uid.py")
 CANARIES = Path("/Library/PrivilegedHelperTools/com.aidashos.verifier-uid-canaries.py")
 MAX_OUTPUT = 4 * 1024 * 1024
+_IDENTITY_FIXTURE_SOURCE = """#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+int main(int argc, char **argv) {
+    if (argc != 2 || strcmp(argv[1], "-u") != 0) return 64;
+    return printf("%lu\\n", (unsigned long)geteuid()) < 0 ? 74 : 0;
+}
+"""
+
+
+class FixtureOwner(Protocol):
+    STATE: Path
+
+    def root_owned(self, path: Path) -> None: ...
 
 
 def require(condition, detail):
@@ -376,7 +393,7 @@ def clear_fixture_privileges(directory):
             os.close(fd)
 
 
-def sign_fixture(executable, signer, environment):
+def sign_fixture(executable: Path, signer: Path, environment: Mapping[str, str]) -> None:
     """Sign only the disposable copy with a local identity, retaining tool errors."""
     operations = (
         (
@@ -409,7 +426,63 @@ def sign_fixture(executable, signer, environment):
         )
 
 
-def fixed_files(helper, operator):
+def compile_identity_fixture(directory: Path, helper: FixtureOwner) -> bytes:
+    """Build fixed user executable bytes without copying an Apple platform binary.
+
+    A valid replacement signature does not establish that a copied system binary
+    can execute on every supported kernel. The canary needs only actual geteuid.
+    No caller source, compiler configuration, environment or tool selection enters.
+    """
+    tools = Path("/Library/Developer/CommandLineTools/usr/bin")
+    compiler, linker = tools / "clang", tools / "ld"
+    sdk_link = tools.parent.parent / "SDKs/MacOSX.sdk"
+    for tool in (compiler, linker, sdk_link.parent):
+        helper.root_owned(tool)
+    sdk = sdk_link.resolve(strict=True)
+    helper.root_owned(sdk)
+    destination = directory / "identity-template"
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    os.close(descriptor)
+    try:
+        result = subprocess.run(
+            [
+                str(compiler),
+                "--no-default-config",
+                "-x",
+                "c",
+                "-std=c11",
+                "-Wall",
+                "-Wextra",
+                "-Werror",
+                "-isysroot",
+                str(sdk),
+                "--ld-path=" + str(linker),
+                "-o",
+                str(destination),
+                "-",
+            ],
+            input=_IDENTITY_FIXTURE_SOURCE,
+            env={"PATH": "/usr/bin:/bin"},
+            cwd=directory,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        require(result.returncode == 0, "identity fixture compile failed: " + result.stderr[:2048])
+        helper.root_owned(destination)
+        descriptor = os.open(destination, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            require(
+                stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and not info.st_mode & 0o6000,
+                "compiled fixture is not a single unprivileged regular file",
+            )
+            return stream.read()
+    finally:
+        destination.unlink(missing_ok=True)
+
+
+def fixed_files(helper: FixtureOwner, operator: int) -> tuple[Path, Path]:
     directory = helper.STATE / ("qualification-" + os.urandom(8).hex())
     directory.mkdir(mode=0o700)
     helper.root_owned(directory)
@@ -420,7 +493,7 @@ def fixed_files(helper, operator):
         helper.root_owned(signer)
         helper.root_owned(allocator)
         signing_environment = {"PATH": "/usr/bin:/bin", "CODESIGN_ALLOCATE": str(allocator)}
-        binary = Path("/usr/bin/id").read_bytes()
+        binary = compile_identity_fixture(directory, helper)
         for name, mode in (("ordinary-id", 0o755), ("setuid-id", 0o4755), ("setgid-id", 0o2755)):
             executable = directory / name
             fd = os.open(executable, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o755)
@@ -428,9 +501,8 @@ def fixed_files(helper, operator):
                 stream.write(binary)
                 stream.flush()
                 os.fsync(stream.fileno())
-            # Apple's system-binary signature can constrain its original launch
-            # location. Give only the private disposable copy a local signature,
-            # without a signing identity, timestamp service, or inherited options.
+            # Give only the private disposable copy a local signature, without
+            # a signing identity, timestamp service, or inherited options.
             sign_fixture(executable, signer, signing_environment)
             # Signing can replace the file. Pin the final inode before installing
             # privilege bits; no set-id fixture is exposed before signing succeeds.

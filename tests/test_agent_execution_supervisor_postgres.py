@@ -276,6 +276,7 @@ def test_real_postgres_sigkill_recovery_completes_lease_and_releases_intent(
         coordination_command=postgres_harness.coordinate,
         artifact_writer=postgres_harness.artifacts,
         supervisor_factory=_FastTerminationSupervisor,
+        stream_drain_timeout_seconds=0.05,
     )
     base_sha = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -287,7 +288,7 @@ def test_real_postgres_sigkill_recovery_completes_lease_and_releases_intent(
     escaped_pid_path = repo / "escaped-child.pid"
     # Both probes use only stdlib; the host virtual environment is outside their grants.
     interpreter = str(Path(sys.executable).resolve(strict=True))
-    escaped_code = "import time; time.sleep(30)"
+    escaped_code = "import time; print('escaped child ready', flush=True); time.sleep(30)"
     code = (
         "from pathlib import Path; import signal,subprocess,sys,time; "
         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
@@ -365,13 +366,19 @@ def test_real_postgres_sigkill_recovery_completes_lease_and_releases_intent(
 
     assert capture.exit_code == 124
     assert "parent ready" in capture.stdout
+    assert "escaped child ready" in capture.stdout
     assert escaped_pid_path.is_file()
     assert supervised.checkpoint_id
     assert lease_row == ("TIMED_OUT", "DEADLINE_EXCEEDED", "COMPLETED", "COMPLETED")
     assert intent_status == ("CHECKPOINT_REVIEW",)
     assert kinds.count("process.sigkill") == 1
-    assert kinds.count("process.wait_abandoned") == 1
-    assert kinds.index("process.sigkill") < kinds.index("process.exited")
+    # Python versions that resolve wait() before pipe EOF use the drain deadline.
+    pipe_recoveries = [
+        kind for kind in kinds if kind in {"process.wait_abandoned", "stream.drain_abandoned"}
+    ]
+    assert len(pipe_recoveries) == 1
+    assert kinds.index("process.sigkill") < kinds.index(pipe_recoveries[0])
+    assert kinds.index(pipe_recoveries[0]) < kinds.index("process.exited")
     assert kinds.index("process.exited") < kinds.index("agent.finished")
     assert artifact_roles == {
         "agent_execution_transcript",

@@ -341,9 +341,10 @@ def test_sigkill_does_not_hang_when_escaped_descendant_holds_output_pipes(
         heartbeat_seconds=0.02,
         warning_seconds=0.05,
         termination_grace_seconds=0.05,
+        stream_drain_timeout_seconds=0.05,
     )
     escaped_pid_path = repo / "escaped-child.pid"
-    escaped_code = "import time; time.sleep(30)"
+    escaped_code = "import time; print('escaped child ready', flush=True); time.sleep(30)"
     code = (
         "from pathlib import Path; import signal,subprocess,sys,time; "
         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
@@ -387,16 +388,22 @@ def test_sigkill_does_not_hang_when_escaped_descendant_holds_output_pipes(
 
     assert result.capture.exit_code == 124
     assert "parent ready" in result.capture.stdout
+    assert "escaped child ready" in result.capture.stdout
     assert result.checkpoint_reason == "deadline"
     assert result.checkpoint_id
     events = list_execution_events(lease.lease_id or "", limit=1000)["events"]
     kinds = [event["kind"] for event in events]
     assert kinds.count("process.sigkill") == 1
+    pipe_recoveries = [
+        kind for kind in kinds if kind in {"process.wait_abandoned", "stream.drain_abandoned"}
+    ]
     if uid_owned:
-        assert "process.wait_abandoned" not in kinds
+        assert pipe_recoveries == []
     else:
-        assert kinds.count("process.wait_abandoned") == 1
-        assert kinds.index("process.wait_abandoned") < kinds.index("process.exited")
+        # Python versions that resolve wait() before pipe EOF use the drain deadline.
+        assert len(pipe_recoveries) == 1
+        assert kinds.index("process.sigkill") < kinds.index(pipe_recoveries[0])
+        assert kinds.index(pipe_recoveries[0]) < kinds.index("process.exited")
     assert kinds.index("process.exited") < kinds.index("agent.finished")
 
 
