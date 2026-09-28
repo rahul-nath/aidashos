@@ -66,7 +66,6 @@ jobs:
     env:
       LOCAL_AGENT_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/local_agent
       LOCAL_AGENT_RUN_POSTGRES_INTEGRATION: "1"
-      NVM_DIR: ${{ runner.temp }}/ci-nvm
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -78,7 +77,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install --yes libportaudio2
       - uses: ./.github/actions/python
       - name: Bind the installed Node runtime
-        run: uv run --no-sync python scripts/ci/prepare_node.py
+        env:
+          NVM_DIR: ${{ runner.temp }}/ci-nvm
+        run: |
+          uv run --no-sync python scripts/ci/prepare_node.py
+          echo "NVM_DIR=$NVM_DIR" >> "$GITHUB_ENV"
       - name: Run the public suite and verifier protocol tests
         run: uv run --no-sync python scripts/ci/run_tests.py portable
       - name: Retain test results
@@ -125,7 +128,6 @@ jobs:
     env:
       LOCAL_AGENT_TEST_DATABASE_URL: postgresql://postgres@127.0.0.1:5433/local_agent
       LOCAL_AGENT_RUN_POSTGRES_INTEGRATION: "1"
-      NVM_DIR: ${{ runner.temp }}/ci-nvm
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_ANALYTICS: "1"
     steps:
@@ -137,7 +139,11 @@ jobs:
           node-version-file: .node-version
       - uses: ./.github/actions/python
       - name: Bind the installed Node runtime
-        run: uv run --no-sync python scripts/ci/prepare_node.py
+        env:
+          NVM_DIR: ${{ runner.temp }}/ci-nvm
+        run: |
+          uv run --no-sync python scripts/ci/prepare_node.py
+          echo "NVM_DIR=$NVM_DIR" >> "$GITHUB_ENV"
       - name: Start an ephemeral PostgreSQL 18 cluster
         shell: bash
         run: |
