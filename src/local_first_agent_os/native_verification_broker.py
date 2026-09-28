@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import ctypes
+import errno
 import hashlib
 import json
 import math
@@ -27,7 +28,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 from typing import BinaryIO, Literal, cast
 
 from .constants import PROCESS_CANCELED_EXIT_CODE, PROCESS_TIMEOUT_EXIT_CODE
@@ -45,6 +46,7 @@ BROKER_ENV = "LOCAL_AGENT_VERIFICATION_NATIVE_BROKER"
 _MAX_REQUEST_BYTES = 65536
 _MAX_CONCURRENT_CHILDREN = 4
 _POLL_SECONDS = 0.05
+_GROUP_REAP_TIMEOUT_SECONDS = 0.25
 _REQUEST_TIMEOUT_SECONDS = 0.5
 _SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 # Apple SDK sys/un.h: these native socket options are absent from Python's constants.
@@ -165,6 +167,27 @@ class _OwnedProcess:
     policy: SeatbeltPolicy
     kind: Literal["gate", "native", "metadata"]
     parent: _OwnedProcess | None = None
+
+
+def _signal_process_group(process: subprocess.Popen[bytes], value: signal.Signals) -> None:
+    """Require an accepted group signal or group absence, including Darwin zombies."""
+    deadline = monotonic() + _GROUP_REAP_TIMEOUT_SECONDS
+    while True:
+        try:
+            os.killpg(process.pid, value)
+            return
+        except ProcessLookupError:
+            return
+        except PermissionError as error:
+            # Darwin excludes zombies when finding signalable group members and can
+            # return EPERM for a zombie-only group. Reap only our proven-exited child;
+            # its exit alone never proves that the rest of its group was cleaned up.
+            if error.errno != errno.EPERM or sys.platform != "darwin" or process.poll() is None:
+                raise
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise
+            sleep(min(_POLL_SECONDS, remaining))
 
 
 def broker_command(
@@ -370,8 +393,7 @@ class NativeVerificationBroker:
                 process.send_signal(signal.SIGKILL)
             process.wait(timeout=20)
         else:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+            _signal_process_group(process, signal.SIGKILL)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 process.wait(timeout=1)
             for stream in (process.stdout, process.stderr):
@@ -747,7 +769,7 @@ class NativeVerificationBroker:
             if isinstance(owned.process, UidProcess):
                 owned.process.send_signal(value)
             else:
-                os.killpg(owned.process.pid, value)
+                _signal_process_group(owned.process, value)
 
     def _control(self, connection: socket.socket, owned: _OwnedProcess) -> None:
         message = bytearray()
