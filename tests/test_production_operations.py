@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import plistlib
+import re
 import subprocess
 from collections.abc import Mapping
 from pathlib import Path
@@ -118,12 +119,49 @@ def test_bootstrap_inputs_are_immutable() -> None:
 
 @pytest.mark.skipif(
     not (ROOT / ".github/workflows/ci.yml").exists(),
-    reason="the private repository owns this CI workflow; public bootstrap checks still run",
+    reason="this snapshot has no CI workflow; bootstrap checks still run",
 )
 def test_configured_ci_actions_are_immutable() -> None:
-    workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    for line in workflow.splitlines():
-        if "uses:" in line:
-            reference = line.split("@", 1)[1].split()[0]
-            assert len(reference) == 40
-            assert all(character in "0123456789abcdef" for character in reference)
+    _assert_action_pins(ROOT / ".github/workflows/ci.yml", ROOT, set())
+
+
+def _assert_action_pins(path: Path, root: Path, inspected: set[Path]) -> None:
+    path = path.resolve(strict=True)
+    assert path.is_relative_to(root.resolve()), "local action escapes the checkout"
+    if path in inspected:
+        return
+    inspected.add(path)
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "uses":
+                    assert isinstance(child, str), "action reference must be literal text"
+                    if child.startswith("./"):
+                        candidates = [
+                            root / child / name
+                            for name in ("action.yml", "action.yaml")
+                            if (root / child / name).is_file()
+                        ]
+                        assert len(candidates) == 1, "local action needs one manifest"
+                        _assert_action_pins(candidates[0], root, inspected)
+                    else:
+                        assert re.fullmatch(r"[^\s@]+@[0-9a-f]{40}", child), child
+                else:
+                    visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+@pytest.mark.parametrize("reference", ["actions/checkout@v5", "actions/checkout@main"])
+def test_mutable_action_inside_local_composite_is_rejected(tmp_path: Path, reference: str) -> None:
+    action = tmp_path / "local"
+    action.mkdir()
+    (action / "action.yml").write_text(f"runs:\n  steps:\n    - uses: {reference}\n")
+    workflow = tmp_path / "ci.yml"
+    workflow.write_text("jobs:\n  test:\n    steps:\n      - uses: ./local\n")
+    with pytest.raises(AssertionError, match="actions/checkout"):
+        _assert_action_pins(workflow, tmp_path, set())

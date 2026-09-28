@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  LOCAL_AGENT_USE_DBOS: "false"
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  quality:
+    name: Quality and documentation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .node-version
+      - name: Install the audio import prerequisite
+        run: sudo apt-get update && sudo apt-get install --yes libportaudio2
+      - uses: ./.github/actions/python
+      - name: Lint, format and type checks
+        run: |
+          uv run --no-sync ruff check
+          uv run --no-sync ruff format --check
+          uv run --no-sync pyright
+      - name: Generated contracts and documentation
+        run: |
+          uv run --no-sync python scripts/dump_openapi.py --check
+          uv run --no-sync python scripts/dump_config_reference.py --check
+          uv run --no-sync python scripts/ci/check_readme.py
+          uv run --no-sync python -m pytest --noconftest -q scripts/ci/tests tests/test_traveling_document_links.py tests/test_onboarding_prompts.py
+
+  backend:
+    name: PostgreSQL test suite (${{ matrix.shard }})
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    env:
+      LOCAL_AGENT_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/local_agent
+      LOCAL_AGENT_RUN_POSTGRES_INTEGRATION: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .node-version
+      - uses: ./.github/actions/python
+      - name: Bind the installed Node runtime
+        env:
+          NVM_DIR: ${{ runner.temp }}/ci-nvm
+        run: |
+          uv run --no-sync python scripts/ci/prepare_node.py
+          echo "NVM_DIR=$NVM_DIR" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/postgres
+        with:
+          major: "16"
+          pgvector: "true"
+      - name: Install the browser test runtime
+        run: uv run --no-sync playwright install chromium
+      - name: Run the public suite and verifier protocol tests
+        run: uv run --no-sync python scripts/ci/run_tests.py portable --shard-index ${{ matrix.shard }} --shard-count 4
+      - name: Stop the test cluster
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/ci-postgres/postmaster.pid" ]]; then
+            "$CI_PG_BIN/pg_ctl" -D "$RUNNER_TEMP/ci-postgres" -m immediate -w stop
+          fi
+      - name: Retain test results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: postgres-test-results-${{ matrix.shard }}
+          path: artifacts/*.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  frontend:
+    name: Frontend (${{ matrix.project }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [web, landing_page_website]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: ${{ matrix.project }}/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci --prefix "${{ matrix.project }}"
+      - name: Check dashboard lint and generated API types
+        if: matrix.project == 'web'
+        run: |
+          npm run lint --prefix web
+          npm run gen:api --prefix web
+          git diff --exit-code -- web/src/api-types.ts
+      - name: Build
+        run: npm run build --prefix "${{ matrix.project }}"
+
+  native:
+    name: macOS containment
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      LOCAL_AGENT_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5433/local_agent
+      LOCAL_AGENT_RUN_POSTGRES_INTEGRATION: "1"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: .node-version
+      - uses: ./.github/actions/python
+      - name: Bind the installed Node runtime
+        env:
+          NVM_DIR: ${{ runner.temp }}/ci-nvm
+        run: |
+          uv run --no-sync python scripts/ci/prepare_node.py
+          echo "NVM_DIR=$NVM_DIR" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/postgres
+        with:
+          major: "18"
+      - name: Prove native containment without provider accounts
+        run: uv run --no-sync python scripts/ci/run_tests.py native
+      - name: Stop the test cluster
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/ci-postgres/postmaster.pid" ]]; then
+            "$CI_PG_BIN/pg_ctl" -D "$RUNNER_TEMP/ci-postgres" -m immediate -w stop
+          fi
+      - name: Retain native test results
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: macos-containment-results
+          path: artifacts/*.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  gate:
+    name: CI gate
+    if: always()
+    needs: [quality, backend, frontend, native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every verification group to pass
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          NATIVE_RESULT: ${{ needs.native.result }}
+        run: |
+          for result in "$QUALITY_RESULT" "$BACKEND_RESULT" "$FRONTEND_RESULT" "$NATIVE_RESULT"; do
+            if [[ "$result" != success ]]; then
+              echo "A required verification group did not pass: $result"
+              exit 1
+            fi
+          done

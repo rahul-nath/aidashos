@@ -17,7 +17,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 SOURCE = Path(__file__).with_name("qualify_native.py")
 SPEC = importlib.util.spec_from_file_location("native_qualification", SOURCE)
@@ -310,12 +310,69 @@ canary(sys.argv[2])
 
 
 class QualificationFailures(unittest.TestCase):
-    def test_signature_failure_retains_detail_and_keeps_fixtures_private_and_inert(self):
+    def test_fixture_compile_rejects_an_untrusted_compiler_before_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            helper = SimpleNamespace(root_owned=Mock(side_effect=RuntimeError("untrusted tool")))
+            with (
+                patch.object(qualification.subprocess, "run") as run,
+                self.assertRaisesRegex(RuntimeError, "untrusted tool"),
+            ):
+                qualification.compile_identity_fixture(Path(temporary), helper)
+            run.assert_not_called()
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_fixture_compile_ignores_inherited_build_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            helper = SimpleNamespace(root_owned=Mock())
+
+            def compile_canary(
+                argv: list[str], **options: object
+            ) -> subprocess.CompletedProcess[str]:
+                Path(argv[-2]).write_bytes(b"fixed compiler output")
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            with (
+                patch.dict(os.environ, {"CC": "/untrusted/compiler", "CFLAGS": "untrusted"}),
+                patch.object(qualification.subprocess, "run", side_effect=compile_canary) as run,
+            ):
+                binary = qualification.compile_identity_fixture(directory, helper)
+            self.assertEqual(binary, b"fixed compiler output")
+            argv = run.call_args.args[0]
+            self.assertEqual(argv[0], "/Library/Developer/CommandLineTools/usr/bin/clang")
+            self.assertIn("--no-default-config", argv)
+            self.assertIn("--ld-path=/Library/Developer/CommandLineTools/usr/bin/ld", argv)
+            self.assertEqual(run.call_args.kwargs["input"], qualification._IDENTITY_FIXTURE_SOURCE)
+            self.assertEqual(run.call_args.kwargs["env"], {"PATH": "/usr/bin:/bin"})
+            self.assertIn(call(Path(argv[0])), helper.root_owned.call_args_list)
+            self.assertIn(
+                call(Path("/Library/Developer/CommandLineTools/usr/bin/ld")),
+                helper.root_owned.call_args_list,
+            )
+            self.assertEqual(list(directory.iterdir()), [])
+
+    def test_fixture_compile_failure_keeps_directory_private_and_no_setid_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            helper = SimpleNamespace(STATE=Path(temporary), root_owned=Mock())
+            with (
+                patch.object(
+                    qualification.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 1, "", "compiler canary"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "compile failed: compiler canary"),
+            ):
+                qualification.fixed_files(helper, os.getuid())
+            (directory,) = Path(temporary).iterdir()
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(list(directory.iterdir()), [])
+
+    def test_signature_failure_retains_detail_and_keeps_fixtures_private_and_inert(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             helper = SimpleNamespace(STATE=Path(temporary), root_owned=Mock())
             calls = []
 
-            def signing(argv, **options):
+            def signing(argv: list[str], **options: object) -> subprocess.CompletedProcess[str]:
                 calls.append((argv, options))
                 fails = len(calls) == 5
                 return subprocess.CompletedProcess(
@@ -323,6 +380,7 @@ class QualificationFailures(unittest.TestCase):
                 )
 
             with (
+                patch.object(qualification, "compile_identity_fixture", return_value=b"canary"),
                 patch.object(qualification.subprocess, "run", side_effect=signing),
                 self.assertRaisesRegex(RuntimeError, "signature sign failed: signing canary"),
             ):
@@ -345,7 +403,7 @@ class QualificationFailures(unittest.TestCase):
                 self.assertEqual(options["cwd"], directory)
                 self.assertEqual(options["stdin"], subprocess.DEVNULL)
 
-    def test_fixture_directory_is_traversable_despite_private_umask(self):
+    def test_fixture_directory_is_traversable_despite_private_umask(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             helper = SimpleNamespace(STATE=Path(temporary), root_owned=Mock())
             previous = os.umask(0o077)
@@ -370,6 +428,14 @@ class QualificationFailures(unittest.TestCase):
                     timeout=5,
                 )
                 self.assertEqual(int(result.stdout.strip()), os.geteuid())
+                rejected = subprocess.run(
+                    [str(directory / "ordinary-id"), "-unrecognized"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                self.assertEqual(rejected.returncode, 64)
+                self.assertEqual(rejected.stdout, "")
             finally:
                 qualification.clear_fixture_privileges(directory)
 

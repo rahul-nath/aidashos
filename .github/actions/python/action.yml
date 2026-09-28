@@ -1,0 +1,23 @@
+name: Locked Python environment
+description: Install the repository-pinned uv and Python toolchain and locked development dependencies.
+runs:
+  using: composite
+  steps:
+    - name: Read the reviewed uv version
+      id: uv-version
+      shell: bash
+      run: |
+        version=$(sed -n 's/^UV_VERSION=//p' scripts/toolchain-pins.env)
+        [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+    - name: Set up uv
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7
+      with:
+        version: ${{ steps.uv-version.outputs.version }}
+        enable-cache: true
+        cache-dependency-glob: uv.lock
+    - name: Install Python and locked dependencies
+      shell: bash
+      run: |
+        uv python install
+        uv sync --locked --dev
