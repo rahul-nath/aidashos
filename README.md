@@ -10,14 +10,9 @@
     <a href="https://github.com/rahul-nath/aidashos/issues">Report a bug</a>
   </p>
   <p>
+    <a href="https://github.com/rahul-nath/aidashos/actions/workflows/ci.yml"><img src="https://github.com/rahul-nath/aidashos/actions/workflows/ci.yml/badge.svg?branch=main&amp;event=push" alt="Live CI status for main" /></a>
     <a href="#get-started"><img src="docs/media/readme/platform.svg" alt="Supported platform: macOS" /></a>
     <a href="LICENSE"><img src="docs/media/readme/license.svg" alt="License: AGPL-3.0-or-later" /></a>
-  </p>
-  <p><strong>Snapshot validation · September 12, 2026</strong></p>
-  <p>
-    <a href="#validation"><img src="docs/media/readme/tests.svg" alt="September 12 snapshot: pytest 3,186 passed; 218 skipped" /></a>
-    <a href="#validation"><img src="docs/media/readme/lint.svg" alt="September 12 snapshot: Ruff passed" /></a>
-    <a href="#validation"><img src="docs/media/readme/types.svg" alt="September 12 snapshot: Pyright passed with zero diagnostics" /></a>
   </p>
 </div>
 
@@ -111,9 +106,16 @@ Local models handle smaller decisions; the whole implementation-and-review workf
 
 ## Validation
 
-The green badges describe the **September 12 public snapshot**, published as [`55bde9d`](https://github.com/rahul-nath/aidashos/commit/55bde9d7ad4490c88e606502b54266557f1aa06c).
-They are dated validation results, not live GitHub Actions status.
-The [public release record in PR #8](https://github.com/rahul-nath/aidashos/pull/8) identifies the tested candidate and results.
+The live badge follows [GitHub Actions runs on `main`](https://github.com/rahul-nath/aidashos/actions/workflows/ci.yml?query=branch%3Amain).
+Each run identifies its exact commit, results and logs.
+Pull requests and pushes to `main` run lint, formatting, types, documentation checks, PostgreSQL tests, both frontend builds and a separate macOS containment group.
+All groups must pass the required `CI gate` before merging.
+See [CI scope and reproduction](docs/continuous-integration.md) for the test environments and explicit host-only limits.
+
+<details>
+<summary><strong>Historical validation: September 12, 2026</strong></summary>
+
+The [public release record in PR #8](https://github.com/rahul-nath/aidashos/pull/8) records the tested candidate published as [`55bde9d`](https://github.com/rahul-nath/aidashos/commit/55bde9d7ad4490c88e606502b54266557f1aa06c).
 
 | Check | Recorded result |
 | --- | --- |
@@ -126,6 +128,8 @@ The full contained gate completed within its 3,600-second budget using already-i
 Skipped cases include opt-in host checks and private-repository documentation checks.
 This does not establish a fresh-machine installation or a new live-agent run from a public clone.
 
+</details>
+
 ## Documentation
 
 | I want to… | Start here |
@@ -135,6 +139,7 @@ This does not establish a fresh-machine installation or a new live-agent run fro
 | Understand a complete task | [WorkUnit walkthrough](docs/work_unit_operator_walkthrough.md) · [Example plans](docs/examples) |
 | Inspect work and approvals | [Cockpit runbook](docs/cockpit_e2e_runbook.md) |
 | Configure or understand the runtime | [Configuration](docs/configuration.md) · [Code structure](docs/code_structure.md) |
+| Inspect the merge checks | [CI workflow and test scope](docs/continuous-integration.md) |
 
 ## Status and license
 

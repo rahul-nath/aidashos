@@ -20,6 +20,7 @@ Its SHA-256 is `f42b8ba9308ac3ec6c51ec7c92c8b7003c3bde299af15bff94aa1b55bc64d397
 ## Badges
 
 The SVG badges are local assets with accessible names and no remote image dependency.
-The green badges summarize the September 12, 2026 snapshot validation published in [PR #8](https://github.com/rahul-nath/aidashos/pull/8).
+The retained green SVG badges summarize the September 12, 2026 snapshot validation published in [PR #8](https://github.com/rahul-nath/aidashos/pull/8).
 They do not query GitHub Actions or assert that subsequent commits passed those checks.
-When recording newer validation, update the date, commit, linked evidence and badges together.
+The current README instead uses GitHub's live CI badge for `main`.
+The local platform and license badges remain in use.
